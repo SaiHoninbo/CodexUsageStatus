@@ -44,6 +44,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         floatingHUD = FloatingHUDPanelController(model: model)
+        floatingHUD.onShowDetails = { [weak self] in self?.showPopover() }
+        floatingHUD.onOpenCodex = { [weak self] in self?.openCodex() }
+        floatingHUD.onQuit = { NSApp.terminate(nil) }
         floatingHUD.start()
 
         modelObservation = model.objectWillChange.sink { [weak self] _ in
@@ -63,10 +66,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func togglePopover(_ sender: Any?) {
+        showPopover(toggle: true, sender: sender)
+    }
+
+    private func showPopover(toggle: Bool = false, sender: Any? = nil) {
         guard let button = statusItem.button else { return }
-        if popover.isShown {
+        if toggle && popover.isShown {
             popover.performClose(sender)
         } else {
+            if popover.isShown { popover.performClose(sender) }
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             model.refresh()
         }

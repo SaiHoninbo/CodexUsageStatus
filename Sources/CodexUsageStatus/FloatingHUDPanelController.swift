@@ -65,6 +65,9 @@ private final class DraggableHUDPanel: NSPanel {
 @MainActor
 final class FloatingHUDPanelController: NSObject {
     private let model: UsageViewModel
+    var onShowDetails: (() -> Void)?
+    var onOpenCodex: (() -> Void)?
+    var onQuit: (() -> Void)?
     private var panel: NSPanel?
     private var refreshTimer: Timer?
     private var workspaceObserver: NSObjectProtocol?
@@ -105,7 +108,23 @@ final class FloatingHUDPanelController: NSObject {
                     return
                 }
                 self.pasteAndSubmit(completion: completion)
-            }
+            },
+            showDetails: { [weak self] in self?.onShowDetails?() },
+            openCodex: { [weak self] in self?.onOpenCodex?() },
+            quit: { [weak self] in self?.onQuit?() },
+            resetPosition: { [weak self] in self?.resetPosition() },
+            refresh: { [weak self] in self?.model.refresh() },
+            selectProfile: { [weak self] id in self?.model.selectProfile(id: id) },
+            setAccountScope: { [weak self] scope in self?.model.setAccountScope(scope) },
+            setNotificationsEnabled: { [weak self] enabled in self?.model.setNotificationsEnabled(enabled) },
+            setQuotaRefreshInterval: { [weak self] seconds in self?.model.setQuotaRefreshInterval(seconds) },
+            setAccountRefreshInterval: { [weak self] seconds in self?.model.setGlobalSyncInterval(seconds) },
+            setTokenActivityRefreshInterval: { [weak self] seconds in self?.model.setTokenActivityRefreshInterval(seconds) },
+            setCredentialWatchInterval: { [weak self] seconds in self?.model.setCredentialWatchInterval(seconds) },
+            checkForUpdates: { [weak self] in self?.model.checkForUpdates() },
+            downloadAvailableUpdate: { [weak self] in self?.model.downloadAvailableUpdate() },
+            revealDownloadedUpdate: { [weak self] in self?.model.revealDownloadedUpdate() },
+            openReleasePage: { [weak self] in self?.model.openUpdateReleasePage() }
         )
         let hostingView = NSHostingView(rootView: rootView)
         let newPanel = DraggableHUDPanel(
@@ -641,6 +660,22 @@ private struct CodexFloatingHUDView: View {
     @ObservedObject var layoutState: FloatingHUDLayoutState
     let pasteClipboard: () -> Void
     let pasteAndSubmit: (@escaping (Bool) -> Void) -> Void
+    let showDetails: () -> Void
+    let openCodex: () -> Void
+    let quit: () -> Void
+    let resetPosition: () -> Void
+    let refresh: () -> Void
+    let selectProfile: (UUID) -> Void
+    let setAccountScope: (AccountScope) -> Void
+    let setNotificationsEnabled: (Bool) -> Void
+    let setQuotaRefreshInterval: (Int) -> Void
+    let setAccountRefreshInterval: (Int) -> Void
+    let setTokenActivityRefreshInterval: (Int) -> Void
+    let setCredentialWatchInterval: (Int) -> Void
+    let checkForUpdates: () -> Void
+    let downloadAvailableUpdate: () -> Void
+    let revealDownloadedUpdate: () -> Void
+    let openReleasePage: () -> Void
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var isPasteHovered = false
     @State private var isPasteAndSubmitHovered = false
@@ -781,6 +816,9 @@ private struct CodexFloatingHUDView: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Codex 用量")
         .accessibilityValue("\(model.menuBarTitle)，\(model.dataAgeText)。提供只貼上與貼上並送出按鈕")
+        .contextMenu {
+            contextMenuContent
+        }
         .animation(.easeOut(duration: 0.18), value: decreaseAmount)
         .onAppear {
             trackedProfileID = model.currentProfileID
@@ -806,6 +844,180 @@ private struct CodexFloatingHUDView: View {
                 decreaseAmount = nil
                 decreaseBounce = false
             }
+        }
+    }
+
+    @ViewBuilder
+    private var contextMenuContent: some View {
+        Section {
+            Text(model.currentProfile?.displayName ?? "未識別帳號")
+                .font(.headline)
+            Label(model.menuBarTitle, systemImage: "gauge.with.dots.needle.33percent")
+            Label(contextConnectionText, systemImage: contextConnectionIcon)
+            Divider()
+            Button(action: refresh) {
+                Label("重新整理", systemImage: "arrow.clockwise")
+            }
+            Button(action: showDetails) {
+                Label("開啟詳細面板", systemImage: "rectangle.and.text.magnifyingglass")
+            }
+        }
+
+        Section {
+            Button(action: openCodex) {
+                Label("開啟 Codex", systemImage: "arrow.up.forward.app")
+            }
+            Button(action: resetPosition) {
+                Label("重設 HUD 位置", systemImage: "scope")
+            }
+        }
+
+        Section {
+            Button(action: pasteClipboard) {
+                Label("貼上剪貼簿內容", systemImage: "doc.on.clipboard")
+            }
+            .disabled(!HUDContextMenuPolicy.pasteActionsEnabled(isCodexFocused: layoutState.isCodexFocused))
+
+            Button {
+                guard !isPasteAndSubmitInFlight else { return }
+                isPasteAndSubmitInFlight = true
+                pasteAndSubmit { _ in
+                    isPasteAndSubmitInFlight = false
+                }
+            } label: {
+                Label("貼上並送出", systemImage: "paperplane.fill")
+            }
+            .disabled(
+                isPasteAndSubmitInFlight
+                    || !HUDContextMenuPolicy.pasteActionsEnabled(isCodexFocused: layoutState.isCodexFocused)
+            )
+        }
+
+        Menu {
+            Button {
+                setAccountScope(.current)
+            } label: {
+                Label("目前帳號", systemImage: model.accountScope == .current ? "checkmark" : "person")
+            }
+            Button {
+                setAccountScope(.all)
+            } label: {
+                Label("全部帳號總覽", systemImage: model.accountScope == .all ? "checkmark" : "person.2")
+            }
+
+            if !model.accountProfiles.isEmpty {
+                Divider()
+                ForEach(model.accountProfiles) { profile in
+                    Button {
+                        selectProfile(profile.id)
+                        setAccountScope(.current)
+                    } label: {
+                        Label {
+                            Text(profile.isUnidentified ? "⚠︎ \(profile.displayName)" : profile.displayName)
+                        } icon: {
+                            Image(systemName: profile.id == model.currentProfileID ? "checkmark" : "person")
+                        }
+                    }
+                }
+            }
+
+            Divider()
+            Button(action: showDetails) {
+                Label("管理帳號與登入", systemImage: "person.crop.circle.badge.plus")
+            }
+        } label: {
+            Label("帳號管理", systemImage: "person.2")
+        }
+
+        Menu {
+            Button {
+                setNotificationsEnabled(!model.notificationsEnabled)
+            } label: {
+                Label(
+                    model.notificationsEnabled ? "停用配額通知" : "啟用配額通知",
+                    systemImage: model.notificationsEnabled ? "bell.slash" : "bell"
+                )
+            }
+            Menu("更新頻率") {
+                intervalMenu(
+                    title: "Quota：\(model.quotaRefreshIntervalSeconds) 秒",
+                    options: [30, 60, 120, 300, 600],
+                    selected: model.quotaRefreshIntervalSeconds,
+                    action: setQuotaRefreshInterval
+                )
+                intervalMenu(
+                    title: "帳號身份：\(model.globalSyncIntervalSeconds) 秒",
+                    options: [300, 600, 900, 1800],
+                    selected: model.globalSyncIntervalSeconds,
+                    action: setAccountRefreshInterval
+                )
+                intervalMenu(
+                    title: "Token Activity：\(model.tokenActivityRefreshIntervalSeconds) 秒",
+                    options: [300, 900, 1800, 3600],
+                    selected: model.tokenActivityRefreshIntervalSeconds,
+                    action: setTokenActivityRefreshInterval
+                )
+                intervalMenu(
+                    title: "auth.json 監看：\(model.credentialWatchIntervalSeconds) 秒",
+                    options: [5, 15, 30, 60],
+                    selected: model.credentialWatchIntervalSeconds,
+                    action: setCredentialWatchInterval
+                )
+            }
+            Divider()
+            Button(action: checkForUpdates) {
+                Label("檢查更新", systemImage: "arrow.down.circle")
+            }
+            if let release = model.updateState.release {
+                Button("下載更新 \(release.version)", action: downloadAvailableUpdate)
+                Button("開啟 Release 頁面", action: openReleasePage)
+            }
+            if case .downloaded = model.updateState {
+                Button("在 Finder 顯示已下載更新", action: revealDownloadedUpdate)
+            }
+        } label: {
+            Label("通知與同步", systemImage: "bell.badge")
+        }
+
+        Divider()
+        Button(action: quit) {
+            Label("結束 Codex Usage Status", systemImage: "power")
+        }
+    }
+
+    @ViewBuilder
+    private func intervalMenu(
+        title: String,
+        options: [Int],
+        selected: Int,
+        action: @escaping (Int) -> Void
+    ) -> some View {
+        Menu {
+            ForEach(options, id: \.self) { value in
+                Button {
+                    action(value)
+                } label: {
+                    Label("\(value) 秒", systemImage: value == selected ? "checkmark" : "circle")
+                }
+            }
+        } label: {
+            Text(title)
+        }
+    }
+
+    private var contextConnectionText: String {
+        if model.isStale { return "資料已過期" }
+        return model.connectionState.displayName
+    }
+
+    private var contextConnectionIcon: String {
+        if model.isStale { return "clock.badge.exclamationmark" }
+        switch model.connectionState {
+        case .connected: return "checkmark.circle"
+        case .connecting: return "arrow.triangle.2.circlepath"
+        case .disconnected: return "circle"
+        case .offline: return "wifi.slash"
+        case .error, .stopped: return "exclamationmark.triangle"
         }
     }
 

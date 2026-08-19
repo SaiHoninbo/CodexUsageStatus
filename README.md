@@ -55,6 +55,7 @@ Notification permission is optional. Quota and token activity continue to work i
 - Per-account quota and aggregate token activity views
 - HUD placement that follows the Codex window across displays
 - Clipboard-only and paste-and-submit controls
+- A native right-click HUD menu for refresh, account scope, sync cadence, clipboard actions, update checks, and HUD reset
 - Update checks for new GitHub Releases
 
 The menu-bar title stays focused on the active account's quota, for example `Codex 78%`. Token activity and reset-credit details remain in the popover instead of replacing the quota summary.
@@ -85,15 +86,15 @@ The updater does **not** silently overwrite or replace a running application. Th
 
 The updater expects a GitHub Release with:
 
-- A semantic-version tag such as `v2.4.12`
+- A semantic-version tag such as `v2.4.13`
 - An asset named exactly `CodexUsageStatus.app.zip`
 - The signed app bundle inside the ZIP
 - No `._*`, `__MACOSX`, source, test, auth, token, or history files
 
-For the current `2.4.12 / build 32` package, the verified ZIP SHA-256 is:
+For the current `2.4.13 / build 33` package, the verified ZIP SHA-256 is:
 
 ```text
-6dd92de2b9e114dcd0fd02237879a456a138fda234a7b4dc22235fb37a916e39
+951982b76b169af6dec439e12cfd6635f112590eda398cefa89f5a176eee757a
 ```
 
 If there is no GitHub Release yet, the updater correctly reports that no formal release is available; committing a ZIP to `main` alone does not create a release update.

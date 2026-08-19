@@ -42,7 +42,8 @@ struct CodexUsageStatusTests {
             ("unknown profile is marked", testUnknownProfileIsMarked),
             ("managed profile has isolated CODEX_HOME", testManagedProfileHasIsolatedCodexHome),
             ("managed profile imports auth atomically", testManagedProfileImportsAuth),
-            ("update version comparison", testUpdateVersionComparison)
+            ("update version comparison", testUpdateVersionComparison),
+            ("HUD context menu policy", testHUDContextMenuPolicy)
         ]
 
         var failures = 0
@@ -659,6 +660,18 @@ struct CodexUsageStatusTests {
         try expect(AppVersionComparator.isNewer("2.5", than: "2.4.99"), "minor version should compare newer")
         try expect(!AppVersionComparator.isNewer("2.4.11", than: "2.4.11"), "same version is not newer")
         try expect(!AppVersionComparator.isNewer("2.4.10", than: "2.4.11"), "older version is not newer")
+    }
+
+    private static func testHUDContextMenuPolicy() throws {
+        let actions = HUDContextMenuPolicy.sections.flatMap { $0 }
+        try expect(actions.contains(.refresh) && actions.contains(.showDetails), "status actions are present")
+        try expect(actions.contains(.openCodex) && actions.contains(.resetPosition), "Codex actions are present")
+        try expect(actions.contains(.paste) && actions.contains(.pasteAndSubmit), "clipboard actions are distinct")
+        try expect(actions.contains(.currentAccount) && actions.contains(.allAccounts) && actions.contains(.manageAccounts), "account actions are present")
+        try expect(actions.contains(.checkForUpdates) && actions.contains(.quit), "update and quit actions are present")
+        try expect(HUDContextMenuPolicy.pasteActionsEnabled(isCodexFocused: true), "focused paste is enabled")
+        try expect(!HUDContextMenuPolicy.pasteActionsEnabled(isCodexFocused: false), "unfocused paste is disabled")
+        try expect(HUDContextMenuPolicy.sections.last == [.quit], "quit is isolated at the bottom")
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {

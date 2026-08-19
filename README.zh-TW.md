@@ -59,6 +59,7 @@ Codex Usage Status 是 macOS 選單列用量 HUD，用來監控本機 Codex App 
 - 各帳號獨立 quota 與 Token Activity 總覽
 - 跨螢幕跟隨 Codex 視窗的 HUD 位置
 - 「只貼上」與「貼上並送出」按鈕
+- HUD 任意位置按右鍵可開啟原生操作選單（重新整理、帳號範圍、更新頻率、剪貼簿、更新檢查與位置重設）
 - GitHub Releases 更新檢查
 
 選單列主文字固定以目前作用中帳號的 quota 為主，例如 `Codex 78%`。Token Activity 與 reset credit 詳情會留在 popover，不會取代最重要的 quota 摘要。
@@ -89,15 +90,15 @@ Updater **不會**在背景靜默覆蓋或替換正在執行的 App。因為目�
 
 Updater 預期 GitHub Release 具備：
 
-- Semantic-version tag，例如 `v2.4.12`
+- Semantic-version tag，例如 `v2.4.13`
 - 名稱完全一致的 asset：`CodexUsageStatus.app.zip`
 - ZIP 內包含已簽章的 App bundle
 - 不包含 `._*`、`__MACOSX`、source、tests、auth、token 或 history 檔案
 
-目前 `2.4.12 / build 32` 安裝包的已驗證 SHA-256：
+目前 `2.4.13 / build 33` 安裝包的已驗證 SHA-256：
 
 ```text
-6dd92de2b9e114dcd0fd02237879a456a138fda234a7b4dc22235fb37a916e39
+951982b76b169af6dec439e12cfd6635f112590eda398cefa89f5a176eee757a
 ```
 
 如果 GitHub 尚未建立正式 Release，Updater 會正確顯示目前沒有可用的正式版本；只把 ZIP 提交到 `main` 並不會自動建立 Release 更新。
