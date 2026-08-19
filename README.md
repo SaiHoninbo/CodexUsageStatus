@@ -1,5 +1,7 @@
 # Codex Usage Status
 
+[繁體中文](README.zh-TW.md) · **English**
+
 Codex Usage Status is a macOS menu-bar HUD for monitoring the quota reported by the local Codex App Server. It keeps the quota summary visible while you work in Codex, without modifying the Codex window or calling private network endpoints.
 
 ## Download
