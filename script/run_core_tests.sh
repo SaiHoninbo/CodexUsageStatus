@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BUILD_DIR="$ROOT_DIR/.build/core-tests"
+mkdir -p "$BUILD_DIR"
+
+swiftc -parse-as-library \
+  -module-cache-path "$BUILD_DIR/module-cache" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/Models.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/JSONRPC.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/HistoryStore.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/TokenActivityStore.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/AccountModels.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/ProfileStore.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/ThresholdPolicy.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/HUDPlacementPolicy.swift" \
+  "$ROOT_DIR/Tests/CodexUsageStatusTests/TestRunner.swift" \
+  -o "$BUILD_DIR/CodexUsageStatusTests"
+
+"$BUILD_DIR/CodexUsageStatusTests"

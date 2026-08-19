@@ -1,0 +1,659 @@
+import Foundation
+import CoreGraphics
+
+enum HarnessError: Error, CustomStringConvertible {
+    case assertion(String)
+    case unwrap(String)
+
+    var description: String {
+        switch self {
+        case .assertion(let message): return message
+        case .unwrap(let message): return "Expected value: \(message)"
+        }
+    }
+}
+
+@main
+struct CodexUsageStatusTests {
+    static func main() {
+        let tests: [(String, () throws -> Void)] = [
+            ("full snapshot prefers codex bucket", testFullSnapshotPrefersCodexBucket),
+            ("empty codex bucket falls back", testEmptyCodexBucketFallsBack),
+            ("sparse patch preserves metadata", testSparsePatchPreservesMetadata),
+            ("percentages clamp", testPercentagesClamp),
+            ("JSONL request framing", testJSONLRequestFraming),
+            ("JSONL partial chunks", testJSONLPartialChunks),
+            ("history retention and dedupe", testHistoryRetentionAndDedupe),
+            ("history round trip", testHistoryRoundTrip),
+            ("corrupt history preserves memory", testCorruptHistoryPreservesMemory),
+            ("threshold policy boundaries", testThresholdPolicyBoundaries),
+            ("HUD warning and decrease policy", testHUDWarningAndDecreasePolicy),
+            ("HUD placement and adaptive anchors", testHUDPlacementAndAdaptiveAnchors),
+            ("token activity decoding", testTokenActivityDecoding),
+            ("token activity null fields", testTokenActivityNullFields),
+            ("token activity store replacement and retention", testTokenActivityStoreReplacementAndRetention),
+            ("corrupt token activity preserves memory", testCorruptTokenActivityPreservesMemory),
+            ("reset credit decoding and sparse preservation", testResetCreditDecoding),
+            ("reset credit consume request", testResetCreditConsumeRequest),
+            ("account health decoding", testAccountHealthDecoding),
+            ("turn activity event decoding", testTurnActivityDecoding),
+            ("account profiles isolate email", testAccountProfilesIsolateEmail),
+            ("account read disables refresh token", testAccountReadDisablesRefreshToken),
+            ("unknown profile is marked", testUnknownProfileIsMarked),
+            ("managed profile has isolated CODEX_HOME", testManagedProfileHasIsolatedCodexHome),
+            ("managed profile imports auth atomically", testManagedProfileImportsAuth)
+        ]
+
+        var failures = 0
+        for (name, test) in tests {
+            do {
+                try test()
+                print("PASS \(name)")
+            } catch {
+                failures += 1
+                print("FAIL \(name): \(error)")
+            }
+        }
+        print("\(tests.count - failures)/\(tests.count) tests passed")
+        if failures > 0 { exit(1) }
+    }
+
+    private static func testFullSnapshotPrefersCodexBucket() throws {
+        let result: [String: Any] = [
+            "rateLimits": [
+                "limitId": "legacy",
+                "limitName": "Legacy",
+                "planType": "pro",
+                "primary": ["usedPercent": 40, "resetsAt": 100, "windowDurationMins": 60]
+            ],
+            "rateLimitsByLimitId": [
+                "codex": [
+                    "limitId": "codex",
+                    "limitName": "Codex",
+                    "primary": ["usedPercent": 25, "resetsAt": 200, "windowDurationMins": 15],
+                    "secondary": ["usedPercent": 60, "resetsAt": 300, "windowDurationMins": 10080]
+                ]
+            ]
+        ]
+        let snapshot = try UsageDataCodec.decodeFullSnapshot(from: result)
+        try expect(snapshot.limitId == "codex", "codex bucket should win")
+        try expect(snapshot.limitName == "Codex", "codex limit name should win")
+        try expect(snapshot.planType == "pro", "legacy plan metadata should be retained")
+        try expect(snapshot.primary?.usedPercent == 25, "primary used percent")
+        try expect(snapshot.primary?.remainingPercent == 75, "primary remaining percent")
+        try expect(snapshot.secondary?.usedPercent == 60, "secondary used percent")
+    }
+
+    private static func testEmptyCodexBucketFallsBack() throws {
+        let result: [String: Any] = [
+            "rateLimits": [
+                "limitId": "codex",
+                "primary": ["usedPercent": 12]
+            ],
+            "rateLimitsByLimitId": ["codex": [:]]
+        ]
+        let snapshot = try UsageDataCodec.decodeFullSnapshot(from: result)
+        try expect(snapshot.primary?.usedPercent == 12, "legacy primary should be used")
+        try expect(snapshot.primaryRemainingPercent == 88, "fallback remaining percent")
+    }
+
+    private static func testSparsePatchPreservesMetadata() throws {
+        let full: [String: Any] = [
+            "rateLimits": [
+                "limitId": "codex",
+                "limitName": "Codex",
+                "planType": "pro",
+                "primary": ["usedPercent": 25, "resetsAt": 100, "windowDurationMins": 15],
+                "secondary": ["usedPercent": 40, "resetsAt": 200, "windowDurationMins": 10080],
+                "individualLimit": ["limit": "100", "used": "12", "remainingPercent": 88, "resetsAt": 300],
+                "spendControlReached": false
+            ]
+        ]
+        let current = try UsageDataCodec.decodeFullSnapshot(from: full)
+        let patch = try UsageDataCodec.decodePatch(from: [
+            "rateLimits": [
+                "limitId": "codex",
+                "primary": ["usedPercent": 31],
+                "spendControlReached": NSNull()
+            ]
+        ])
+        guard let merged = patch.applying(to: current) else { throw HarnessError.unwrap("merged snapshot") }
+        try expect(merged.primary?.usedPercent == 31, "primary update")
+        try expect(merged.primary?.resetsAt == 100, "primary reset should persist")
+        try expect(merged.primary?.windowDurationMins == 15, "primary duration should persist")
+        try expect(merged.secondary?.usedPercent == 40, "secondary should persist")
+        try expect(merged.planType == "pro", "plan should persist")
+        try expect(merged.individualLimit?.remainingPercent == 88, "spend control should persist")
+        try expect(merged.spendControlReached == false, "null sparse boolean should not clear")
+    }
+
+    private static func testPercentagesClamp() throws {
+        let result: [String: Any] = [
+            "rateLimits": [
+                "primary": ["usedPercent": 140],
+                "secondary": ["usedPercent": -5],
+                "individualLimit": ["limit": "10", "used": "11", "remainingPercent": -20, "resetsAt": 1]
+            ]
+        ]
+        let snapshot = try UsageDataCodec.decodeFullSnapshot(from: result)
+        try expect(snapshot.primary?.remainingPercent == 0, "primary lower clamp")
+        try expect(snapshot.secondary?.remainingPercent == 100, "secondary upper clamp")
+        try expect(snapshot.individualLimit?.remainingPercent == 0, "spend control lower clamp")
+    }
+
+    private static func testJSONLRequestFraming() throws {
+        let request = try JSONRPCCodec.encodeRequest(id: 7, method: "account/rateLimits/read", params: nil)
+        guard request.last == 0x0A else { throw HarnessError.assertion("request must end in LF") }
+        let object = try JSONSerialization.jsonObject(with: request.dropLast()) as? [String: Any]
+        try expect(object?["id"] as? Int == 7, "request id")
+        try expect(object?["method"] as? String == "account/rateLimits/read", "request method")
+        try expect(object?["jsonrpc"] == nil, "wire should omit jsonrpc")
+    }
+
+    private static func testJSONLPartialChunks() throws {
+        let buffer = JSONLineBuffer()
+        try expect(buffer.append(Data("{\"id\":1".utf8)).isEmpty, "partial line should wait")
+        let lines = buffer.append(Data("}\n{\"id\":2}\n".utf8))
+        try expect(lines.count == 2, "two complete lines")
+        let first = try JSONRPCCodec.decodeLine(lines[0])
+        let second = try JSONRPCCodec.decodeLine(lines[1])
+        try expect(first.id == 1, "first id")
+        try expect(second.id == 2, "second id")
+    }
+
+    private static func testHistoryRetentionAndDedupe() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-history-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = HistoryStore(applicationSupportURL: base)
+        let snapshot = UsageSnapshot(
+            limitId: "codex",
+            limitName: "Codex",
+            planType: "pro",
+            primary: RateLimitWindow(usedPercent: 20, resetsAt: 100, windowDurationMins: 15),
+            secondary: nil,
+            individualLimit: nil,
+            rateLimitReachedType: nil,
+            spendControlReached: nil,
+            receivedAt: Date()
+        )
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        try expect(store.record(snapshot: snapshot, connectionState: .connected, now: now), "first sample")
+        try expect(!store.record(snapshot: snapshot, connectionState: .connected, now: now.addingTimeInterval(60)), "same sample should dedupe")
+        try expect(store.record(snapshot: snapshot, connectionState: .connected, now: now.addingTimeInterval(301)), "five-minute sample")
+        var resetChanged = snapshot
+        resetChanged.primary = RateLimitWindow(usedPercent: 20, resetsAt: 101, windowDurationMins: 15)
+        try expect(store.record(snapshot: resetChanged, connectionState: .connected, now: now.addingTimeInterval(302)), "reset metadata change should record")
+        try expect(store.samples.count == 3, "dedupe count")
+
+        let old = UsageSnapshot(
+            limitId: "codex",
+            limitName: "Codex",
+            planType: "pro",
+            primary: RateLimitWindow(usedPercent: 25, resetsAt: 90, windowDurationMins: 15),
+            secondary: nil,
+            individualLimit: nil,
+            rateLimitReachedType: nil,
+            spendControlReached: nil,
+            receivedAt: now
+        )
+        let oldTime = now.addingTimeInterval(-31 * 24 * 60 * 60)
+        let purgeStore = HistoryStore(applicationSupportURL: base.appendingPathComponent("purge"))
+        try expect(purgeStore.record(snapshot: old, connectionState: .connected, now: oldTime), "old sample")
+        try expect(purgeStore.record(snapshot: snapshot, connectionState: .connected, now: now), "current sample")
+        try expect(purgeStore.samples.count == 1, "samples older than 30 days should purge")
+    }
+
+    private static func testHistoryRoundTrip() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-history-roundtrip-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = HistoryStore(applicationSupportURL: base)
+        let snapshot = UsageSnapshot(
+            limitId: "codex",
+            limitName: "Codex",
+            planType: "team",
+            primary: RateLimitWindow(usedPercent: 12, resetsAt: 200, windowDurationMins: 60),
+            secondary: RateLimitWindow(usedPercent: 40, resetsAt: 300, windowDurationMins: 10080),
+            individualLimit: nil,
+            rateLimitReachedType: nil,
+            spendControlReached: nil,
+            receivedAt: Date()
+        )
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        _ = store.record(snapshot: snapshot, connectionState: .connected, now: now)
+        let reloaded = HistoryStore(applicationSupportURL: base)
+        try expect(reloaded.samples.count == 1, "round-trip sample count")
+        try expect(reloaded.samples[0].primaryUsedPercent == 12, "round-trip primary")
+        try expect(reloaded.samples[0].secondaryResetsAt == 300, "round-trip reset")
+    }
+
+    private static func testCorruptHistoryPreservesMemory() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-history-corrupt-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = HistoryStore(applicationSupportURL: base)
+        let snapshot = UsageSnapshot(
+            limitId: "codex", limitName: nil, planType: nil,
+            primary: RateLimitWindow(usedPercent: 1, resetsAt: nil, windowDurationMins: nil),
+            secondary: nil, individualLimit: nil, rateLimitReachedType: nil,
+            spendControlReached: nil, receivedAt: Date()
+        )
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        _ = store.record(snapshot: snapshot, connectionState: .connected, now: now)
+        try Data("not-json".utf8).write(to: store.fileURL)
+        store.load(now: now)
+        try expect(store.samples.count == 1, "corrupt file must not clear in-memory data")
+        try expect(store.errorMessage != nil, "corrupt file should expose an error")
+    }
+
+    private static func testThresholdPolicyBoundaries() throws {
+        let first = UsageThresholdPolicy.pendingThresholds(
+            remainingPercent: 20,
+            thresholds: [20, 10],
+            sentThresholds: []
+        )
+        try expect(first == [20], "exact 20% should notify")
+        let crossed = UsageThresholdPolicy.pendingThresholds(
+            remainingPercent: 8,
+            thresholds: [20, 10],
+            sentThresholds: []
+        )
+        try expect(crossed == [10, 20], "a large drop should report both thresholds")
+        let rearmed = UsageThresholdPolicy.pendingThresholds(
+            remainingPercent: 8,
+            thresholds: [20, 10],
+            sentThresholds: [20]
+        )
+        try expect(rearmed == [10], "sent threshold should dedupe")
+    }
+
+    private static func testHUDWarningAndDecreasePolicy() throws {
+        try expect(
+            HUDWarningPolicy.level(remainingPercent: 50, connectionState: .connected, isStale: false) == .normal,
+            "50% should be normal"
+        )
+        try expect(
+            HUDWarningPolicy.level(remainingPercent: 20, connectionState: .connected, isStale: false) == .warning,
+            "20% should be warning"
+        )
+        try expect(
+            HUDWarningPolicy.level(remainingPercent: 19, connectionState: .connected, isStale: false) == .critical,
+            "19% should be critical"
+        )
+        let fullProfile = HUDWarningPolicy.framePulseProfile(remainingPercent: 100, connectionState: .connected, isStale: false)
+        let normalProfile = HUDWarningPolicy.framePulseProfile(remainingPercent: 50, connectionState: .connected, isStale: false)
+        let warningProfile = HUDWarningPolicy.framePulseProfile(remainingPercent: 49, connectionState: .connected, isStale: false)
+        let criticalProfile = HUDWarningPolicy.framePulseProfile(remainingPercent: 19, connectionState: .connected, isStale: false)
+        let severeProfile = HUDWarningPolicy.framePulseProfile(remainingPercent: 9, connectionState: .connected, isStale: false)
+        try expect(fullProfile != nil, "100% should have a live pulse")
+        try expect(normalProfile?.period == 2.3, "50% should use the light pulse")
+        try expect(warningProfile?.period == 1.8, "49% should use the warning pulse")
+        try expect(criticalProfile?.period == 1.45, "19% should use the critical pulse")
+        try expect(severeProfile?.period == 1.1, "9% should use the strongest pulse")
+        try expect(fullProfile?.minOpacity == 0.28 && fullProfile?.maxOpacity == 0.74, "100% should use the faintest frame glow")
+        try expect(severeProfile?.minOpacity == 0.58 && severeProfile?.maxOpacity == 1.0, "9% should use the strongest frame glow")
+        try expect((severeProfile?.period ?? 0) < (fullProfile?.period ?? 0), "lower quota should pulse faster")
+        try expect(
+            HUDWarningPolicy.shouldPulse(remainingPercent: 11, connectionState: .connected, isStale: false),
+            "11% should pulse in the all-range design"
+        )
+        try expect(
+            !HUDWarningPolicy.shouldPulse(remainingPercent: nil, connectionState: .connected, isStale: false),
+            "missing data should not pulse"
+        )
+        try expect(
+            !HUDWarningPolicy.shouldPulse(remainingPercent: 11, connectionState: .offline, isStale: false),
+            "offline data should not pulse"
+        )
+        try expect(
+            !HUDWarningPolicy.shouldPulse(remainingPercent: 11, connectionState: .connected, isStale: true),
+            "stale data should not pulse"
+        )
+        try expect(
+            HUDWarningPolicy.framePulseProfile(remainingPercent: 11, connectionState: .connecting, isStale: false) == nil,
+            "connecting data should not pulse"
+        )
+        try expect(
+            HUDWarningPolicy.decreaseAmount(
+                previous: 12,
+                current: 11,
+                connectionState: .connected,
+                isStale: false,
+                sameProfile: true
+            ) == 1,
+            "12 to 11 should produce -1%"
+        )
+        try expect(
+            HUDWarningPolicy.decreaseAmount(
+                previous: 12,
+                current: 9,
+                connectionState: .connected,
+                isStale: false,
+                sameProfile: true
+            ) == 3,
+            "12 to 9 should produce -3%"
+        )
+        try expect(
+            HUDWarningPolicy.decreaseAmount(
+                previous: 11,
+                current: 12,
+                connectionState: .connected,
+                isStale: false,
+                sameProfile: true
+            ) == nil,
+            "an increase should not produce a decrease"
+        )
+        try expect(
+            HUDWarningPolicy.decreaseAmount(
+                previous: 12,
+                current: 11,
+                connectionState: .offline,
+                isStale: false,
+                sameProfile: true
+            ) == nil,
+            "offline data should not animate"
+        )
+        try expect(
+            HUDWarningPolicy.decreaseAmount(
+                previous: 12,
+                current: 11,
+                connectionState: .connected,
+                isStale: true,
+                sameProfile: true
+            ) == nil,
+            "stale data should not animate"
+        )
+        try expect(
+            HUDWarningPolicy.decreaseAmount(
+                previous: 12,
+                current: 11,
+                connectionState: .connected,
+                isStale: false,
+                sameProfile: false
+            ) == nil,
+            "a profile switch should reset the baseline"
+        )
+    }
+
+    private static func testHUDPlacementAndAdaptiveAnchors() throws {
+        let target = CGRect(x: 100, y: 100, width: 800, height: 600)
+        let bottomHUD = CGRect(x: 580, y: 140, width: 300, height: 52)
+        let topHUD = CGRect(x: 580, y: 620, width: 300, height: 52)
+
+        try expect(
+            HUDPlacementPolicy.placement(targetFrame: target, hudFrame: bottomHUD, previous: nil) == .bottomRight,
+            "HUD below the center line should use the bottom placement"
+        )
+        try expect(
+            HUDPlacementPolicy.placement(targetFrame: target, hudFrame: topHUD, previous: nil) == .topRight,
+            "HUD above the center line should use the top placement"
+        )
+
+        let farHUD = CGRect(x: 400, y: 140, width: 300, height: 52)
+        try expect(
+            HUDPlacementPolicy.placement(targetFrame: target, hudFrame: farHUD, previous: .topRight) == .bottomRight,
+            "HUD more than 80 points from the right edge should use the conservative placement"
+        )
+
+        let centerBandHUD = CGRect(x: 580, y: 382, width: 300, height: 52)
+        try expect(
+            HUDPlacementPolicy.placement(targetFrame: target, hudFrame: centerBandHUD, previous: .topRight) == .topRight,
+            "the center hysteresis band should retain the top placement"
+        )
+        try expect(
+            HUDPlacementPolicy.placement(targetFrame: target, hudFrame: centerBandHUD, previous: .bottomRight) == .bottomRight,
+            "the center hysteresis band should retain the bottom placement"
+        )
+
+        let bottomNewOrigin = HUDPlacementPolicy.resizedOrigin(
+            origin: bottomHUD.origin,
+            targetFrame: target,
+            oldPanelSize: bottomHUD.size,
+            newPanelSize: CGSize(width: 300, height: 46),
+            placement: .bottomRight
+        )
+        try expect(bottomNewOrigin.x == bottomHUD.origin.x, "bottom resize should preserve the right inset")
+        try expect(bottomNewOrigin.y == bottomHUD.origin.y, "bottom resize should preserve the bottom inset")
+
+        let topNewOrigin = HUDPlacementPolicy.resizedOrigin(
+            origin: topHUD.origin,
+            targetFrame: target,
+            oldPanelSize: topHUD.size,
+            newPanelSize: CGSize(width: 300, height: 46),
+            placement: .topRight
+        )
+        try expect(topNewOrigin.x == topHUD.origin.x, "top resize should preserve the right inset")
+        try expect(topNewOrigin.y == 626, "top resize should preserve the top inset")
+
+        let topAnchor = HUDPlacementPolicy.anchor(
+            origin: topHUD.origin,
+            targetFrame: target,
+            panelSize: topHUD.size,
+            placement: .topRight
+        )
+        let restoredTopOrigin = HUDPlacementPolicy.origin(
+            for: topAnchor,
+            targetFrame: target,
+            panelSize: CGSize(width: 300, height: 46)
+        )
+        try expect(restoredTopOrigin == topNewOrigin, "top anchor should round trip through a resize")
+    }
+
+    private static func testTokenActivityDecoding() throws {
+        let result: [String: Any] = [
+            "summary": [
+                "lifetimeTokens": 123_456,
+                "peakDailyTokens": 12_345,
+                "longestRunningTurnSec": 93,
+                "currentStreakDays": 4,
+                "longestStreakDays": 9
+            ],
+            "dailyUsageBuckets": [
+                ["startDate": "2026-08-15", "tokens": 100],
+                ["startDate": "2026-08-16", "tokens": 200]
+            ]
+        ]
+        let snapshot = try TokenActivityCodec.decode(from: result)
+        try expect(snapshot.lifetimeTokens == 123_456, "lifetime token summary")
+        try expect(snapshot.dailyUsageBuckets?.count == 2, "daily bucket count")
+    }
+
+    private static func testTokenActivityNullFields() throws {
+        let snapshot = try TokenActivityCodec.decode(from: [
+            "summary": NSNull(),
+            "dailyUsageBuckets": NSNull(),
+            "unknownField": "ignored"
+        ])
+        try expect(snapshot.lifetimeTokens == nil, "null summary should remain unknown")
+        try expect(snapshot.dailyUsageBuckets == nil, "null buckets should remain unknown")
+    }
+
+    private static func testTokenActivityStoreReplacementAndRetention() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("codex-token-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = TokenActivityStore(applicationSupportURL: base)
+        let formatter = ISO8601DateFormatter()
+        let now = formatter.date(from: "2026-08-16T12:00:00Z")!
+        _ = store.update(incoming: TokenActivitySnapshot(
+            fetchedAt: now,
+            lifetimeTokens: 100,
+            peakDailyTokens: 50,
+            longestRunningTurnSec: nil,
+            currentStreakDays: 1,
+            longestStreakDays: 2,
+            dailyUsageBuckets: [
+                DailyTokenUsage(startDate: "2026-07-10", tokens: 1),
+                DailyTokenUsage(startDate: "2026-08-15", tokens: 10),
+                DailyTokenUsage(startDate: "2026-08-15", tokens: 20)
+            ]
+        ), now: now)
+        _ = store.update(incoming: TokenActivitySnapshot(
+            fetchedAt: now.addingTimeInterval(60),
+            lifetimeTokens: nil,
+            peakDailyTokens: nil,
+            longestRunningTurnSec: 30,
+            currentStreakDays: nil,
+            longestStreakDays: nil,
+            dailyUsageBuckets: [DailyTokenUsage(startDate: "2026-08-15", tokens: 99)]
+        ), now: now)
+        try expect(store.snapshot?.lifetimeTokens == 100, "null summary preserves previous value")
+        try expect(store.snapshot?.dailyUsageBuckets?.count == 1, "same date bucket replaces")
+        try expect(store.snapshot?.dailyUsageBuckets?.first?.tokens == 99, "latest bucket wins")
+    }
+
+    private static func testCorruptTokenActivityPreservesMemory() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("codex-token-corrupt-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = TokenActivityStore(applicationSupportURL: base)
+        let now = Date()
+        _ = store.update(incoming: TokenActivitySnapshot(
+            fetchedAt: now, lifetimeTokens: 5, peakDailyTokens: nil,
+            longestRunningTurnSec: nil, currentStreakDays: nil, longestStreakDays: nil,
+            dailyUsageBuckets: nil
+        ), now: now)
+        try Data("not-json".utf8).write(to: store.fileURL)
+        store.load(now: now)
+        try expect(store.snapshot?.lifetimeTokens == 5, "corrupt token file preserves memory")
+        try expect(store.errorMessage != nil, "corrupt token file reports error")
+    }
+
+    private static func testResetCreditDecoding() throws {
+        let snapshot = try UsageDataCodec.decodeFullSnapshot(from: [
+            "rateLimits": ["limitId": "codex", "primary": ["usedPercent": 10]],
+            "rateLimitResetCredits": [
+                "availableCount": 2,
+                "credits": [[
+                    "id": "credit-1", "resetType": "primary", "status": "available",
+                    "grantedAt": 100, "expiresAt": 200, "title": "Earned", "description": "Test"
+                ]]
+            ]
+        ])
+        try expect(snapshot.rateLimitResetCredits?.availableCount == 2, "available count is authoritative")
+        try expect(snapshot.rateLimitResetCredits?.availableCredits.first?.id == "credit-1", "credit id decoded")
+        let patch = try UsageDataCodec.decodePatch(from: ["rateLimits": ["primary": ["usedPercent": 20]]])
+        let merged = patch.applying(to: snapshot)
+        try expect(merged?.rateLimitResetCredits == snapshot.rateLimitResetCredits, "sparse patch preserves credits")
+        let countOnly = try UsageDataCodec.decodeFullSnapshot(from: [
+            "rateLimits": [:], "rateLimitResetCredits": ["availableCount": 1, "credits": NSNull()]
+        ])
+        try expect(countOnly.rateLimitResetCredits?.credits == nil, "null credits remains unknown")
+    }
+
+    private static func testResetCreditConsumeRequest() throws {
+        let key = UUID().uuidString
+        let request = try JSONRPCCodec.encodeRequest(
+            id: 42,
+            method: "account/rateLimitResetCredit/consume",
+            params: ["idempotencyKey": key, "creditId": "credit-1"]
+        )
+        let object = try JSONSerialization.jsonObject(with: request.dropLast()) as? [String: Any]
+        let params = object?["params"] as? [String: Any]
+        try expect(object?["method"] as? String == "account/rateLimitResetCredit/consume", "consume method")
+        try expect((params?["idempotencyKey"] as? String)?.isEmpty == false, "idempotency key")
+        try expect(params?["creditId"] as? String == "credit-1", "selected credit id")
+    }
+
+    private static func testAccountHealthDecoding() throws {
+        let health = try AccountDataCodec.decode(from: [
+            "requiresOpenaiAuth": true,
+            "account": ["type": "chatgpt", "email": "person@example.com", "planType": "team"]
+        ])
+        try expect(health.identity.accountType == "chatgpt", "account type")
+        try expect(health.identity.email == "person@example.com", "account email")
+        try expect(health.identity.requiresOpenAIAuth, "auth requirement")
+        try expect(AccountDataCodec.merge(health, params: ["authMode": "chatgptManaged"])?.identity.authMode == "chatgptManaged", "sparse auth mode merge")
+    }
+
+    private static func testTurnActivityDecoding() throws {
+        let event = TurnActivityCodec.decodeEvent(method: "turn/started", params: [
+            "threadId": "thread-1",
+            "turn": [
+                "id": "turn-1",
+                "status": "inProgress",
+                "startedAt": 1_700_000_000,
+                "items": [["type": "userMessage", "id": "item-1", "content": [["text": "hello"]]]]
+            ]
+        ])
+        try expect(event?.state == .active, "turn started state")
+        try expect(event?.content == "hello", "turn content")
+        let usage = TurnActivityCodec.decodeTokenUsage(params: [
+            "threadId": "thread-1", "turnId": "turn-1",
+            "tokenUsage": ["total": ["totalTokens": 1234]]
+        ])
+        try expect(usage?.tokenTotal == 1234, "turn token usage")
+    }
+
+    private static func testAccountProfilesIsolateEmail() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("codex-profiles-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = AccountProfileStore(applicationSupportURL: base)
+        let a = store.select(identity: AccountIdentity(accountType: "chatgpt", authMode: "managed", planType: "pro", email: "a@example.com", requiresOpenAIAuth: true))
+        let aAgain = store.select(identity: AccountIdentity(accountType: "chatgpt", authMode: "managed", planType: "team", email: "a@example.com", requiresOpenAIAuth: true))
+        let b = store.select(identity: AccountIdentity(accountType: "chatgpt", authMode: "managed", planType: "pro", email: "b@example.com", requiresOpenAIAuth: true))
+        try expect(a.profile.id == aAgain.profile.id, "same email returns same profile")
+        try expect(a.profile.id != b.profile.id, "different email gets different profile")
+        let data = try Data(contentsOf: store.indexURL)
+        let text = String(data: data, encoding: .utf8) ?? ""
+        try expect(!text.contains("a@example.com") && !text.contains("b@example.com"), "raw email is not persisted")
+    }
+
+    private static func testAccountReadDisablesRefreshToken() throws {
+        let request = try JSONRPCCodec.encodeRequest(
+            id: 9,
+            method: "account/read",
+            params: ["refreshToken": false]
+        )
+        let object = try JSONSerialization.jsonObject(with: request.dropLast()) as? [String: Any]
+        let params = object?["params"] as? [String: Any]
+        try expect(object?["method"] as? String == "account/read", "account read method")
+        try expect(params?["refreshToken"] as? Bool == false, "account read must not refresh credentials")
+    }
+
+    private static func testUnknownProfileIsMarked() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("codex-unknown-profile-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = AccountProfileStore(applicationSupportURL: base)
+        let selection = store.select(identity: AccountIdentity(accountType: "apiKey", authMode: "apiKey", planType: nil, email: nil, requiresOpenAIAuth: false))
+        try expect(selection.profile.isUnidentified, "missing email must be marked unidentified")
+        try expect(selection.profile.displayName == "未識別帳號", "missing email display name")
+        let switched = store.select(identity: AccountIdentity(accountType: "apiKey", authMode: "apiKey", planType: nil, email: nil, requiresOpenAIAuth: false), forceNewUnidentified: true)
+        try expect(switched.profile.id != selection.profile.id, "explicit account boundary gets a new unidentified profile")
+        let periodic = store.select(identity: AccountIdentity(accountType: "apiKey", authMode: "apiKey", planType: nil, email: nil, requiresOpenAIAuth: false))
+        try expect(periodic.profile.id == switched.profile.id, "periodic refresh stays on the manually selected unidentified profile")
+        let reloaded = AccountProfileStore(applicationSupportURL: base)
+        let afterRelaunch = reloaded.select(identity: AccountIdentity(accountType: "apiKey", authMode: "apiKey", planType: nil, email: nil, requiresOpenAIAuth: false))
+        try expect(afterRelaunch.profile.id == switched.profile.id, "relaunch prefers the most recently used unidentified profile")
+    }
+
+    private static func testManagedProfileHasIsolatedCodexHome() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("codex-profile-home-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = AccountProfileStore(applicationSupportURL: base)
+        let first = store.createManagedProfile(displayName: "A")
+        let second = store.createManagedProfile(displayName: "B")
+        try expect(store.codexHomeURL(for: first) != store.codexHomeURL(for: second), "managed profiles need independent CODEX_HOME")
+        try expect(first.isManaged && second.isManaged, "manual managed profiles should be marked managed")
+    }
+
+    private static func testManagedProfileImportsAuth() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("codex-profile-import-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let source = base.appendingPathComponent("source", isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        let auth = source.appendingPathComponent("auth.json")
+        try Data("{\"auth_mode\":\"chatgpt\",\"refresh_token\":\"redacted-fixture\"}".utf8).write(to: auth)
+        let store = AccountProfileStore(applicationSupportURL: base.appendingPathComponent("store"))
+        let profile = store.createManagedProfile(displayName: "Imported")
+        try store.importCodexHome(from: source, into: profile)
+        try expect(store.hasCredentials(for: profile), "import should install auth.json")
+        let persisted = try String(contentsOf: store.credentialsURL(for: profile), encoding: .utf8)
+        try expect(persisted.contains("redacted-fixture"), "fixture auth should be copied to isolated home")
+        let attributes = try FileManager.default.attributesOfItem(atPath: store.credentialsURL(for: profile).path)
+        try expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600, "auth.json should be owner-only")
+    }
+
+    private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+        guard condition() else { throw HarnessError.assertion(message) }
+    }
+}
