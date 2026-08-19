@@ -209,7 +209,12 @@ final class FloatingHUDPanelController: NSObject {
 
     private func refreshVisibility() {
         guard let panel else { return }
-        guard model.floatingHUDEnabled else {
+        // A HUD without a confirmed primary percentage is only a partial
+        // transport state (for example while account switching, reconnecting,
+        // or before the first rate-limit read). Never leave that shell on
+        // screen with only "reset time unknown" and action buttons.
+        guard model.floatingHUDEnabled,
+              model.snapshot?.primaryRemainingPercent != nil else {
             layoutState.isCodexFocused = false
             panel.orderOut(nil)
             return
@@ -647,7 +652,13 @@ private struct CodexFloatingHUDView: View {
     @State private var decreaseAnimationID = 0
 
     var body: some View {
-        if let profile = HUDWarningPolicy.framePulseProfile(
+        if model.snapshot?.primaryRemainingPercent == nil {
+            // Keep the host at its normal size while the controller orders it
+            // out. This prevents a one-frame partial HUD from being painted
+            // during an account/focus transition.
+            Color.clear
+                .frame(width: layoutState.size.width, height: layoutState.size.height)
+        } else if let profile = HUDWarningPolicy.framePulseProfile(
             remainingPercent: model.snapshot?.primaryRemainingPercent,
             connectionState: model.connectionState,
             isStale: model.isStale
