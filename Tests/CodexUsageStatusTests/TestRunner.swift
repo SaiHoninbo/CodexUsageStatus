@@ -41,7 +41,8 @@ struct CodexUsageStatusTests {
             ("account read disables refresh token", testAccountReadDisablesRefreshToken),
             ("unknown profile is marked", testUnknownProfileIsMarked),
             ("managed profile has isolated CODEX_HOME", testManagedProfileHasIsolatedCodexHome),
-            ("managed profile imports auth atomically", testManagedProfileImportsAuth)
+            ("managed profile imports auth atomically", testManagedProfileImportsAuth),
+            ("update version comparison", testUpdateVersionComparison)
         ]
 
         var failures = 0
@@ -651,6 +652,13 @@ struct CodexUsageStatusTests {
         try expect(persisted.contains("redacted-fixture"), "fixture auth should be copied to isolated home")
         let attributes = try FileManager.default.attributesOfItem(atPath: store.credentialsURL(for: profile).path)
         try expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600, "auth.json should be owner-only")
+    }
+
+    private static func testUpdateVersionComparison() throws {
+        try expect(AppVersionComparator.isNewer("v2.4.12", than: "2.4.11"), "v tag should compare newer")
+        try expect(AppVersionComparator.isNewer("2.5", than: "2.4.99"), "minor version should compare newer")
+        try expect(!AppVersionComparator.isNewer("2.4.11", than: "2.4.11"), "same version is not newer")
+        try expect(!AppVersionComparator.isNewer("2.4.10", than: "2.4.11"), "older version is not newer")
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {

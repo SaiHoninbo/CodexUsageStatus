@@ -45,6 +45,7 @@ final class UsageViewModel: ObservableObject {
     @Published private(set) var showTurnContentInNotifications: Bool
     @Published private(set) var notifyOnAccountSwitch: Bool
     @Published private(set) var floatingHUDEnabled: Bool
+    @Published private(set) var updateState: AppUpdateState = .idle
     @Published var historyRange: HistoryRange = .week
     @Published var tokenActivityRange: TokenActivityRange = .week
     @Published var accountScope: AccountScope = .current
@@ -65,8 +66,11 @@ final class UsageViewModel: ObservableObject {
     private let legacyTokenActivityURL: URL
     private let notificationService = UsageNotificationService()
     private let turnNotificationService = TurnNotificationService()
+    private let updateService = AppUpdateService()
+    private let updateNotificationService = AppUpdateNotificationService()
     private let defaults = UserDefaults.standard
     private var displayTimer: Timer?
+    private var updateCheckTimer: Timer?
     private var pendingUnidentifiedProfileBoundary = false
     private var defaultClientEnabled = true
     private let maxConcurrentWorkers = 2
@@ -257,6 +261,7 @@ final class UsageViewModel: ObservableObject {
 
     deinit {
         displayTimer?.invalidate()
+        updateCheckTimer?.invalidate()
     }
 
     func start() {
@@ -269,6 +274,8 @@ final class UsageViewModel: ObservableObject {
         tokenActivity = tokenActivityStore.snapshot
         tokenActivityErrorMessage = tokenActivityStore.errorMessage
         startDisplayTimer()
+        checkForUpdates()
+        startUpdateCheckTimer()
         if let profile = currentProfile, profile.isManaged {
             defaultClientEnabled = false
             ensureManagedWorker(for: profile)
@@ -285,6 +292,8 @@ final class UsageViewModel: ObservableObject {
         defaultClientEnabled = false
         displayTimer?.invalidate()
         displayTimer = nil
+        updateCheckTimer?.invalidate()
+        updateCheckTimer = nil
         client.stop()
         for worker in managedWorkers.values { worker.stop() }
         managedWorkers.removeAll()
@@ -301,6 +310,35 @@ final class UsageViewModel: ObservableObject {
 
     func refreshAccount() {
         activeClient.refreshAccount()
+    }
+
+    func checkForUpdates() {
+        updateService.check { [weak self] state in
+            guard let self else { return }
+            self.updateState = state
+            if case .available(let release) = state {
+                self.updateNotificationService.notifyIfNeeded(for: release, soundEnabled: self.notificationSoundEnabled)
+            }
+        }
+    }
+
+    func downloadAvailableUpdate() {
+        updateService.download { [weak self] state in
+            self?.updateState = state
+        }
+    }
+
+    func cancelUpdateDownload() {
+        updateService.cancelDownload()
+        updateState = updateService.state
+    }
+
+    func revealDownloadedUpdate() {
+        updateService.revealDownloadedApp()
+    }
+
+    func openUpdateReleasePage() {
+        updateService.openReleasePage()
     }
 
     func setAccountScope(_ scope: AccountScope) {
@@ -902,6 +940,15 @@ final class UsageViewModel: ObservableObject {
                     self.activeTurn.receivedAt = self.currentDate
                 }
                 self.evaluateTurnNotification(self.activeTurn)
+            }
+        }
+    }
+
+    private func startUpdateCheckTimer() {
+        updateCheckTimer?.invalidate()
+        updateCheckTimer = Timer.scheduledTimer(withTimeInterval: 6 * 60 * 60, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.checkForUpdates()
             }
         }
     }

@@ -19,6 +19,7 @@ struct UsagePopoverView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 header
+                updateSection
                 Divider()
                 accountSelector
                 accountManagementSection
@@ -102,6 +103,125 @@ struct UsagePopoverView: View {
             Label(model.connectionState.displayName, systemImage: connectionIcon)
                 .font(.caption)
                 .foregroundStyle(model.shouldShowOfflineBadge ? Color.secondary : Color.green)
+        }
+    }
+
+    private var updateSection: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Label("軟體更新", systemImage: "arrow.down.circle")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                updateStatusLabel
+            }
+
+            switch model.updateState {
+            case .idle:
+                Text("啟動後會檢查 GitHub Release。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            case .checking:
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("正在檢查 GitHub 更新…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            case .upToDate:
+                Text("目前已是最新版本。")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            case .available(let release):
+                updateReleaseDetails(release, downloadedURL: nil)
+                HStack(spacing: 8) {
+                    Button("下載並驗證") { model.downloadAvailableUpdate() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    Button("開啟 Release") { model.openUpdateReleasePage() }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+            case .downloading(let release):
+                updateReleaseDetails(release, downloadedURL: nil)
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("正在下載並驗證…")
+                        .font(.caption)
+                    Spacer()
+                    Button("取消") { model.cancelUpdateDownload() }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+            case .downloaded(let release, let appURL):
+                updateReleaseDetails(release, downloadedURL: appURL)
+                HStack(spacing: 8) {
+                    Button("在 Finder 顯示") { model.revealDownloadedUpdate() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    Button("開啟 Release") { model.openUpdateReleasePage() }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+                Text("更新檔已通過 SHA-256（若 Release 提供）與 strict code signature 驗證。請先結束目前 App，再用新版取代 /Applications 內的 App；不會在背景靜默覆蓋。")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .error(let message):
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Button("重試") { model.checkForUpdates() }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                    Button("開啟 GitHub") { model.openUpdateReleasePage() }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var updateStatusLabel: some View {
+        switch model.updateState {
+        case .checking, .downloading:
+            Text("處理中").font(.caption2).foregroundStyle(.secondary)
+        case .available:
+            Text("有新版").font(.caption2).foregroundStyle(.blue)
+        case .downloaded:
+            Text("已驗證").font(.caption2).foregroundStyle(.green)
+        case .upToDate:
+            Text("最新").font(.caption2).foregroundStyle(.green)
+        case .error:
+            Text("檢查失敗").font(.caption2).foregroundStyle(.orange)
+        case .idle:
+            EmptyView()
+        }
+    }
+
+    private func updateReleaseDetails(_ release: AppUpdateRelease, downloadedURL: URL?) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("版本 \(release.version)")
+                .font(.caption.weight(.semibold))
+            if let publishedAt = release.publishedAt {
+                Text("發布：\(publishedAt.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if !release.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(release.notes)
+                    .font(.caption2)
+                    .lineLimit(3)
+                    .foregroundStyle(.secondary)
+            }
+            if let downloadedURL {
+                Text("已驗證：\(downloadedURL.deletingLastPathComponent().lastPathComponent)")
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+                    .lineLimit(1)
+            }
         }
     }
 

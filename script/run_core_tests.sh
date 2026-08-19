@@ -15,6 +15,7 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/ProfileStore.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/ThresholdPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDPlacementPolicy.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/AppUpdateService.swift" \
   "$ROOT_DIR/Tests/CodexUsageStatusTests/TestRunner.swift" \
   -o "$BUILD_DIR/CodexUsageStatusTests"
 
