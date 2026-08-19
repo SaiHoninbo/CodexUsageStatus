@@ -23,8 +23,8 @@ private enum FloatingHUDLayout {
 @MainActor
 private final class FloatingHUDLayoutState: ObservableObject {
     @Published var placement: HUDPlacement = .bottomRight
-    /// Keep the HUD visible behind other apps, but soften and disable its
-    /// input controls until Codex is frontmost again.
+    /// The HUD is a Codex-only overlay. This state is also used by the view
+    /// to keep actions disabled during a focus transition.
     @Published var isCodexFocused = true
 
     var size: NSSize { FloatingHUDLayout.size(for: placement) }
@@ -210,29 +210,18 @@ final class FloatingHUDPanelController: NSObject {
     private func refreshVisibility() {
         guard let panel else { return }
         guard model.floatingHUDEnabled else {
+            layoutState.isCodexFocused = false
             panel.orderOut(nil)
             return
         }
 
         let frontmostApplication = NSWorkspace.shared.frontmostApplication
         let codexIsFocused = frontmostApplication.map(isCodexApplication) == true
-        let codexApp: NSRunningApplication?
-        if codexIsFocused {
-            codexApp = frontmostApplication
-        } else if let lastCodexProcessID,
-                  let lastCodexApp = NSRunningApplication(processIdentifier: lastCodexProcessID),
-                  !lastCodexApp.isTerminated {
-            // Keep the HUD attached to the last known Codex window while the
-            // user works in another app. `position` follows window movement
-            // without activating the window.
-            codexApp = lastCodexApp
-        } else {
-            // If the app launches while Codex is already behind another app,
-            // discover its process once instead of waiting for a focus event.
-            codexApp = NSWorkspace.shared.runningApplications.first(where: isCodexApplication)
-        }
-
-        guard let codexApp else {
+        guard codexIsFocused, let codexApp = frontmostApplication else {
+            // Do not leave a floating usage panel over unrelated apps. Keep
+            // the last Codex process/frame in memory so returning to Codex
+            // restores the same relative position without a jump.
+            layoutState.isCodexFocused = false
             panel.orderOut(nil)
             return
         }
@@ -247,9 +236,9 @@ final class FloatingHUDPanelController: NSObject {
             lastPositionedProcessID = nil
         }
         lastCodexProcessID = codexApp.processIdentifier
-        layoutState.isCodexFocused = codexIsFocused
+        layoutState.isCodexFocused = true
         position(panel, beside: codexApp)
-        panel.alphaValue = codexIsFocused ? 1.0 : 0.72
+        panel.alphaValue = 1.0
         panel.orderFrontRegardless()
     }
 
