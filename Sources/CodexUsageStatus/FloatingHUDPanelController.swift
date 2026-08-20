@@ -267,7 +267,13 @@ final class FloatingHUDPanelController: NSObject {
         layoutState.isCodexFocused = true
         position(panel, beside: codexApp)
         panel.alphaValue = 1.0
-        panel.orderFrontRegardless()
+        // Re-ordering the hosting panel while a SwiftUI context menu is open
+        // makes AppKit recalculate the menu anchor and produces a visible
+        // wobble. The panel is already at the floating level, so only bring
+        // it forward when transitioning from hidden to visible.
+        if !panel.isVisible {
+            panel.orderFrontRegardless()
+        }
     }
 
     private func isCodexApplication(_ application: NSRunningApplication) -> Bool {
@@ -693,25 +699,34 @@ private struct CodexFloatingHUDView: View {
     @State private var decreaseAnimationID = 0
 
     var body: some View {
-        if model.snapshot?.primaryRemainingPercent == nil {
-            // Keep the host at its normal size while the controller orders it
-            // out. This prevents a one-frame partial HUD from being painted
-            // during an account/focus transition.
-            Color.clear
-                .frame(width: layoutState.size.width, height: layoutState.size.height)
-        } else if let profile = HUDWarningPolicy.framePulseProfile(
-            remainingPercent: model.snapshot?.primaryRemainingPercent,
-            connectionState: model.connectionState,
-            isStale: model.isStale
-        ), !accessibilityReduceMotion {
-            TimelineView(.periodic(from: .now, by: profile.period / 10.0)) { context in
-                hudContainer(frameOpacity: frameOpacity(at: context.date, profile: profile), glowRadius: profile.glowRadius)
+        // Keep the context-menu host outside the pulse TimelineView. The
+        // timeline intentionally refreshes several times per second for the
+        // breathing border; attaching the menu inside it recreates the
+        // AppKit anchor on every pulse and makes an open menu jitter.
+        ZStack {
+            if model.snapshot?.primaryRemainingPercent == nil {
+                // Keep the host at its normal size while the controller orders it
+                // out. This prevents a one-frame partial HUD from being painted
+                // during an account/focus transition.
+                Color.clear
+                    .frame(width: layoutState.size.width, height: layoutState.size.height)
+            } else if let profile = HUDWarningPolicy.framePulseProfile(
+                remainingPercent: model.snapshot?.primaryRemainingPercent,
+                connectionState: model.connectionState,
+                isStale: model.isStale
+            ), !accessibilityReduceMotion {
+                TimelineView(.periodic(from: .now, by: profile.period / 10.0)) { context in
+                    hudContainer(frameOpacity: frameOpacity(at: context.date, profile: profile), glowRadius: profile.glowRadius)
+                }
+            } else {
+                hudContainer(
+                    frameOpacity: accessibilityReduceMotion && hasLivePrimaryData ? 0.14 : 0,
+                    glowRadius: 0
+                )
             }
-        } else {
-            hudContainer(
-                frameOpacity: accessibilityReduceMotion && hasLivePrimaryData ? 0.14 : 0,
-                glowRadius: 0
-            )
+        }
+        .contextMenu {
+            contextMenuContent
         }
     }
 
@@ -862,9 +877,6 @@ private struct CodexFloatingHUDView: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Codex 用量")
         .accessibilityValue("\(model.menuBarTitle)，\(model.dataAgeText)。提供重新整理、詳細面板、只貼上與貼上並送出按鈕")
-        .contextMenu {
-            contextMenuContent
-        }
         .animation(.easeOut(duration: 0.18), value: decreaseAmount)
         .onAppear {
             trackedProfileID = model.currentProfileID
