@@ -2,3 +2,19 @@
 dist/
 .DS_Store
 .codex/
+
+# Local credentials and runtime data. These files must never be committed.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.mobileprovision
+auth.json
+history.json
+token-activity.json
+profiles.json
+profile-salt
+accounts/
+updates/

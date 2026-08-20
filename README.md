@@ -101,7 +101,9 @@ If there is no GitHub Release yet, the updater correctly reports that no formal 
 
 ## Building from source
 
-The canonical project path used for local development is:
+Use the repository root where you cloned this project. The build and packaging
+commands below use paths relative to that root; no machine-specific path is
+required.
 
 ```text
 <repository-root>
@@ -116,7 +118,7 @@ swift build --disable-sandbox -c release
 The packaging script creates an ad-hoc signed app, validates the bundle, and writes the single canonical artifact to:
 
 ```text
-<repository-root>/outputs/CodexUsageStatus.app.zip
+outputs/CodexUsageStatus.app.zip
 ```
 
 Run the core checks with:
@@ -145,4 +147,6 @@ Use the right-click **Open** flow once, then use **System Settings → Privacy &
 
 ## License
 
-No public license has been selected yet. Until a license file is added, the repository contents remain subject to the repository owner's rights.
+This project is released under the MIT License. See [LICENSE](LICENSE).
+
+For security and privacy boundaries, see [SECURITY.md](SECURITY.md).

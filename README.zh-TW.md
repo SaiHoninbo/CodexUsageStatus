@@ -105,7 +105,8 @@ Updater 預期 GitHub Release 具備：
 
 ## 從原始碼建置
 
-本機開發使用的唯一主專案路徑：
+請使用你自行 clone 的 repository 根目錄。以下指令都以 repository 根目錄為相對路徑，
+不依賴特定電腦上的使用者名稱或資料夾。
 
 ```text
 <repository-root>
@@ -120,7 +121,7 @@ swift build --disable-sandbox -c release
 打包腳本會建立 ad-hoc signed App、驗證 bundle，並將唯一正式產出寫入：
 
 ```text
-<repository-root>/outputs/CodexUsageStatus.app.zip
+outputs/CodexUsageStatus.app.zip
 ```
 
 執行核心測試：
@@ -149,4 +150,6 @@ swift build --disable-sandbox -c release
 
 ## 授權
 
-目前尚未選定公開授權條款。在加入 LICENSE 檔案前，repository 內容仍受 repository 擁有者的著作權與使用權限制。
+本專案採用 MIT License，詳見 [LICENSE](LICENSE)。
+
+安全與隱私邊界請參考 [SECURITY.md](SECURITY.md)。
