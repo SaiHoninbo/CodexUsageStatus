@@ -681,6 +681,8 @@ private struct CodexFloatingHUDView: View {
     let revealDownloadedUpdate: () -> Void
     let openReleasePage: () -> Void
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+    @State private var isRefreshHovered = false
+    @State private var isDetailsHovered = false
     @State private var isPasteHovered = false
     @State private var isPasteAndSubmitHovered = false
     @State private var isPasteAndSubmitInFlight = false
@@ -753,7 +755,43 @@ private struct CodexFloatingHUDView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .shadow(color: .black.opacity(0.12), radius: 0.7, y: 0.4)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            // Reserve a compact, stable column for the usage information so
+            // the new middle shortcuts never squeeze the countdown into an
+            // unreadable width.
+            .frame(width: 178, alignment: .leading)
+
+            HStack(spacing: 2) {
+                Button(action: refresh) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.primary.opacity(isRefreshHovered ? 0.95 : 0.66))
+                        .frame(width: 22, height: 22)
+                        .background(
+                            isRefreshHovered ? Color.primary.opacity(0.12) : Color.clear,
+                            in: Circle()
+                        )
+                }
+                .buttonStyle(.plain)
+                .onHover { isRefreshHovered = $0 }
+                .help("重新整理")
+                .accessibilityLabel("重新整理")
+
+                Button(action: showDetails) {
+                    Image(systemName: "rectangle.and.text.magnifyingglass")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.primary.opacity(isDetailsHovered ? 0.95 : 0.66))
+                        .frame(width: 22, height: 22)
+                        .background(
+                            isDetailsHovered ? Color.primary.opacity(0.12) : Color.clear,
+                            in: Circle()
+                        )
+                }
+                .buttonStyle(.plain)
+                .onHover { isDetailsHovered = $0 }
+                .help("開啟詳細面板")
+                .accessibilityLabel("開啟詳細面板")
+            }
+            .frame(width: 48, height: 24, alignment: .center)
 
             HStack(spacing: 2) {
                 Button(action: pasteClipboard) {
@@ -823,7 +861,7 @@ private struct CodexFloatingHUDView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Codex 用量")
-        .accessibilityValue("\(model.menuBarTitle)，\(model.dataAgeText)。提供只貼上與貼上並送出按鈕")
+        .accessibilityValue("\(model.menuBarTitle)，\(model.dataAgeText)。提供重新整理、詳細面板、只貼上與貼上並送出按鈕")
         .contextMenu {
             contextMenuContent
         }
