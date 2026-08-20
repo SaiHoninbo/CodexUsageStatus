@@ -64,9 +64,9 @@ The menu-bar title stays focused on the active account's quota, for example `Cod
 
 The app talks to the local Codex App Server over its stdio interface. It does not use a private web endpoint, inject UI into Codex, or manage API keys.
 
-- ChatGPT credentials and tokens are not stored by this app.
+- The public repository, release ZIP, history files, Token Activity files, profile index, and logs do not contain ChatGPT credentials or tokens. Managed profiles may keep a local `auth.json` inside the user's owner-only Application Support `CODEX_HOME` so the local App Server can run; it is never uploaded, bundled, committed, or copied into the public release.
 - Prompt text, conversation text, thread titles, and raw App Server authentication data are not written to the app's history files.
-- Local history and token activity are kept under the user's Application Support directory with user-only file permissions.
+- Local history, token activity, and managed-account credentials are kept under the user's Application Support directory with user-only file permissions.
 - Managed profiles use separate `CODEX_HOME` directories and separate App Server processes.
 - The system `~/.codex` profile is not copied into the app bundle or release ZIP.
 
@@ -86,15 +86,15 @@ The updater does **not** silently overwrite or replace a running application. Th
 
 The updater expects a GitHub Release with:
 
-- A semantic-version tag such as `v2.4.13`
+- A semantic-version tag such as `v2.4.14`
 - An asset named exactly `CodexUsageStatus.app.zip`
 - The signed app bundle inside the ZIP
 - No `._*`, `__MACOSX`, source, test, auth, token, or history files
 
-For the current `2.4.13 / build 33` package, the verified ZIP SHA-256 is:
+For the current `2.4.14 / build 34` package, the verified ZIP SHA-256 is:
 
 ```text
-951982b76b169af6dec439e12cfd6635f112590eda398cefa89f5a176eee757a
+e4e5d601dd280fcc34e84570c244c68b452ef4d4b967f3d283a32b4ac67c132e
 ```
 
 If there is no GitHub Release yet, the updater correctly reports that no formal release is available; committing a ZIP to `main` alone does not create a release update.
@@ -113,6 +113,13 @@ Build the macOS executable with Swift Package Manager:
 
 ```bash
 swift build --disable-sandbox -c release
+```
+
+For a public or distributable package, use the packaging script instead. It
+omits release debug information that could otherwise contain local build paths:
+
+```bash
+./script/build_and_run.sh package
 ```
 
 The packaging script creates an ad-hoc signed app, validates the bundle, and writes the single canonical artifact to:

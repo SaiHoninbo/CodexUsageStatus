@@ -17,11 +17,15 @@ APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 ICONSET_DIR="$ROOT_DIR/Resources/AppIcon.iconset"
+## Release bundles must not carry developer-local source/object paths in
+## embedded debug information. The shipped app is not a debug artifact, so
+## omit DWARF entirely rather than publishing machine-specific paths.
+SWIFT_RELEASE_ARGS=( -Xswiftc -gnone )
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
-swift build --disable-sandbox -c release
-BUILD_BINARY="$(swift build --disable-sandbox --show-bin-path -c release)/$APP_NAME"
+swift build --disable-sandbox -c release "${SWIFT_RELEASE_ARGS[@]}"
+BUILD_BINARY="$(swift build --disable-sandbox --show-bin-path -c release "${SWIFT_RELEASE_ARGS[@]}")/$APP_NAME"
 
 rm -rf "$STAGE_DIR"
 mkdir -p "$APP_MACOS" "$APP_RESOURCES"
@@ -60,9 +64,9 @@ cat > "$INFO_PLIST" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>2.4.13</string>
+  <string>2.4.14</string>
   <key>CFBundleVersion</key>
-  <string>33</string>
+  <string>34</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
   <key>LSUIElement</key>

@@ -76,7 +76,12 @@ final class TurnNotificationService: NSObject, UNUserNotificationCenterDelegate 
         if let elapsed = event.elapsedSeconds { parts.append("耗時 \(elapsed) 秒") }
         if let tokenTotal = event.tokenTotal { parts.append("\(tokenTotal.formatted()) tokens") }
         if contentEnabled, let content = event.content, !content.isEmpty { parts.append(content) }
-        if let error = event.errorMessage, !error.isEmpty { parts.append(error) }
+        if let error = event.errorMessage, !error.isEmpty {
+            // Raw App Server errors can contain private context. Only expose
+            // the full text when the user explicitly opted into notification
+            // content; the default notification remains metadata-only.
+            parts.append(contentEnabled ? error : "伺服器回報錯誤")
+        }
         return parts.joined(separator: " · ")
     }
 

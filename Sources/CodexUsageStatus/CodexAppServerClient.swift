@@ -310,7 +310,7 @@ final class CodexAppServerClient {
         do {
             try stdin.write(contentsOf: JSONRPCCodec.encodeNotification(method: method, params: params))
         } catch {
-            logger.error("App Server notification write failed: \(error.localizedDescription, privacy: .public)")
+            logger.error("App Server notification write failed")
             publish(.error, "無法傳送 App Server 通知：\(error.localizedDescription)")
         }
     }
@@ -320,7 +320,7 @@ final class CodexAppServerClient {
             do {
                 try handle(JSONRPCCodec.decodeLine(line))
             } catch {
-                logger.error("App Server JSON-RPC decode failed: \(error.localizedDescription, privacy: .public)")
+                logger.error("App Server JSON-RPC decode failed")
                 publish(.error, "App Server 回傳無法解析的資料：\(error.localizedDescription)")
             }
         }
@@ -392,7 +392,7 @@ final class CodexAppServerClient {
                 onSnapshot?(snapshot)
                 publish(.connected, nil)
             } catch {
-                logger.error("Rate-limit snapshot decode failed: \(error.localizedDescription, privacy: .public)")
+                logger.error("Rate-limit snapshot decode failed")
                 publish(.error, "無法解析 rate-limit snapshot：\(error.localizedDescription)")
             }
         case .usageRead:
@@ -405,7 +405,7 @@ final class CodexAppServerClient {
                 onTokenActivity?(activity)
                 onTokenActivityState?(.loaded, nil)
             } catch {
-                logger.error("Token Activity decode failed: \(error.localizedDescription, privacy: .public)")
+                logger.error("Token Activity decode failed")
                 onTokenActivityState?(.error, "Token Activity 回應格式無法解析。")
             }
         case .accountRead:
@@ -429,7 +429,7 @@ final class CodexAppServerClient {
                 _ = sendRequest(method: "account/rateLimits/read", params: nil, kind: .rateLimitsRead)
                 _ = sendRequest(method: "account/usage/read", params: nil, kind: .usageRead)
             } catch {
-                logger.error("Account health decode failed: \(error.localizedDescription, privacy: .public)")
+                logger.error("Account health decode failed")
                 onAccountHealthState?(.error, "帳號資料回應格式無法解析。")
             }
         case .resetCreditConsume:
@@ -442,10 +442,10 @@ final class CodexAppServerClient {
     private func handleError(_ message: String, for kind: PendingRequest) {
         switch kind {
         case .initialize, .rateLimitsRead:
-            logger.error("App Server request failed: \(message, privacy: .public)")
+            logger.error("App Server request failed")
             publish(.error, message)
         case .usageRead:
-            logger.error("Token Activity request failed: \(message, privacy: .public)")
+            logger.error("Token Activity request failed")
             let lower = message.lowercased()
             if lower.contains("unsupported") || lower.contains("api key") || lower.contains("bedrock") || lower.contains("auth") {
                 onTokenActivityState?(.unsupported, "此登入模式不支援 Token Activity。")
@@ -453,7 +453,7 @@ final class CodexAppServerClient {
                 onTokenActivityState?(.error, message)
             }
         case .accountRead:
-            logger.error("Account request failed: \(message, privacy: .public)")
+            logger.error("Account request failed")
             let lower = message.lowercased()
             if lower.contains("unsupported") || lower.contains("api key") || lower.contains("bedrock") {
                 onAccountHealthState?(.unsupported, "此登入模式不支援完整帳號資料。")
@@ -461,7 +461,7 @@ final class CodexAppServerClient {
                 onAccountHealthState?(.error, message)
             }
         case .resetCreditConsume:
-            logger.error("Reset credit request failed: \(message, privacy: .public)")
+            logger.error("Reset credit request failed")
             onResetCreditResult?(.error(message))
             _ = sendRequest(method: "account/rateLimits/read", params: nil, kind: .rateLimitsRead)
         }
@@ -508,7 +508,7 @@ final class CodexAppServerClient {
             return id
         } catch {
             pendingRequests.removeValue(forKey: id)
-            logger.error("App Server request write failed: \(error.localizedDescription, privacy: .public)")
+            logger.error("App Server request write failed")
             if case .usageRead = kind {
                 onTokenActivityState?(.error, "無法傳送 Token Activity 請求：\(error.localizedDescription)")
             } else if case .resetCreditConsume = kind {
@@ -617,7 +617,9 @@ final class CodexAppServerClient {
     }
 
     private func logStderr(_ message: String) {
-        logger.debug("Codex App Server stderr: \(message, privacy: .public)")
+        // Keep server stderr out of the public unified log. It can contain
+        // account or authentication context supplied by the App Server.
+        logger.debug("Codex App Server emitted stderr")
     }
 
     private func hasPending(_ kind: PendingRequest) -> Bool {

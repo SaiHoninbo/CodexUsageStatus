@@ -68,9 +68,9 @@ Codex Usage Status 是 macOS 選單列用量 HUD，用來監控本機 Codex App 
 
 App 透過 stdio 介面連接本機 Codex App Server，不使用私有網路端點、不注入 Codex UI，也不管理 API key。
 
-- App 不保存 ChatGPT credential 或 token。
+- 公開 repository、Release ZIP、history、Token Activity、profile index 與 log 都不會包含 ChatGPT credential 或 token。受管 profile 可能會把 `auth.json` 保存在使用者本人可讀寫的 Application Support 專屬 `CODEX_HOME`，讓本機 App Server 執行；這些資料不會上傳、打包、提交或複製到公開 Release。
 - Prompt、對話文字、thread title 與 App Server 原始認證資料不會寫入歷史檔案。
-- 本機歷史與 Token Activity 保存在使用者的 Application Support 目錄，檔案權限限制為使用者本人可讀寫。
+- 本機歷史、Token Activity 與受管帳號認證資料保存在使用者的 Application Support 目錄，檔案權限限制為使用者本人可讀寫。
 - 受管 profile 使用獨立的 `CODEX_HOME` 與獨立 App Server process。
 - 系統 `~/.codex` profile 不會被複製進 App bundle 或 Release ZIP。
 
@@ -90,15 +90,15 @@ Updater **不會**在背景靜默覆蓋或替換正在執行的 App。因為目�
 
 Updater 預期 GitHub Release 具備：
 
-- Semantic-version tag，例如 `v2.4.13`
+- Semantic-version tag，例如 `v2.4.14`
 - 名稱完全一致的 asset：`CodexUsageStatus.app.zip`
 - ZIP 內包含已簽章的 App bundle
 - 不包含 `._*`、`__MACOSX`、source、tests、auth、token 或 history 檔案
 
-目前 `2.4.13 / build 33` 安裝包的已驗證 SHA-256：
+目前 `2.4.14 / build 34` 安裝包的已驗證 SHA-256：
 
 ```text
-951982b76b169af6dec439e12cfd6635f112590eda398cefa89f5a176eee757a
+e4e5d601dd280fcc34e84570c244c68b452ef4d4b967f3d283a32b4ac67c132e
 ```
 
 如果 GitHub 尚未建立正式 Release，Updater 會正確顯示目前沒有可用的正式版本；只把 ZIP 提交到 `main` 並不會自動建立 Release 更新。
@@ -116,6 +116,12 @@ Updater 預期 GitHub Release 具備：
 
 ```bash
 swift build --disable-sandbox -c release
+```
+
+若要產生公開或可分發的安裝包，請改用打包腳本。腳本會移除可能包含本機建置路徑的 release debug 資訊：
+
+```bash
+./script/build_and_run.sh package
 ```
 
 打包腳本會建立 ad-hoc signed App、驗證 bundle，並將唯一正式產出寫入：
