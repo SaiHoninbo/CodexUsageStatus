@@ -4,8 +4,12 @@ import CoreGraphics
 import SwiftUI
 
 private enum FloatingHUDLayout {
-    static let bottomRightSize = NSSize(width: 300, height: 52)
-    static let topRightSize = NSSize(width: 300, height: 46)
+    // The compact HUD keeps the percentage and reset countdown in one
+    // vertical cluster.  These heights are about 10% shorter than the
+    // previous 52/46pt layouts while still leaving enough room for the
+    // readable two-line content and the action buttons.
+    static let bottomRightSize = NSSize(width: 300, height: 47)
+    static let topRightSize = NSSize(width: 300, height: 42)
     // Sizes used by the previous shipped HUD builds. These are only used
     // while migrating persisted screen anchors; new anchors are size-agnostic.
     static let previousWideSize = NSSize(width: 360, height: 60)
@@ -712,41 +716,45 @@ private struct CodexFloatingHUDView: View {
     @ViewBuilder
     private func hudContainer(frameOpacity: Double, glowRadius: Double) -> some View {
         HStack(spacing: 4) {
-            quotaProgressBar
-
-            // Keep the decrease badge inside a reserved cluster. It remains
-            // visible for the full animation and never escapes the rounded
-            // HUD mask.
-            ZStack(alignment: .topTrailing) {
-                percentTextView
-                if let decreaseAmount {
-                    Text("−\(decreaseAmount)%")
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                        .foregroundStyle(.red)
-                        .shadow(color: .red.opacity(0.26), radius: 1.5, y: 0.2)
-                        .scaleEffect(accessibilityReduceMotion ? 1 : (decreaseBounce ? 1.08 : 0.94), anchor: .center)
-                        .offset(x: 5, y: -2)
-                        .transition(
-                            accessibilityReduceMotion
-                                ? .opacity
-                                : .scale(scale: 0.78).combined(with: .opacity)
-                        )
-                        .zIndex(1)
+            // The progress bar used to repeat the same information as the
+            // large percentage label.  Keep one clear source of truth: the
+            // percentage sits above its reset countdown in this compact
+            // cluster.
+            VStack(alignment: .leading, spacing: -2) {
+                // Keep the decrease badge inside the percentage cluster. It
+                // remains visible for the full animation and never escapes
+                // the rounded HUD mask.
+                ZStack(alignment: .topTrailing) {
+                    percentTextView
+                    if let decreaseAmount {
+                        Text("−\(decreaseAmount)%")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(.red)
+                            .shadow(color: .red.opacity(0.26), radius: 1.5, y: 0.2)
+                            .scaleEffect(accessibilityReduceMotion ? 1 : (decreaseBounce ? 1.08 : 0.94), anchor: .center)
+                            .offset(x: 5, y: -2)
+                            .transition(
+                                accessibilityReduceMotion
+                                    ? .opacity
+                                    : .scale(scale: 0.78).combined(with: .opacity)
+                            )
+                            .zIndex(1)
+                    }
                 }
+                .frame(width: 86, height: 28, alignment: .leading)
+
+                Text(hudResetDescription)
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(model.menuBarColor)
+                    .multilineTextAlignment(.leading)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .shadow(color: .black.opacity(0.12), radius: 0.7, y: 0.4)
             }
-            .frame(width: 72, height: 38, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
 
-            Text(hudResetDescription)
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
-                .foregroundStyle(model.menuBarColor)
-                .multilineTextAlignment(.leading)
-                .lineLimit(2)
-                .minimumScaleFactor(0.82)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(width: 82, alignment: .leading)
-                .shadow(color: .black.opacity(0.12), radius: 0.7, y: 0.4)
-
-            Spacer(minLength: 0)
             HStack(spacing: 2) {
                 Button(action: pasteClipboard) {
                     Image(systemName: "doc.on.clipboard")
@@ -788,7 +796,7 @@ private struct CodexFloatingHUDView: View {
             .frame(width: 46, height: 24, alignment: .trailing)
         }
         .padding(.horizontal, 5)
-        .padding(.vertical, layoutState.placement == .topRight ? 2 : 4)
+        .padding(.vertical, layoutState.placement == .topRight ? 0 : 2)
         .frame(width: layoutState.size.width, height: layoutState.size.height, alignment: .leading)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous))
@@ -1025,25 +1033,9 @@ private struct CodexFloatingHUDView: View {
         percentLabel(scale: 1)
     }
 
-    private var quotaProgressBar: some View {
-        GeometryReader { proxy in
-            let fraction = CGFloat(max(0, min(100, model.menuBarRemainingPercent ?? 0))) / 100
-            ZStack(alignment: .leading) {
-                Capsule(style: .continuous)
-                    .fill(Color.primary.opacity(0.10))
-                Capsule(style: .continuous)
-                    .fill(model.menuBarColor)
-                    .frame(width: max(3, proxy.size.width * fraction))
-            }
-        }
-        .frame(width: 68, height: 8)
-        .accessibilityLabel("剩餘用量")
-        .accessibilityValue(model.menuBarRemainingPercent.map { "\($0)%" } ?? "無資料")
-    }
-
     private func percentLabel(scale: CGFloat) -> some View {
         Text(percentWithSymbol)
-            .font(.system(size: 28, weight: .bold, design: .rounded))
+            .font(.system(size: 25, weight: .bold, design: .rounded))
             .foregroundStyle(model.menuBarColor)
             .lineLimit(1)
             .minimumScaleFactor(0.78)
