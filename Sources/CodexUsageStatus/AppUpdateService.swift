@@ -129,8 +129,9 @@ final class AppUpdateService: NSObject {
     private let checkTimeout: TimeInterval
     private(set) var state: AppUpdateState = .idle
     private var checkTask: URLSessionDataTask?
-    private var checkTimeoutTask: Task<Void, Never>?
+    private var checkTimeoutTimer: Timer?
     private var checkGeneration: UInt64 = 0
+    private var checkCompletion: ((AppUpdateState) -> Void)?
     private var downloadTask: URLSessionDownloadTask?
 
     init(session: URLSession = .shared, checkTimeout: TimeInterval = 20) {
@@ -146,22 +147,24 @@ final class AppUpdateService: NSObject {
 
     var currentVersion: String {
         let bundleVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        return bundleVersion?.isEmpty == false ? bundleVersion! : "2.4.11"
+        return bundleVersion?.isEmpty == false ? bundleVersion! : "2.4.25"
     }
 
     func check(completion: ((AppUpdateState) -> Void)? = nil) {
-        guard state != .checking else { return }
-
+        // A manual retry can arrive while the automatic startup check is
+        // still in flight.  The old implementation silently returned here,
+        // leaving the HUD attached to a request that the user could not
+        // restart.  Invalidate the old generation and start one authoritative
+        // request instead; the old URLSession callback is discarded below.
+        invalidateCheck(notify: false)
         checkGeneration &+= 1
         let generation = checkGeneration
-        checkTask?.cancel()
-        checkTask = nil
-        checkTimeoutTask?.cancel()
-        checkTimeoutTask = nil
+        checkCompletion = completion
         state = .checking
         var request = URLRequest(url: endpoint)
         request.httpMethod = "GET"
         request.timeoutInterval = checkTimeout
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("CodexUsageStatus/\(currentVersion)", forHTTPHeaderField: "User-Agent")
 
@@ -170,19 +173,19 @@ final class AppUpdateService: NSObject {
                 guard let self else { return }
                 guard generation == self.checkGeneration, self.state == .checking else { return }
                 if let error {
-                    self.finishCheck(.error("更新檢查失敗：\(error.localizedDescription)"), completion: completion)
+                    self.finishCheck(.error("更新檢查失敗：\(error.localizedDescription)"))
                     return
                 }
                 if let http = response as? HTTPURLResponse, http.statusCode == 404 {
-                    self.finishCheck(.error(AppUpdateError.noRelease.localizedDescription), completion: completion)
+                    self.finishCheck(.error(AppUpdateError.noRelease.localizedDescription))
                     return
                 }
                 if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                    self.finishCheck(.error(AppUpdateError.httpStatus(http.statusCode).localizedDescription), completion: completion)
+                    self.finishCheck(.error(AppUpdateError.httpStatus(http.statusCode).localizedDescription))
                     return
                 }
                 guard let data else {
-                    self.finishCheck(.error(AppUpdateError.invalidResponse.localizedDescription), completion: completion)
+                    self.finishCheck(.error(AppUpdateError.invalidResponse.localizedDescription))
                     return
                 }
                 do {
@@ -201,28 +204,28 @@ final class AppUpdateService: NSObject {
                         publishedAt: payload.publishedAt
                     )
                     guard AppVersionComparator.isNewer(release.version, than: self.currentVersion) else {
-                        self.finishCheck(.upToDate, completion: completion)
+                        self.finishCheck(.upToDate)
                         return
                     }
-                    self.finishCheck(.available(release), completion: completion)
+                    self.finishCheck(.available(release))
                 } catch {
-                    self.finishCheck(.error("更新資訊無法解析：\(error.localizedDescription)"), completion: completion)
+                    self.finishCheck(.error("更新資訊無法解析：\(error.localizedDescription)"))
                 }
             }
         }
         checkTask = task
         task.resume()
 
-        let timeout = checkTimeout
-        checkTimeoutTask = Task { @MainActor [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-            } catch {
-                return
+        // URLSession's timeout is not sufficient on its own: a stalled
+        // callback can leave the UI in `.checking`.  A RunLoop timer gives us
+        // an explicit terminal path even when URLSession never calls back.
+        let timer = Timer(timeInterval: checkTimeout, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.timeoutCheck(generation: generation)
             }
-            guard !Task.isCancelled else { return }
-            self?.timeoutCheck(generation: generation, completion: completion)
         }
+        checkTimeoutTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     func cancelCheck(completion: ((AppUpdateState) -> Void)? = nil) {
@@ -238,8 +241,6 @@ final class AppUpdateService: NSObject {
         checkGeneration &+= 1
         checkTask?.cancel()
         checkTask = nil
-        checkTimeoutTask?.cancel()
-        checkTimeoutTask = nil
 
         // Complete through the same path as a normal response so every
         // caller (including the HUD and popover) receives the terminal
@@ -352,21 +353,36 @@ final class AppUpdateService: NSObject {
         completion?(newState)
     }
 
-    private func finishCheck(_ newState: AppUpdateState, completion: ((AppUpdateState) -> Void)?) {
-        checkTimeoutTask?.cancel()
-        checkTimeoutTask = nil
+    private func finishCheck(_ newState: AppUpdateState, completion: ((AppUpdateState) -> Void)? = nil) {
+        checkTimeoutTimer?.invalidate()
+        checkTimeoutTimer = nil
         checkTask = nil
         state = newState
-        completion?(newState)
+        let callback = completion ?? checkCompletion
+        checkCompletion = nil
+        callback?(newState)
     }
 
-    private func timeoutCheck(generation: UInt64, completion: ((AppUpdateState) -> Void)?) {
+    private func timeoutCheck(generation: UInt64) {
         guard generation == checkGeneration, state == .checking else { return }
         checkGeneration &+= 1
         checkTask?.cancel()
         checkTask = nil
-        checkTimeoutTask = nil
-        finish(.error(AppUpdateError.checkTimedOut.localizedDescription), completion: completion)
+        finishCheck(.error(AppUpdateError.checkTimedOut.localizedDescription))
+    }
+
+    private func invalidateCheck(notify: Bool) {
+        guard state == .checking || checkTask != nil || checkTimeoutTimer != nil else { return }
+        checkGeneration &+= 1
+        checkTask?.cancel()
+        checkTask = nil
+        checkTimeoutTimer?.invalidate()
+        checkTimeoutTimer = nil
+        if notify {
+            finishCheck(.error(AppUpdateError.checkCancelled.localizedDescription))
+        } else {
+            checkCompletion = nil
+        }
     }
 
     private static func sha256(from digest: String?) -> String? {

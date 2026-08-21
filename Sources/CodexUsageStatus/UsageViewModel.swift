@@ -320,6 +320,10 @@ final class UsageViewModel: ObservableObject {
                 self.updateNotificationService.notifyIfNeeded(for: release, soundEnabled: self.notificationSoundEnabled)
             }
         }
+        // Publish the service's immediate state as well.  This keeps every
+        // entry point (startup, HUD, context menu, and details panel) in sync
+        // even when a previous request is being invalidated and restarted.
+        updateState = updateService.state
     }
 
     func cancelUpdateCheck() {
