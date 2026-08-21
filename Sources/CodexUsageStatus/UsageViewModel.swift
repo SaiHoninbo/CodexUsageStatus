@@ -323,7 +323,15 @@ final class UsageViewModel: ObservableObject {
     }
 
     func cancelUpdateCheck() {
-        updateService.cancelCheck()
+        guard updateState == .checking || updateService.state == .checking else { return }
+
+        // Publish the terminal state synchronously.  The service callback is
+        // also wired below for callers that observe the service directly;
+        // assigning here prevents a non-responding URLSession cancellation
+        // from leaving the UI's local state stuck on `.checking`.
+        updateService.cancelCheck { [weak self] state in
+            self?.updateState = state
+        }
         updateState = updateService.state
     }
 

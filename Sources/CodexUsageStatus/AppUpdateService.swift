@@ -225,14 +225,27 @@ final class AppUpdateService: NSObject {
         }
     }
 
-    func cancelCheck() {
-        guard state == .checking else { return }
+    func cancelCheck(completion: ((AppUpdateState) -> Void)? = nil) {
+        guard state == .checking else {
+            completion?(state)
+            return
+        }
+
+        // Invalidate the generation before cancelling URLSession.  The
+        // cancelled task may still deliver its completion callback on a
+        // later turn of the main actor; that callback must not restore the
+        // old `.checking` state or overwrite a subsequent check.
         checkGeneration &+= 1
         checkTask?.cancel()
         checkTask = nil
         checkTimeoutTask?.cancel()
         checkTimeoutTask = nil
-        finish(.error(AppUpdateError.checkCancelled.localizedDescription), completion: nil)
+
+        // Complete through the same path as a normal response so every
+        // caller (including the HUD and popover) receives the terminal
+        // state immediately and can leave the spinner without waiting for
+        // URLSession to acknowledge cancellation.
+        finishCheck(.error(AppUpdateError.checkCancelled.localizedDescription), completion: completion)
     }
 
     func download(completion: ((AppUpdateState) -> Void)? = nil) {

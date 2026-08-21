@@ -793,6 +793,22 @@ private struct CodexFloatingHUDView: View {
         checkForUpdates()
     }
 
+    private func cancelUpdateCheckAction() {
+        // End the HUD's local feedback immediately, then let the shared
+        // view model/service finish cancelling the URLSession task.  This
+        // keeps the button responsive even if the request's cancellation
+        // callback is delayed by the system.
+        cancelUpdateCheck()
+        updateCheckRequested = false
+        withAnimation(.easeOut(duration: 0.16)) {
+            updateFeedback = UpdateFeedback(
+                kind: .error,
+                title: "更新檢查已取消",
+                message: "更新檢查已取消。"
+            )
+        }
+    }
+
     private func presentUpdateFeedback(for state: AppUpdateState) {
         // A download started from the result banner is a second, explicit
         // phase. It must continue to update the same visible banner even
@@ -855,7 +871,7 @@ private struct CodexFloatingHUDView: View {
             case .checking:
                 ProgressView()
                     .controlSize(.small)
-                Button("取消") { cancelUpdateCheck() }
+                Button("取消") { cancelUpdateCheckAction() }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
             case .downloading:
@@ -1164,7 +1180,9 @@ private struct CodexFloatingHUDView: View {
                     Label("開啟 Release 頁面", systemImage: "safari")
                 }
             case .checking:
-                Label("正在檢查更新…", systemImage: "hourglass")
+                Button(action: cancelUpdateCheckAction) {
+                    Label("取消更新檢查", systemImage: "xmark.circle")
+                }
             case .downloading(let release):
                 Label("正在下載並驗證 \(release.version)…", systemImage: "arrow.down.circle.dotted")
             case .downloaded(let release, _):
