@@ -243,7 +243,12 @@ struct UsagePopoverView: View {
                         Button {
                             model.selectProfile(id: profile.id)
                         } label: {
-                            Label(profile.displayName, systemImage: profile.id == model.currentProfileID ? "checkmark" : "person")
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: profile.id == model.currentProfileID ? "checkmark" : (model.accountProfileDisplay(for: profile).isWarning ? "exclamationmark.triangle" : "person"))
+                                    .frame(width: 16)
+                                accountDisplayStack(profile)
+                                Spacer(minLength: 0)
+                            }
                         }
                     }
                     Divider()
@@ -267,6 +272,18 @@ struct UsagePopoverView: View {
         }
     }
 
+
+    private func accountDisplayStack(_ profile: AccountProfile) -> some View {
+        let display = model.accountProfileDisplay(for: profile)
+        return VStack(alignment: .leading, spacing: 1) {
+            Text(display.title).lineLimit(1)
+            Text(display.subtitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+
     private var accountManagementSection: some View {
         DisclosureGroup("帳號管理") {
             VStack(alignment: .leading, spacing: 8) {
@@ -275,8 +292,11 @@ struct UsagePopoverView: View {
                         Image(systemName: profile.id == model.currentProfileID ? "checkmark.circle.fill" : "person.crop.circle")
                             .foregroundStyle(profile.id == model.currentProfileID ? .green : .secondary)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(profile.displayName)
+                            Text(model.accountProfileDisplay(for: profile).title)
                                 .font(.caption.weight(.semibold))
+                            Text(model.accountProfileDisplay(for: profile).subtitle)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
                             Text(model.profileStatusText(profile))
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
@@ -402,7 +422,7 @@ struct UsagePopoverView: View {
             ForEach(model.profileQuotaSummaries()) { summary in
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(summary.profile.displayName)
+                        accountDisplayStack(summary.profile)
                         if summary.profile.isUnidentified {
                             Text("未識別，可能需要手動分帳")
                                 .font(.caption2)

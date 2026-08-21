@@ -4,12 +4,12 @@ import CoreGraphics
 import SwiftUI
 
 private enum FloatingHUDLayout {
-    // The compact HUD keeps the percentage and reset countdown in one
-    // vertical cluster.  These heights are about 10% shorter than the
-    // previous 52/46pt layouts while still leaving enough room for the
-    // readable two-line content and the action buttons.
-    static let bottomRightSize = NSSize(width: 300, height: 47)
-    static let topRightSize = NSSize(width: 300, height: 42)
+    // The HUD has a second, memory-only account identity line. Keep the
+    // width compact while giving that line enough vertical room to remain
+    // readable; the two placements differ only by their small top/bottom
+    // inset, as before.
+    static let bottomRightSize = NSSize(width: 300, height: 61)
+    static let topRightSize = NSSize(width: 300, height: 57)
     // Sizes used by the previous shipped HUD builds. These are only used
     // while migrating persisted screen anchors; new anchors are size-agnostic.
     static let previousWideSize = NSSize(width: 360, height: 60)
@@ -713,7 +713,7 @@ private struct CodexFloatingHUDView: View {
     let revealDownloadedUpdate: () -> Void
     let openReleasePage: () -> Void
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
-    @State private var isRefreshHovered = false
+    @State private var isUpdateHovered = false
     @State private var isDetailsHovered = false
     @State private var isPasteHovered = false
     @State private var isPasteAndSubmitHovered = false
@@ -941,124 +941,120 @@ private struct CodexFloatingHUDView: View {
 
     @ViewBuilder
     private func hudContainer(frameOpacity: Double, glowRadius: Double) -> some View {
-        HStack(spacing: 4) {
-            // The progress bar used to repeat the same information as the
-            // large percentage label.  Keep one clear source of truth: the
-            // percentage sits above its reset countdown in this compact
-            // cluster.
-            VStack(alignment: .leading, spacing: -2) {
-                // Keep the decrease badge inside the percentage cluster. It
-                // remains visible for the full animation and never escapes
-                // the rounded HUD mask.
-                ZStack(alignment: .topTrailing) {
-                    percentTextView
-                    if let decreaseAmount {
-                        Text("−\(decreaseAmount)%")
-                            .font(.system(size: 11, weight: .bold, design: .rounded))
-                            .foregroundStyle(.red)
-                            .shadow(color: .red.opacity(0.26), radius: 1.5, y: 0.2)
-                            .scaleEffect(accessibilityReduceMotion ? 1 : (decreaseBounce ? 1.08 : 0.94), anchor: .center)
-                            .offset(x: 5, y: -2)
-                            .transition(
-                                accessibilityReduceMotion
-                                    ? .opacity
-                                    : .scale(scale: 0.78).combined(with: .opacity)
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                // Keep the percentage and countdown together. The action
+                // group gets the remaining width so every button has the
+                // same hit target and the old empty middle column disappears.
+                VStack(alignment: .leading, spacing: -2) {
+                    ZStack(alignment: .topTrailing) {
+                        percentTextView
+                        if let decreaseAmount {
+                            Text("−\(decreaseAmount)%")
+                                .font(.system(size: 11, weight: .bold, design: .rounded))
+                                .foregroundStyle(.red)
+                                .shadow(color: .red.opacity(0.26), radius: 1.5, y: 0.2)
+                                .scaleEffect(accessibilityReduceMotion ? 1 : (decreaseBounce ? 1.08 : 0.94), anchor: .center)
+                                .offset(x: 5, y: -2)
+                                .transition(
+                                    accessibilityReduceMotion
+                                        ? .opacity
+                                        : .scale(scale: 0.78).combined(with: .opacity)
+                                )
+                                .zIndex(1)
+                        }
+                    }
+                    .frame(width: 86, height: 28, alignment: .leading)
+
+                    Text(hudResetDescription)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(model.menuBarColor)
+                        .multilineTextAlignment(.leading)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .shadow(color: .black.opacity(0.12), radius: 0.7, y: 0.4)
+                }
+                .frame(width: 156, alignment: .leading)
+
+                Spacer(minLength: 0)
+
+                HStack(spacing: 0) {
+                    updateShortcutButton
+
+                    Button(action: showDetails) {
+                        Image(systemName: "rectangle.and.text.magnifyingglass")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.primary.opacity(isDetailsHovered ? 0.95 : 0.66))
+                            .frame(maxWidth: .infinity, minHeight: 26)
+                            .background(
+                                isDetailsHovered ? Color.primary.opacity(0.12) : Color.clear,
+                                in: Circle()
                             )
-                            .zIndex(1)
                     }
-                }
-                .frame(width: 86, height: 28, alignment: .leading)
+                    .buttonStyle(.plain)
+                    .onHover { isDetailsHovered = $0 }
+                    .help("開啟詳細面板")
+                    .accessibilityLabel("開啟詳細面板")
 
-                Text(hudResetDescription)
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(model.menuBarColor)
-                    .multilineTextAlignment(.leading)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.78)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .shadow(color: .black.opacity(0.12), radius: 0.7, y: 0.4)
-            }
-            // Reserve a compact, stable column for the usage information so
-            // the new middle shortcuts never squeeze the countdown into an
-            // unreadable width.
-            .frame(width: 178, alignment: .leading)
-
-            HStack(spacing: 2) {
-                Button(action: refresh) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.primary.opacity(isRefreshHovered ? 0.95 : 0.66))
-                        .frame(width: 22, height: 22)
-                        .background(
-                            isRefreshHovered ? Color.primary.opacity(0.12) : Color.clear,
-                            in: Circle()
-                        )
-                }
-                .buttonStyle(.plain)
-                .onHover { isRefreshHovered = $0 }
-                .help("重新整理")
-                .accessibilityLabel("重新整理")
-
-                Button(action: showDetails) {
-                    Image(systemName: "rectangle.and.text.magnifyingglass")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.primary.opacity(isDetailsHovered ? 0.95 : 0.66))
-                        .frame(width: 22, height: 22)
-                        .background(
-                            isDetailsHovered ? Color.primary.opacity(0.12) : Color.clear,
-                            in: Circle()
-                        )
-                }
-                .buttonStyle(.plain)
-                .onHover { isDetailsHovered = $0 }
-                .help("開啟詳細面板")
-                .accessibilityLabel("開啟詳細面板")
-            }
-            .frame(width: 48, height: 24, alignment: .center)
-
-            HStack(spacing: 2) {
-                Button(action: pasteClipboard) {
-                    Image(systemName: "doc.on.clipboard")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .frame(width: 22, height: 22)
-                        .background(
-                            isPasteHovered ? Color.primary.opacity(0.14) : Color.clear,
-                            in: Circle()
-                        )
-                }
-                .buttonStyle(.plain)
-                .disabled(!layoutState.isCodexFocused)
-                .onHover { isPasteHovered = $0 }
-                .help(layoutState.isCodexFocused ? "貼上剪貼簿內容" : "切換回 Codex 後可貼上")
-
-                Button {
-                    guard !isPasteAndSubmitInFlight else { return }
-                    isPasteAndSubmitInFlight = true
-                    pasteAndSubmit { _ in
-                        isPasteAndSubmitInFlight = false
+                    Button(action: pasteClipboard) {
+                        Image(systemName: "doc.on.clipboard")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .frame(maxWidth: .infinity, minHeight: 26)
+                            .background(
+                                isPasteHovered ? Color.primary.opacity(0.14) : Color.clear,
+                                in: Circle()
+                            )
                     }
-                } label: {
-                    Image(systemName: "paperplane.fill")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .frame(width: 22, height: 22)
-                        .background(
-                            isPasteAndSubmitHovered ? Color.primary.opacity(0.14) : Color.clear,
-                            in: Circle()
-                        )
-                        .opacity(isPasteAndSubmitInFlight ? 0.45 : 1)
+                    .buttonStyle(.plain)
+                    .disabled(!layoutState.isCodexFocused)
+                    .onHover { isPasteHovered = $0 }
+                    .help(layoutState.isCodexFocused ? "貼上剪貼簿內容" : "切換回 Codex 後可貼上")
+                    .accessibilityLabel("貼上剪貼簿內容")
+
+                    Button {
+                        guard !isPasteAndSubmitInFlight else { return }
+                        isPasteAndSubmitInFlight = true
+                        pasteAndSubmit { _ in
+                            isPasteAndSubmitInFlight = false
+                        }
+                    } label: {
+                        Image(systemName: "paperplane.fill")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .frame(maxWidth: .infinity, minHeight: 26)
+                            .background(
+                                isPasteAndSubmitHovered ? Color.primary.opacity(0.14) : Color.clear,
+                                in: Circle()
+                            )
+                            .opacity(isPasteAndSubmitInFlight ? 0.45 : 1)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isPasteAndSubmitInFlight || !layoutState.isCodexFocused)
+                    .onHover { isPasteAndSubmitHovered = $0 }
+                    .help(layoutState.isCodexFocused ? "貼上並送出" : "切換回 Codex 後可貼上並送出")
+                    .accessibilityLabel("貼上並送出")
                 }
-                .buttonStyle(.plain)
-                .disabled(isPasteAndSubmitInFlight || !layoutState.isCodexFocused)
-                .onHover { isPasteAndSubmitHovered = $0 }
-                .help(layoutState.isCodexFocused ? "貼上並送出" : "切換回 Codex 後可貼上並送出")
+                .frame(width: 134, height: 26)
             }
-            .frame(width: 46, height: 24, alignment: .trailing)
+
+            // Full email is deliberately shown only for the active account;
+            // UsageViewModel keeps it in the in-memory health snapshot and
+            // never persists or logs it. Tightening preserves the complete
+            // address instead of truncating it with an ellipsis.
+            Text(verbatim: model.currentAccountEmail ?? "未提供 Email")
+                .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                .foregroundStyle(.primary.opacity(model.currentAccountEmail == nil ? 0.48 : 0.82))
+                .lineLimit(1)
+                .minimumScaleFactor(0.42)
+                .allowsTightening(true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help(model.currentAccountEmail ?? "目前帳號尚未提供 Email")
         }
         .padding(.horizontal, 5)
-        .padding(.vertical, layoutState.placement == .topRight ? 0 : 2)
+        .padding(.vertical, layoutState.placement == .topRight ? 1 : 2)
         .frame(width: layoutState.size.width, height: layoutState.size.height, alignment: .leading)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous))
@@ -1085,7 +1081,7 @@ private struct CodexFloatingHUDView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Codex 用量")
-        .accessibilityValue("\(model.menuBarTitle)，\(model.dataAgeText)。提供重新整理、詳細面板、只貼上與貼上並送出按鈕")
+        .accessibilityValue("\(model.menuBarTitle)，\(model.dataAgeText)，帳號 \(model.currentAccountEmail ?? "未提供 Email")。提供更新通知、詳細面板、只貼上與貼上並送出按鈕")
         .animation(.easeOut(duration: 0.18), value: decreaseAmount)
         .onAppear {
             trackedProfileID = model.currentProfileID
@@ -1114,11 +1110,84 @@ private struct CodexFloatingHUDView: View {
         }
     }
 
+    private var hasAvailableUpdate: Bool {
+        switch model.updateState {
+        case .available, .downloaded:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private var updateShortcutIcon: String {
+        switch model.updateState {
+        case .available, .downloaded:
+            return "bell.badge.fill"
+        case .checking, .downloading:
+            return "arrow.down.circle"
+        default:
+            return "arrow.down.circle"
+        }
+    }
+
+    private func updateShortcutAction() {
+        switch model.updateState {
+        case .available, .downloaded, .checking, .downloading:
+            // The detail panel already owns download/install actions and the
+            // shared AppUpdateState, so the HUD never starts a second request.
+            showDetails()
+        case .idle, .upToDate, .error:
+            checkForUpdates()
+        }
+    }
+
+    @ViewBuilder
+    private var updateShortcutButton: some View {
+        if hasAvailableUpdate && !accessibilityReduceMotion {
+            TimelineView(.periodic(from: .now, by: 0.12)) { context in
+                let phase = context.date.timeIntervalSinceReferenceDate
+                    .truncatingRemainder(dividingBy: 0.9) / 0.9
+                let wave = (sin(phase * 2 * .pi) + 1) / 2
+                updateShortcutButtonContent(pulse: wave)
+            }
+        } else {
+            updateShortcutButtonContent(pulse: 0)
+        }
+    }
+
+    private func updateShortcutButtonContent(pulse: Double) -> some View {
+        Button(action: updateShortcutAction) {
+            Image(systemName: updateShortcutIcon)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(hasAvailableUpdate ? Color.orange : .primary.opacity(isUpdateHovered ? 0.95 : 0.66))
+                .scaleEffect(1 + (hasAvailableUpdate ? 0.10 * pulse : 0))
+                .rotationEffect(.degrees(hasAvailableUpdate ? (pulse - 0.5) * 8 : 0))
+                .frame(maxWidth: .infinity, minHeight: 26)
+                .background(
+                    isUpdateHovered ? Color.primary.opacity(0.12) : Color.clear,
+                    in: Circle()
+                )
+        }
+        .buttonStyle(.plain)
+        .onHover { isUpdateHovered = $0 }
+        .help(hasAvailableUpdate ? "有更新可用，開啟更新面板" : "檢查更新")
+        .accessibilityLabel(hasAvailableUpdate ? "有更新可用" : "檢查更新")
+        .accessibilityValue(hasAvailableUpdate ? "開啟更新面板" : "檢查目前版本")
+    }
+
     @ViewBuilder
     private var contextMenuContent: some View {
         Section {
-            Text(model.currentProfile?.displayName ?? "未識別帳號")
-                .font(.headline)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(model.accountDisplayName)
+                    .font(.headline)
+                if let currentProfile = model.currentProfile {
+                    Text(model.accountProfileDisplay(for: currentProfile).subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
             Label(model.menuBarTitle, systemImage: "gauge.with.dots.needle.33percent")
             Label(contextConnectionText, systemImage: contextConnectionIcon)
             Divider()
@@ -1219,14 +1288,22 @@ private struct CodexFloatingHUDView: View {
             if !model.accountProfiles.isEmpty {
                 Divider()
                 ForEach(model.accountProfiles) { profile in
+                    let display = model.accountProfileDisplay(for: profile)
                     Button {
                         selectProfile(profile.id)
                         setAccountScope(.current)
                     } label: {
-                        Label {
-                            Text(profile.isUnidentified ? "⚠︎ \(profile.displayName)" : profile.displayName)
-                        } icon: {
-                            Image(systemName: profile.id == model.currentProfileID ? "checkmark" : "person")
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: profile.id == model.currentProfileID ? "checkmark" : (display.isWarning ? "exclamationmark.triangle" : "person"))
+                                .frame(width: 16)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(display.title).lineLimit(1)
+                                Text(display.subtitle)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            Spacer(minLength: 0)
                         }
                     }
                 }

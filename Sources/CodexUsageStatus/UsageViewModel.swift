@@ -843,7 +843,27 @@ final class UsageViewModel: ObservableObject {
     }
 
     var accountDisplayName: String {
-        currentProfile?.displayName ?? "未識別帳號"
+        guard let profile = currentProfile else { return "未識別帳號 1" }
+        return accountProfileDisplay(for: profile).title
+    }
+
+    /// The active account's full email is intentionally exposed only as an
+    /// in-memory presentation value for the HUD. It is never part of a
+    /// profile, history, UserDefaults value, notification, or log payload.
+    var currentAccountEmail: String? {
+        let health = accountHealth ?? currentProfileID.flatMap { managedAccountHealth[$0] }
+        guard let email = health?.identity.email?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !email.isEmpty else { return nil }
+        return email
+    }
+
+    /// Returns only safe, presentation-ready account metadata. Raw email is
+    /// never exposed outside the in-memory formatter and is never persisted.
+    func accountProfileDisplay(for profile: AccountProfile) -> AccountProfileDisplay {
+        let health = profile.id == currentProfileID
+            ? (accountHealth ?? managedAccountHealth[profile.id])
+            : managedAccountHealth[profile.id]
+        return AccountProfileDisplay.make(profile: profile, among: accountProfiles, health: health)
     }
 
     func profileStatusText(_ profile: AccountProfile) -> String {

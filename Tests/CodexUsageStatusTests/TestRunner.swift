@@ -36,6 +36,7 @@ struct CodexUsageStatusTests {
             ("reset credit decoding and sparse preservation", testResetCreditDecoding),
             ("reset credit consume request", testResetCreditConsumeRequest),
             ("account health decoding", testAccountHealthDecoding),
+            ("account profile display formatting", testAccountProfileDisplayFormatting),
             ("turn activity event decoding", testTurnActivityDecoding),
             ("account profiles isolate email", testAccountProfilesIsolateEmail),
             ("account read disables refresh token", testAccountReadDisablesRefreshToken),
@@ -653,6 +654,55 @@ struct CodexUsageStatusTests {
         try expect(persisted.contains("redacted-fixture"), "fixture auth should be copied to isolated home")
         let attributes = try FileManager.default.attributesOfItem(atPath: store.credentialsURL(for: profile).path)
         try expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600, "auth.json should be owner-only")
+    }
+
+    private static func testAccountProfileDisplayFormatting() throws {
+        try expect(AccountProfileDisplay.maskEmail(" person@example.com ") == "p*****@example.com", "email should be masked")
+        try expect(AccountProfileDisplay.maskEmail("ab@example.com") == "a*@example.com", "short email should remain distinguishable")
+        try expect(AccountProfileDisplay.maskEmail("not-an-email") == nil, "invalid email should be rejected")
+
+        let firstID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let secondID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        let first = AccountProfile(id: firstID, fingerprint: "unknown-a", displayName: "ChatGPT 帳號", accountType: "chatgpt", authMode: "chatgpt", lastSeen: Date(), isUnidentified: true)
+        let second = AccountProfile(id: secondID, fingerprint: "unknown-b", displayName: "ChatGPT 帳號", accountType: "chatgpt", authMode: "chatgpt", lastSeen: Date(), isUnidentified: true)
+        let profiles = [second, first]
+        let firstDisplay = AccountProfileDisplay.make(profile: first, among: profiles, health: nil)
+        let secondDisplay = AccountProfileDisplay.make(profile: second, among: profiles, health: nil)
+        try expect(firstDisplay.title == "未識別帳號 1", "unidentified ordinal should use UUID order")
+        try expect(secondDisplay.title == "未識別帳號 2", "unidentified ordinal should be stable")
+        try expect(firstDisplay.subtitle == "ChatGPT · 未提供方案", "fallback subtitle should include auth and plan")
+
+        let custom = AccountProfile(id: UUID(), fingerprint: "custom", displayName: "公司帳號", accountType: "chatgpt", authMode: "chatgpt", lastSeen: Date(), isDisplayNameCustom: true, isUnidentified: true)
+        let customDisplay = AccountProfileDisplay.make(profile: custom, among: [custom], health: nil)
+        try expect(customDisplay.title == "公司帳號", "custom name should be preserved")
+
+        let health = AccountHealthSnapshot(
+            identity: AccountIdentity(accountType: "chatgpt", authMode: "chatgpt", planType: "Plus", email: "person@example.com", requiresOpenAIAuth: true),
+            receivedAt: Date(),
+            connectionState: .connected
+        )
+        let known = AccountProfile(id: UUID(), fingerprint: "known", displayName: "ChatGPT 帳號", accountType: "chatgpt", authMode: "chatgpt", lastSeen: Date())
+        let knownDisplay = AccountProfileDisplay.make(profile: known, among: [known], health: health)
+        try expect(knownDisplay.title == "ChatGPT 帳號 1", "known account should get stable title")
+        try expect(knownDisplay.subtitle == "p*****@example.com · Plus · ChatGPT", "known account should show masked email, plan, and auth")
+        try expect(!knownDisplay.subtitle.contains("person@example.com"), "raw email must not reach display")
+
+        let managedHealth = AccountHealthSnapshot(
+            identity: AccountIdentity(accountType: "chatgpt", authMode: "managed", planType: "Plus", email: "person@example.com", requiresOpenAIAuth: true),
+            receivedAt: Date(),
+            connectionState: .connected
+        )
+        let managedDisplay = AccountProfileDisplay.make(profile: known, among: [known], health: managedHealth)
+        try expect(managedDisplay.subtitle == "p*****@example.com · Plus · ChatGPT", "managed ChatGPT auth should use friendly label")
+
+        let apiProfile = AccountProfile(id: UUID(), fingerprint: "api", displayName: "未識別帳號", accountType: "apiKey", authMode: "apiKey", lastSeen: Date(), isUnidentified: true)
+        let apiHealth = AccountHealthSnapshot(
+            identity: AccountIdentity(accountType: "apiKey", authMode: "apiKey", planType: nil, email: nil, requiresOpenAIAuth: false),
+            receivedAt: Date(),
+            connectionState: .connected
+        )
+        let apiDisplay = AccountProfileDisplay.make(profile: apiProfile, among: [apiProfile], health: apiHealth)
+        try expect(apiDisplay.subtitle == "API Key · 未提供方案", "no-email account should show safe fallback")
     }
 
     private static func testUpdateVersionComparison() throws {

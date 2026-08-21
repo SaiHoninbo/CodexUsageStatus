@@ -86,15 +86,15 @@ The updater does **not** silently overwrite or replace a running application. Th
 
 The updater expects a GitHub Release with:
 
-- A semantic-version tag such as `v2.4.25`
+- A semantic-version tag such as `v2.4.26`
 - An asset named exactly `CodexUsageStatus.app.zip`
 - The signed app bundle inside the ZIP
 - No `._*`, `__MACOSX`, source, test, auth, token, or history files
 
-For the current `2.4.25 / build 45` package, the verified ZIP SHA-256 is:
+For the current `2.4.26 / build 46` package, the verified ZIP SHA-256 is:
 
 ```text
-4f8c15971858cd0b2605a39efd80ab7e89b4086a34328d9b59727eeb31c80c36
+ae642ac40392b0f339957eb13f5bda1b315f5ea888046db555eb8a115a3e48a1
 ```
 
 If there is no GitHub Release yet, the updater correctly reports that no formal release is available; committing a ZIP to `main` alone does not create a release update.

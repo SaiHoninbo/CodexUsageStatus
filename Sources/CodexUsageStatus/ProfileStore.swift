@@ -9,6 +9,8 @@ struct AccountProfile: Codable, Equatable, Identifiable {
     var accountType: String?
     var authMode: String?
     var lastSeen: Date
+    /// True when the user explicitly supplied a name.
+    var isDisplayNameCustom: Bool
     /// True when App Server did not provide a stable account identifier (for
     /// example API-key or Bedrock auth). Such data must not be presented as a
     /// confidently identified account.
@@ -24,6 +26,7 @@ struct AccountProfile: Codable, Equatable, Identifiable {
         accountType: String?,
         authMode: String? = nil,
         lastSeen: Date,
+        isDisplayNameCustom: Bool = false,
         isUnidentified: Bool = false,
         isManaged: Bool = false,
         workerEnabled: Bool = true,
@@ -35,6 +38,7 @@ struct AccountProfile: Codable, Equatable, Identifiable {
         self.accountType = accountType
         self.authMode = authMode
         self.lastSeen = lastSeen
+        self.isDisplayNameCustom = isDisplayNameCustom
         self.isUnidentified = isUnidentified
         self.isManaged = isManaged
         self.workerEnabled = workerEnabled
@@ -42,7 +46,7 @@ struct AccountProfile: Codable, Equatable, Identifiable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, fingerprint, displayName, accountType, authMode, lastSeen, isUnidentified, isManaged, workerEnabled, syncIntervalSeconds
+        case id, fingerprint, displayName, accountType, authMode, lastSeen, isDisplayNameCustom, isUnidentified, isManaged, workerEnabled, syncIntervalSeconds
     }
 
     init(from decoder: Decoder) throws {
@@ -53,10 +57,21 @@ struct AccountProfile: Codable, Equatable, Identifiable {
         accountType = try container.decodeIfPresent(String.self, forKey: .accountType)
         authMode = try container.decodeIfPresent(String.self, forKey: .authMode)
         lastSeen = try container.decode(Date.self, forKey: .lastSeen)
+        let storedCustomName = try container.decodeIfPresent(Bool.self, forKey: .isDisplayNameCustom)
+        isDisplayNameCustom = storedCustomName ?? !AccountProfile.isGenericDisplayName(displayName)
         isUnidentified = try container.decodeIfPresent(Bool.self, forKey: .isUnidentified) ?? fingerprint.hasPrefix("unknown-")
         isManaged = try container.decodeIfPresent(Bool.self, forKey: .isManaged) ?? false
         workerEnabled = try container.decodeIfPresent(Bool.self, forKey: .workerEnabled) ?? true
         syncIntervalSeconds = max(60, min(3600, try container.decodeIfPresent(Int.self, forKey: .syncIntervalSeconds) ?? 300))
+    }
+
+    static func isGenericDisplayName(_ name: String) -> Bool {
+        let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized == "ChatGPT 帳號" || normalized == "未識別帳號" { return true }
+        for prefix in ["ChatGPT 帳號 ", "未識別帳號 "] {
+            if normalized.hasPrefix(prefix), Int(normalized.dropFirst(prefix.count)) != nil { return true }
+        }
+        return false
     }
 }
 
@@ -198,7 +213,12 @@ final class AccountProfileStore: ObservableObject {
         if let index = profiles.firstIndex(where: { $0.id == profile.id }) {
             profiles[index].lastSeen = Date()
             profiles[index].accountType = identity.accountType ?? profiles[index].accountType
-            profiles[index].isUnidentified = identity.email == nil || profiles[index].isUnidentified
+            // A stable Email supersedes an old unidentified fallback. If a
+            // response temporarily omits Email, keep the existing identity
+            // classification instead of downgrading a known profile.
+            if identity.email != nil {
+                profiles[index].isUnidentified = false
+            }
         }
         persist()
         return AccountProfileSelection(profile: profile, identity: identity, switched: previousID != profile.id)
@@ -239,6 +259,7 @@ final class AccountProfileStore: ObservableObject {
         let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         profiles[index].displayName = String(trimmed.prefix(80))
+        profiles[index].isDisplayNameCustom = true
         persist()
     }
 
@@ -279,6 +300,7 @@ final class AccountProfileStore: ObservableObject {
                 : "未識別帳號 \(ordinal)",
             accountType: nil,
             lastSeen: Date(),
+            isDisplayNameCustom: displayName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
             isUnidentified: true,
             isManaged: true
         )
