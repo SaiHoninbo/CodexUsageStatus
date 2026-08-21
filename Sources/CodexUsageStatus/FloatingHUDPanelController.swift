@@ -674,6 +674,19 @@ final class FloatingHUDPanelController: NSObject {
 }
 
 private struct CodexFloatingHUDView: View {
+    private enum UpdateFeedbackKind {
+        case upToDate
+        case available
+        case error
+    }
+
+    private struct UpdateFeedback: Identifiable {
+        let id = UUID()
+        let kind: UpdateFeedbackKind
+        let title: String
+        let message: String
+    }
+
     @ObservedObject var model: UsageViewModel
     @ObservedObject var layoutState: FloatingHUDLayoutState
     let pasteClipboard: () -> Void
@@ -705,6 +718,8 @@ private struct CodexFloatingHUDView: View {
     @State private var decreaseAmount: Int?
     @State private var decreaseBounce = false
     @State private var decreaseAnimationID = 0
+    @State private var updateCheckRequested = false
+    @State private var updateFeedback: UpdateFeedback?
 
     var body: some View {
         // Keep the context-menu host outside the pulse TimelineView. The
@@ -735,6 +750,72 @@ private struct CodexFloatingHUDView: View {
         }
         .contextMenu {
             contextMenuContent
+        }
+        .alert(item: $updateFeedback) { feedback in
+            switch feedback.kind {
+            case .upToDate:
+                return Alert(
+                    title: Text(feedback.title),
+                    message: Text(feedback.message),
+                    dismissButton: .default(Text("確定"))
+                )
+            case .available:
+                return Alert(
+                    title: Text(feedback.title),
+                    message: Text(feedback.message),
+                    primaryButton: .default(Text("下載並驗證")) {
+                        downloadAvailableUpdate()
+                    },
+                    secondaryButton: .cancel(Text("稍後"))
+                )
+            case .error:
+                return Alert(
+                    title: Text(feedback.title),
+                    message: Text(feedback.message),
+                    primaryButton: .default(Text("重試")) {
+                        requestUpdateCheck()
+                    },
+                    secondaryButton: .cancel(Text("關閉"))
+                )
+            }
+        }
+        .onChange(of: model.updateState) { _, newState in
+            presentUpdateFeedback(for: newState)
+        }
+    }
+
+    private func requestUpdateCheck() {
+        updateCheckRequested = true
+        checkForUpdates()
+    }
+
+    private func presentUpdateFeedback(for state: AppUpdateState) {
+        guard updateCheckRequested else { return }
+
+        switch state {
+        case .upToDate:
+            updateCheckRequested = false
+            updateFeedback = UpdateFeedback(
+                kind: .upToDate,
+                title: "更新檢查完成",
+                message: "目前已是最新版本。"
+            )
+        case .available(let release):
+            updateCheckRequested = false
+            updateFeedback = UpdateFeedback(
+                kind: .available,
+                title: "有新版本可用",
+                message: "發現 Codex Usage Status \(release.version)。要現在下載並驗證嗎？"
+            )
+        case .error(let message):
+            updateCheckRequested = false
+            updateFeedback = UpdateFeedback(
+                kind: .error,
+                title: "更新檢查失敗",
+                message: message
+            )
+        case .idle, .checking, .downloading, .downloaded:
+            break
         }
     }
 
@@ -964,7 +1045,7 @@ private struct CodexFloatingHUDView: View {
         // the collapsed "通知與同步" submenu, which made an available
         // release look as if the app had no update action at all.
         Section {
-            Button(action: checkForUpdates) {
+            Button(action: requestUpdateCheck) {
                 Label("檢查更新", systemImage: "arrow.down.circle")
             }
 
@@ -995,7 +1076,7 @@ private struct CodexFloatingHUDView: View {
             case .error(let message):
                 Label(message, systemImage: "exclamationmark.triangle")
                     .lineLimit(2)
-                Button("重試更新檢查", action: checkForUpdates)
+                Button("重試更新檢查", action: requestUpdateCheck)
             case .idle:
                 EmptyView()
             }

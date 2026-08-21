@@ -90,15 +90,15 @@ Updater **不會**在背景靜默覆蓋或替換正在執行的 App。因為目�
 
 Updater 預期 GitHub Release 具備：
 
-- Semantic-version tag，例如 `v2.4.20`
+- Semantic-version tag，例如 `v2.4.21`
 - 名稱完全一致的 asset：`CodexUsageStatus.app.zip`
 - ZIP 內包含已簽章的 App bundle
 - 不包含 `._*`、`__MACOSX`、source、tests、auth、token 或 history 檔案
 
-目前 `2.4.20 / build 40` 安裝包的已驗證 SHA-256：
+目前 `2.4.21 / build 41` 安裝包的已驗證 SHA-256：
 
 ```text
-df71034126c77f9e96b6cec5d49b8259106ed78bb1239898f4d5510e2a39f331
+bfea473c6fab9443a8f71f037396a1de2c1d1759d0d3f588393e908d2504b6c5
 ```
 
 如果 GitHub 尚未建立正式 Release，Updater 會正確顯示目前沒有可用的正式版本；只把 ZIP 提交到 `main` 並不會自動建立 Release 更新。
