@@ -840,6 +840,18 @@ final class UsageViewModel: ObservableObject {
         snapshot?.primaryRemainingPercent ?? snapshot?.fallbackRemainingPercent
     }
 
+    /// The HUD follows the same effective quota value as the menu bar.  The
+    /// primary window remains preferred; a server response that temporarily
+    /// omits primary but still contains a valid fallback window must not make
+    /// the HUD disappear while the menu bar continues to show a percentage.
+    var hudRemainingPercent: Int? {
+        menuBarRemainingPercent
+    }
+
+    var hudResetTimestamp: Int64? {
+        snapshot?.primary?.resetsAt ?? snapshot?.secondary?.resetsAt
+    }
+
     var menuBarTitle: String {
         guard let percent = menuBarRemainingPercent else { return "Codex —" }
         return "Codex \(percent)%"

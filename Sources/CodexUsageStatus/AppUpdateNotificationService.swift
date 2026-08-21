@@ -12,10 +12,10 @@ final class AppUpdateNotificationService {
             guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else { return }
             let content = UNMutableNotificationContent()
             content.title = "Codex Usage Status 有新版本"
-            content.body = "版本 (release.version) 已可用。請在 App 內下載並驗證。"
+            content.body = "版本 \(release.version) 已可用。請在 App 內下載並驗證。"
             content.sound = soundEnabled ? .default : nil
             let request = UNNotificationRequest(
-                identifier: "codex-update-(release.version)",
+                identifier: "codex-update-\(release.version)",
                 content: content,
                 trigger: nil
             )

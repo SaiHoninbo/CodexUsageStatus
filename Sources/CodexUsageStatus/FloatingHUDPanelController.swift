@@ -232,12 +232,13 @@ final class FloatingHUDPanelController: NSObject {
 
     private func refreshVisibility() {
         guard let panel else { return }
-        // A HUD without a confirmed primary percentage is only a partial
+        // A HUD without any effective quota percentage is only a partial
         // transport state (for example while account switching, reconnecting,
-        // or before the first rate-limit read). Never leave that shell on
-        // screen with only "reset time unknown" and action buttons.
+        // or before the first rate-limit read). Primary is preferred, but the
+        // model may legitimately expose a fallback window while primary is
+        // omitted; keep the HUD consistent with the menu-bar value then.
         guard model.floatingHUDEnabled,
-              model.snapshot?.primaryRemainingPercent != nil else {
+              model.hudRemainingPercent != nil else {
             layoutState.isCodexFocused = false
             panel.orderOut(nil)
             return
@@ -280,7 +281,14 @@ final class FloatingHUDPanelController: NSObject {
         let bundleID = application.bundleIdentifier?.lowercased() ?? ""
         let name = application.localizedName?.lowercased() ?? ""
         let path = application.bundleURL?.path.lowercased() ?? ""
-        return bundleID.contains("chatgpt") || name.contains("chatgpt") || path.contains("/chatgpt.app")
+        // The native Codex desktop app identifies itself as `com.openai.codex`.
+        // Keep this exact so CodexUsageStatus itself is never treated as the
+        // host, while browsers and unrelated applications remain hidden.
+        let isNativeCodexBundle = bundleID == "com.openai.codex"
+        return isNativeCodexBundle
+            || bundleID.contains("chatgpt")
+            || name.contains("chatgpt")
+            || path.contains("/chatgpt.app")
     }
 
     private func position(_ panel: NSPanel, beside application: NSRunningApplication) {
@@ -704,14 +712,14 @@ private struct CodexFloatingHUDView: View {
         // breathing border; attaching the menu inside it recreates the
         // AppKit anchor on every pulse and makes an open menu jitter.
         ZStack {
-            if model.snapshot?.primaryRemainingPercent == nil {
+            if model.hudRemainingPercent == nil {
                 // Keep the host at its normal size while the controller orders it
                 // out. This prevents a one-frame partial HUD from being painted
                 // during an account/focus transition.
                 Color.clear
                     .frame(width: layoutState.size.width, height: layoutState.size.height)
             } else if let profile = HUDWarningPolicy.framePulseProfile(
-                remainingPercent: model.snapshot?.primaryRemainingPercent,
+                remainingPercent: model.hudRemainingPercent,
                 connectionState: model.connectionState,
                 isStale: model.isStale
             ), !accessibilityReduceMotion {
@@ -720,7 +728,7 @@ private struct CodexFloatingHUDView: View {
                 }
             } else {
                 hudContainer(
-                    frameOpacity: accessibilityReduceMotion && hasLivePrimaryData ? 0.14 : 0,
+                    frameOpacity: accessibilityReduceMotion && hasLiveHUDData ? 0.14 : 0,
                     glowRadius: 0
                 )
             }
@@ -885,7 +893,7 @@ private struct CodexFloatingHUDView: View {
         .onChange(of: model.currentProfileID) { _, newProfileID in
             resetTracking(for: newProfileID)
         }
-        .onChange(of: model.snapshot?.primaryRemainingPercent) { _, _ in
+        .onChange(of: model.hudRemainingPercent) { _, _ in
             observePercentChange()
         }
         .onChange(of: model.connectionState) { _, _ in
@@ -949,6 +957,48 @@ private struct CodexFloatingHUDView: View {
                 isPasteAndSubmitInFlight
                     || !HUDContextMenuPolicy.pasteActionsEnabled(isCodexFocused: layoutState.isCodexFocused)
             )
+        }
+
+        // Keep update actions at the top level so they are discoverable from
+        // the HUD's context menu.  The previous version placed these under
+        // the collapsed "通知與同步" submenu, which made an available
+        // release look as if the app had no update action at all.
+        Section {
+            Button(action: checkForUpdates) {
+                Label("檢查更新", systemImage: "arrow.down.circle")
+            }
+
+            switch model.updateState {
+            case .available(let release):
+                Button {
+                    downloadAvailableUpdate()
+                } label: {
+                    Label("下載並驗證更新 \(release.version)", systemImage: "arrow.down.app")
+                }
+                Button(action: openReleasePage) {
+                    Label("開啟 Release 頁面", systemImage: "safari")
+                }
+            case .checking:
+                Label("正在檢查更新…", systemImage: "hourglass")
+            case .downloading(let release):
+                Label("正在下載並驗證 \(release.version)…", systemImage: "arrow.down.circle.dotted")
+            case .downloaded(let release, _):
+                Label("更新 \(release.version) 已驗證", systemImage: "checkmark.seal")
+                Button(action: revealDownloadedUpdate) {
+                    Label("在 Finder 顯示已下載更新", systemImage: "folder")
+                }
+                Button(action: showDetails) {
+                    Label("開啟更新安裝說明", systemImage: "info.circle")
+                }
+            case .upToDate:
+                Label("目前已是最新版本", systemImage: "checkmark.circle")
+            case .error(let message):
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .lineLimit(2)
+                Button("重試更新檢查", action: checkForUpdates)
+            case .idle:
+                EmptyView()
+            }
         }
 
         Menu {
@@ -1023,16 +1073,8 @@ private struct CodexFloatingHUDView: View {
                 )
             }
             Divider()
-            Button(action: checkForUpdates) {
-                Label("檢查更新", systemImage: "arrow.down.circle")
-            }
-            if let release = model.updateState.release {
-                Button("下載更新 \(release.version)", action: downloadAvailableUpdate)
-                Button("開啟 Release 頁面", action: openReleasePage)
-            }
-            if case .downloaded = model.updateState {
-                Button("在 Finder 顯示已下載更新", action: revealDownloadedUpdate)
-            }
+            Text("更新操作位於右鍵主選單")
+                .foregroundStyle(.secondary)
         } label: {
             Label("通知與同步", systemImage: "bell.badge")
         }
@@ -1107,10 +1149,10 @@ private struct CodexFloatingHUDView: View {
         return profile.minOpacity + ((profile.maxOpacity - profile.minOpacity) * wave)
     }
 
-    private var hasLivePrimaryData: Bool {
+    private var hasLiveHUDData: Bool {
         model.connectionState == .connected
             && !model.isStale
-            && model.snapshot?.primaryRemainingPercent != nil
+            && model.hudRemainingPercent != nil
     }
 
     private func resetTracking(for profileID: UUID?) {
@@ -1127,7 +1169,7 @@ private struct CodexFloatingHUDView: View {
     private func syncLiveBaseline() {
         guard model.connectionState == .connected,
               !model.isStale,
-              let current = model.snapshot?.primaryRemainingPercent else {
+              let current = model.hudRemainingPercent else {
             lastLivePercent = nil
             return
         }
@@ -1147,7 +1189,7 @@ private struct CodexFloatingHUDView: View {
         }
         guard model.connectionState == .connected,
               !model.isStale,
-              let current = model.snapshot?.primaryRemainingPercent else {
+              let current = model.hudRemainingPercent else {
             lastLivePercent = nil
             return
         }
@@ -1177,7 +1219,7 @@ private struct CodexFloatingHUDView: View {
     }
 
     private var hudResetDescription: String {
-        let description = model.resetDescription(model.snapshot?.primary?.resetsAt)
+        let description = model.resetDescription(model.hudResetTimestamp)
         guard description.hasSuffix("後重置") else { return description }
         return description
             .replacingOccurrences(of: "後重置", with: "")
