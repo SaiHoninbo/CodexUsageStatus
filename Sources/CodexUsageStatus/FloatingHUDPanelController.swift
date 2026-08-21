@@ -675,8 +675,11 @@ final class FloatingHUDPanelController: NSObject {
 
 private struct CodexFloatingHUDView: View {
     private enum UpdateFeedbackKind {
+        case checking
         case upToDate
         case available
+        case downloading
+        case downloaded
         case error
     }
 
@@ -747,50 +750,52 @@ private struct CodexFloatingHUDView: View {
                     glowRadius: 0
                 )
             }
+
+            // A borderless, non-activating NSPanel cannot reliably present a
+            // SwiftUI Alert after its context menu closes. Keep the result in
+            // the HUD itself so every check has immediate, visible feedback,
+            // even when Codex remains the frontmost application.
+            if let updateFeedback {
+                updateFeedbackBanner(updateFeedback)
+                    .transition(.opacity.combined(with: .scale(scale: 0.97)))
+                    .zIndex(20)
+            }
         }
         .contextMenu {
             contextMenuContent
         }
-        .alert(item: $updateFeedback) { feedback in
-            switch feedback.kind {
-            case .upToDate:
-                return Alert(
-                    title: Text(feedback.title),
-                    message: Text(feedback.message),
-                    dismissButton: .default(Text("確定"))
-                )
-            case .available:
-                return Alert(
-                    title: Text(feedback.title),
-                    message: Text(feedback.message),
-                    primaryButton: .default(Text("下載並驗證")) {
-                        downloadAvailableUpdate()
-                    },
-                    secondaryButton: .cancel(Text("稍後"))
-                )
-            case .error:
-                return Alert(
-                    title: Text(feedback.title),
-                    message: Text(feedback.message),
-                    primaryButton: .default(Text("重試")) {
-                        requestUpdateCheck()
-                    },
-                    secondaryButton: .cancel(Text("關閉"))
-                )
-            }
-        }
         .onChange(of: model.updateState) { _, newState in
             presentUpdateFeedback(for: newState)
+        }
+        .task(id: updateFeedback?.id) {
+            guard let feedback = updateFeedback,
+                  feedback.kind != .checking,
+                  feedback.kind != .downloading else { return }
+            try? await Task.sleep(nanoseconds: 4_500_000_000)
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.18)) {
+                updateFeedback = nil
+            }
         }
     }
 
     private func requestUpdateCheck() {
         updateCheckRequested = true
+        withAnimation(.easeOut(duration: 0.16)) {
+            updateFeedback = UpdateFeedback(
+                kind: .checking,
+                title: "正在檢查更新…",
+                message: "正在連線到 GitHub Release"
+            )
+        }
         checkForUpdates()
     }
 
     private func presentUpdateFeedback(for state: AppUpdateState) {
-        guard updateCheckRequested else { return }
+        // A download started from the result banner is a second, explicit
+        // phase. It must continue to update the same visible banner even
+        // though the original check request has already completed.
+        guard updateCheckRequested || updateFeedback?.kind == .downloading else { return }
 
         switch state {
         case .upToDate:
@@ -805,7 +810,7 @@ private struct CodexFloatingHUDView: View {
             updateFeedback = UpdateFeedback(
                 kind: .available,
                 title: "有新版本可用",
-                message: "發現 Codex Usage Status \(release.version)。要現在下載並驗證嗎？"
+                message: "發現 Codex Usage Status \(release.version)"
             )
         case .error(let message):
             updateCheckRequested = false
@@ -814,8 +819,99 @@ private struct CodexFloatingHUDView: View {
                 title: "更新檢查失敗",
                 message: message
             )
-        case .idle, .checking, .downloading, .downloaded:
+        case .downloaded(let release, _):
+            guard updateFeedback?.kind == .downloading else { return }
+            updateFeedback = UpdateFeedback(
+                kind: .downloaded,
+                title: "更新已下載並驗證",
+                message: "\(release.version) 已準備完成"
+            )
+        case .idle, .checking, .downloading:
             break
+        }
+    }
+
+    @ViewBuilder
+    private func updateFeedbackBanner(_ feedback: UpdateFeedback) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: updateFeedbackIcon(for: feedback.kind))
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(updateFeedbackColor(for: feedback.kind))
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text(feedback.title)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .lineLimit(1)
+                Text(feedback.message)
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            switch feedback.kind {
+            case .checking, .downloading:
+                ProgressView()
+                    .controlSize(.small)
+            case .available:
+                Button("下載") {
+                    guard let release = model.updateState.release else { return }
+                    updateFeedback = UpdateFeedback(
+                        kind: .downloading,
+                        title: "正在下載更新…",
+                        message: "正在驗證 \(release.version)"
+                    )
+                    downloadAvailableUpdate()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            case .downloaded:
+                Button("顯示") {
+                    revealDownloadedUpdate()
+                    updateFeedback = nil
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            case .error:
+                Button("重試") { requestUpdateCheck() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            case .upToDate:
+                Button("確定") { updateFeedback = nil }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(width: layoutState.size.width, height: layoutState.size.height, alignment: .leading)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous)
+                .stroke(updateFeedbackColor(for: feedback.kind).opacity(0.72), lineWidth: 1.8)
+        }
+        .shadow(color: updateFeedbackColor(for: feedback.kind).opacity(0.16), radius: 8)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(feedback.title)
+        .accessibilityValue(feedback.message)
+    }
+
+    private func updateFeedbackIcon(for kind: UpdateFeedbackKind) -> String {
+        switch kind {
+        case .checking: return "arrow.down.circle"
+        case .upToDate: return "checkmark.circle.fill"
+        case .available: return "sparkles"
+        case .downloading: return "arrow.down.circle.dotted"
+        case .downloaded: return "checkmark.seal.fill"
+        case .error: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func updateFeedbackColor(for kind: UpdateFeedbackKind) -> Color {
+        switch kind {
+        case .checking, .downloading: return .accentColor
+        case .upToDate, .downloaded: return .green
+        case .available: return .orange
+        case .error: return .red
         }
     }
 
