@@ -126,6 +126,10 @@ struct UsagePopoverView: View {
                     Text("正在檢查 GitHub 更新…")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("取消") { model.cancelUpdateCheck() }
+                        .buttonStyle(.link)
+                        .font(.caption)
                 }
             case .upToDate:
                 Text("目前已是最新版本。")

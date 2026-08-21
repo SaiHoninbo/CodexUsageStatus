@@ -37,6 +37,9 @@ enum AppUpdateState: Equatable {
 enum AppUpdateError: LocalizedError {
     case noRelease
     case invalidResponse
+    case checkTimedOut
+    case checkCancelled
+    case httpStatus(Int)
     case missingDownload
     case downloadFailed
     case invalidArchive
@@ -48,6 +51,9 @@ enum AppUpdateError: LocalizedError {
         switch self {
         case .noRelease: return "GitHub 尚未發布正式 Release。"
         case .invalidResponse: return "GitHub 更新資訊格式無法辨識。"
+        case .checkTimedOut: return "更新檢查逾時，請確認網路後重試。"
+        case .checkCancelled: return "更新檢查已取消。"
+        case .httpStatus(let status): return "GitHub 更新服務回應錯誤（HTTP \(status)）。"
         case .missingDownload: return "此 Release 沒有 CodexUsageStatus.app.zip。"
         case .downloadFailed: return "更新檔下載失敗。"
         case .invalidArchive: return "下載的更新檔不是有效的 App bundle。"
@@ -120,11 +126,16 @@ final class AppUpdateService: NSObject {
     private let session: URLSession
     private let fileManager = FileManager.default
     private let updatesDirectory: URL
+    private let checkTimeout: TimeInterval
     private(set) var state: AppUpdateState = .idle
+    private var checkTask: URLSessionDataTask?
+    private var checkTimeoutTask: Task<Void, Never>?
+    private var checkGeneration: UInt64 = 0
     private var downloadTask: URLSessionDownloadTask?
 
-    init(session: URLSession = .shared) {
+    init(session: URLSession = .shared, checkTimeout: TimeInterval = 20) {
         self.session = session
+        self.checkTimeout = max(0.1, checkTimeout)
         let applicationSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
         updatesDirectory = applicationSupport
@@ -140,26 +151,38 @@ final class AppUpdateService: NSObject {
 
     func check(completion: ((AppUpdateState) -> Void)? = nil) {
         guard state != .checking else { return }
+
+        checkGeneration &+= 1
+        let generation = checkGeneration
+        checkTask?.cancel()
+        checkTask = nil
+        checkTimeoutTask?.cancel()
+        checkTimeoutTask = nil
         state = .checking
         var request = URLRequest(url: endpoint)
         request.httpMethod = "GET"
-        request.timeoutInterval = 20
+        request.timeoutInterval = checkTimeout
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("CodexUsageStatus/\(currentVersion)", forHTTPHeaderField: "User-Agent")
 
-        session.dataTask(with: request) { [weak self] data, response, error in
+        let task = session.dataTask(with: request) { [weak self] data, response, error in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                guard generation == self.checkGeneration, self.state == .checking else { return }
                 if let error {
-                    self.finish(.error("更新檢查失敗：\(error.localizedDescription)"), completion: completion)
+                    self.finishCheck(.error("更新檢查失敗：\(error.localizedDescription)"), completion: completion)
                     return
                 }
                 if let http = response as? HTTPURLResponse, http.statusCode == 404 {
-                    self.finish(.error(AppUpdateError.noRelease.localizedDescription), completion: completion)
+                    self.finishCheck(.error(AppUpdateError.noRelease.localizedDescription), completion: completion)
+                    return
+                }
+                if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                    self.finishCheck(.error(AppUpdateError.httpStatus(http.statusCode).localizedDescription), completion: completion)
                     return
                 }
                 guard let data else {
-                    self.finish(.error(AppUpdateError.invalidResponse.localizedDescription), completion: completion)
+                    self.finishCheck(.error(AppUpdateError.invalidResponse.localizedDescription), completion: completion)
                     return
                 }
                 do {
@@ -178,15 +201,38 @@ final class AppUpdateService: NSObject {
                         publishedAt: payload.publishedAt
                     )
                     guard AppVersionComparator.isNewer(release.version, than: self.currentVersion) else {
-                        self.finish(.upToDate, completion: completion)
+                        self.finishCheck(.upToDate, completion: completion)
                         return
                     }
-                    self.finish(.available(release), completion: completion)
+                    self.finishCheck(.available(release), completion: completion)
                 } catch {
-                    self.finish(.error("更新資訊無法解析：\(error.localizedDescription)"), completion: completion)
+                    self.finishCheck(.error("更新資訊無法解析：\(error.localizedDescription)"), completion: completion)
                 }
             }
-        }.resume()
+        }
+        checkTask = task
+        task.resume()
+
+        let timeout = checkTimeout
+        checkTimeoutTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            self?.timeoutCheck(generation: generation, completion: completion)
+        }
+    }
+
+    func cancelCheck() {
+        guard state == .checking else { return }
+        checkGeneration &+= 1
+        checkTask?.cancel()
+        checkTask = nil
+        checkTimeoutTask?.cancel()
+        checkTimeoutTask = nil
+        finish(.error(AppUpdateError.checkCancelled.localizedDescription), completion: nil)
     }
 
     func download(completion: ((AppUpdateState) -> Void)? = nil) {
@@ -291,6 +337,23 @@ final class AppUpdateService: NSObject {
     private func finish(_ newState: AppUpdateState, completion: ((AppUpdateState) -> Void)?) {
         state = newState
         completion?(newState)
+    }
+
+    private func finishCheck(_ newState: AppUpdateState, completion: ((AppUpdateState) -> Void)?) {
+        checkTimeoutTask?.cancel()
+        checkTimeoutTask = nil
+        checkTask = nil
+        state = newState
+        completion?(newState)
+    }
+
+    private func timeoutCheck(generation: UInt64, completion: ((AppUpdateState) -> Void)?) {
+        guard generation == checkGeneration, state == .checking else { return }
+        checkGeneration &+= 1
+        checkTask?.cancel()
+        checkTask = nil
+        checkTimeoutTask = nil
+        finish(.error(AppUpdateError.checkTimedOut.localizedDescription), completion: completion)
     }
 
     private static func sha256(from digest: String?) -> String? {

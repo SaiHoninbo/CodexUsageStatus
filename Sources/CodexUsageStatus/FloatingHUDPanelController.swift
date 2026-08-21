@@ -126,6 +126,7 @@ final class FloatingHUDPanelController: NSObject {
             setTokenActivityRefreshInterval: { [weak self] seconds in self?.model.setTokenActivityRefreshInterval(seconds) },
             setCredentialWatchInterval: { [weak self] seconds in self?.model.setCredentialWatchInterval(seconds) },
             checkForUpdates: { [weak self] in self?.model.checkForUpdates() },
+            cancelUpdateCheck: { [weak self] in self?.model.cancelUpdateCheck() },
             downloadAvailableUpdate: { [weak self] in self?.model.downloadAvailableUpdate() },
             revealDownloadedUpdate: { [weak self] in self?.model.revealDownloadedUpdate() },
             openReleasePage: { [weak self] in self?.model.openUpdateReleasePage() }
@@ -707,6 +708,7 @@ private struct CodexFloatingHUDView: View {
     let setTokenActivityRefreshInterval: (Int) -> Void
     let setCredentialWatchInterval: (Int) -> Void
     let checkForUpdates: () -> Void
+    let cancelUpdateCheck: () -> Void
     let downloadAvailableUpdate: () -> Void
     let revealDownloadedUpdate: () -> Void
     let openReleasePage: () -> Void
@@ -850,7 +852,13 @@ private struct CodexFloatingHUDView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             switch feedback.kind {
-            case .checking, .downloading:
+            case .checking:
+                ProgressView()
+                    .controlSize(.small)
+                Button("取消") { cancelUpdateCheck() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            case .downloading:
                 ProgressView()
                     .controlSize(.small)
             case .available:

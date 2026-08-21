@@ -322,6 +322,11 @@ final class UsageViewModel: ObservableObject {
         }
     }
 
+    func cancelUpdateCheck() {
+        updateService.cancelCheck()
+        updateState = updateService.state
+    }
+
     func downloadAvailableUpdate() {
         updateService.download { [weak self] state in
             self?.updateState = state
