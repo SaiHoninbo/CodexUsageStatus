@@ -78,23 +78,23 @@ The app checks the GitHub `latest release` endpoint at startup and periodically 
 2. You choose **Download update**.
 3. The ZIP is downloaded to the user's Application Support updates directory.
 4. The app verifies the archive checksum when GitHub provides one and performs strict code-signature verification after extraction.
-5. The app reveals the verified app in Finder so you can manually replace the copy in `/Applications`.
+5. You choose **Install and Relaunch**. A detached helper waits for the current process to exit, re-validates the staged app, swaps it into the current app path, and relaunches it.
 
-The updater does **not** silently overwrite or replace a running application. This is intentional while the distribution remains ad-hoc signed and not notarized.
+The updater does not send credentials or user data to GitHub, and it does not touch Codex auth/history directories. If the replacement cannot be completed, it attempts to restore the previous app bundle.
 
 ### Release requirements for maintainers
 
 The updater expects a GitHub Release with:
 
-- A semantic-version tag such as `v2.4.26`
+- A semantic-version tag such as `v2.4.27`
 - An asset named exactly `CodexUsageStatus.app.zip`
 - The signed app bundle inside the ZIP
 - No `._*`, `__MACOSX`, source, test, auth, token, or history files
 
-For the current `2.4.26 / build 46` package, the verified ZIP SHA-256 is:
+For the current `2.4.27 / build 47` package, the verified ZIP SHA-256 is:
 
 ```text
-ae642ac40392b0f339957eb13f5bda1b315f5ea888046db555eb8a115a3e48a1
+7c4df8003615c7116d218cce635f417d755e632942eb56b789a28e356e20b6fb
 ```
 
 If there is no GitHub Release yet, the updater correctly reports that no formal release is available; committing a ZIP to `main` alone does not create a release update.

@@ -660,6 +660,8 @@ struct CodexUsageStatusTests {
         try expect(AccountProfileDisplay.maskEmail(" person@example.com ") == "p*****@example.com", "email should be masked")
         try expect(AccountProfileDisplay.maskEmail("ab@example.com") == "a*@example.com", "short email should remain distinguishable")
         try expect(AccountProfileDisplay.maskEmail("not-an-email") == nil, "invalid email should be rejected")
+        try expect(AccountProfileDisplay.fullEmail(" person@example.com ") == "person@example.com", "full email should be trimmed without masking")
+        try expect(AccountProfileDisplay.fullEmail("not-an-email") == nil, "invalid full email should be rejected")
 
         let firstID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
         let secondID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
@@ -683,9 +685,8 @@ struct CodexUsageStatusTests {
         )
         let known = AccountProfile(id: UUID(), fingerprint: "known", displayName: "ChatGPT 帳號", accountType: "chatgpt", authMode: "chatgpt", lastSeen: Date())
         let knownDisplay = AccountProfileDisplay.make(profile: known, among: [known], health: health)
-        try expect(knownDisplay.title == "ChatGPT 帳號 1", "known account should get stable title")
-        try expect(knownDisplay.subtitle == "p*****@example.com · Plus · ChatGPT", "known account should show masked email, plan, and auth")
-        try expect(!knownDisplay.subtitle.contains("person@example.com"), "raw email must not reach display")
+        try expect(knownDisplay.title == "person@example.com", "known account should use full email as title")
+        try expect(knownDisplay.subtitle == "Plus · ChatGPT", "known account should show plan and auth below full email")
 
         let managedHealth = AccountHealthSnapshot(
             identity: AccountIdentity(accountType: "chatgpt", authMode: "managed", planType: "Plus", email: "person@example.com", requiresOpenAIAuth: true),
@@ -693,7 +694,8 @@ struct CodexUsageStatusTests {
             connectionState: .connected
         )
         let managedDisplay = AccountProfileDisplay.make(profile: known, among: [known], health: managedHealth)
-        try expect(managedDisplay.subtitle == "p*****@example.com · Plus · ChatGPT", "managed ChatGPT auth should use friendly label")
+        try expect(managedDisplay.title == "person@example.com", "managed account should keep full email title")
+        try expect(managedDisplay.subtitle == "Plus · ChatGPT", "managed ChatGPT auth should use friendly label")
 
         let apiProfile = AccountProfile(id: UUID(), fingerprint: "api", displayName: "未識別帳號", accountType: "apiKey", authMode: "apiKey", lastSeen: Date(), isUnidentified: true)
         let apiHealth = AccountHealthSnapshot(

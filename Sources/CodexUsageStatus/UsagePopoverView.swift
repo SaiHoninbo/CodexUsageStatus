@@ -159,14 +159,14 @@ struct UsagePopoverView: View {
             case .downloaded(let release, let appURL):
                 updateReleaseDetails(release, downloadedURL: appURL)
                 HStack(spacing: 8) {
-                    Button("在 Finder 顯示") { model.revealDownloadedUpdate() }
+                    Button("安裝並重新啟動") { model.installDownloadedUpdate() }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
                     Button("開啟 Release") { model.openUpdateReleasePage() }
                         .buttonStyle(.link)
                         .font(.caption)
                 }
-                Text("更新檔已通過 SHA-256（若 Release 提供）與 strict code signature 驗證。請先結束目前 App，再用新版取代 /Applications 內的 App；不會在背景靜默覆蓋。")
+                Text("更新檔已通過 SHA-256（若 Release 提供）與 strict code signature 驗證。按下安裝後會先結束目前 App，再由背景安裝器替換同一路徑的 App 並重新啟動。")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -276,11 +276,14 @@ struct UsagePopoverView: View {
     private func accountDisplayStack(_ profile: AccountProfile) -> some View {
         let display = model.accountProfileDisplay(for: profile)
         return VStack(alignment: .leading, spacing: 1) {
-            Text(display.title).lineLimit(1)
+            Text(display.title)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
             Text(display.subtitle)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

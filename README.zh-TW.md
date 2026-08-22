@@ -82,23 +82,23 @@ App 啟動時以及執行期間會定期檢查 GitHub 的 `latest release`。發
 2. 由使用者按下「下載更新」。
 3. ZIP 下載到使用者的 Application Support updates 目錄。
 4. 如果 GitHub 提供 digest，App 會驗證 ZIP checksum；解壓後也會執行 strict code-signature verification。
-5. App 會在 Finder 中顯示已驗證的 App，讓使用者手動替換 `/Applications` 裡的舊版本。
+5. 使用者按下「安裝並重新啟動」後，背景安裝器會等待目前 process 結束，再重新驗證、替換目前 App 路徑並重新啟動。
 
-Updater **不會**在背景靜默覆蓋或替換正在執行的 App。因為目前版本是 ad-hoc signing 且尚未 notarize，這是刻意保留的安全行為。
+Updater 不會把認證資料或使用者資料送到 GitHub，也不會碰 Codex auth/history 目錄。如果替換失敗，會嘗試還原原本的 App bundle。
 
 ### 維護者發布規則
 
 Updater 預期 GitHub Release 具備：
 
-- Semantic-version tag，例如 `v2.4.26`
+- Semantic-version tag，例如 `v2.4.27`
 - 名稱完全一致的 asset：`CodexUsageStatus.app.zip`
 - ZIP 內包含已簽章的 App bundle
 - 不包含 `._*`、`__MACOSX`、source、tests、auth、token 或 history 檔案
 
-目前 `2.4.26 / build 46` 安裝包的已驗證 SHA-256：
+目前 `2.4.27 / build 47` 安裝包的已驗證 SHA-256：
 
 ```text
-ae642ac40392b0f339957eb13f5bda1b315f5ea888046db555eb8a115a3e48a1
+7c4df8003615c7116d218cce635f417d755e632942eb56b789a28e356e20b6fb
 ```
 
 如果 GitHub 尚未建立正式 Release，Updater 會正確顯示目前沒有可用的正式版本；只把 ZIP 提交到 `main` 並不會自動建立 Release 更新。

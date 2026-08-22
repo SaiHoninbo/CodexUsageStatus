@@ -354,6 +354,11 @@ final class UsageViewModel: ObservableObject {
         updateService.revealDownloadedApp()
     }
 
+    func installDownloadedUpdate() {
+        updateService.installDownloadedUpdate()
+        updateState = updateService.state
+    }
+
     func openUpdateReleasePage() {
         updateService.openReleasePage()
     }

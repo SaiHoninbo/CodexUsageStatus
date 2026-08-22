@@ -45,6 +45,7 @@ enum AppUpdateError: LocalizedError {
     case invalidArchive
     case checksumMismatch
     case signatureInvalid
+    case installFailed
     case fileSystem(String)
 
     var errorDescription: String? {
@@ -59,6 +60,7 @@ enum AppUpdateError: LocalizedError {
         case .invalidArchive: return "下載的更新檔不是有效的 App bundle。"
         case .checksumMismatch: return "更新檔 SHA-256 驗證失敗，已停止套用。"
         case .signatureInvalid: return "更新 App 的 strict code signature 驗證失敗。"
+        case .installFailed: return "無法啟動更新安裝程序，原有 App 尚未變更。"
         case .fileSystem(let message): return message
         }
     }
@@ -313,6 +315,65 @@ final class AppUpdateService: NSObject {
         NSWorkspace.shared.activateFileViewerSelecting([appURL])
     }
 
+    /// Installs the verified bundle in place and relaunches the same app path.
+    /// The detached helper waits for this process to exit, validates the staged
+    /// copy again, then swaps it atomically enough to restore the old bundle on
+    /// any failure. If the app lives in a protected directory such as
+    /// /Applications, macOS asks once for administrator authorization.
+    /// It never touches the user's Codex auth or data directories.
+    func installDownloadedUpdate() {
+        guard case .downloaded(_, let appURL) = state else { return }
+
+        let source = appURL.standardizedFileURL
+        let destination = Bundle.main.bundleURL.standardizedFileURL
+        guard destination.pathExtension == "app",
+              fileManager.fileExists(atPath: source.appendingPathComponent("Contents/Info.plist").path),
+              fileManager.fileExists(atPath: destination.appendingPathComponent("Contents/Info.plist").path),
+              source != destination else {
+            state = .error(AppUpdateError.installFailed.localizedDescription)
+            return
+        }
+
+        do {
+            try fileManager.createDirectory(at: updatesDirectory, withIntermediateDirectories: true,
+                                             attributes: [.posixPermissions: 0o700])
+            let token = UUID().uuidString
+            let scriptURL = updatesDirectory.appendingPathComponent(".install-\(token).sh")
+            let destinationParent = destination.deletingLastPathComponent()
+            let staged = destinationParent.appendingPathComponent(".CodexUsageStatus.app.staged-\(token)")
+            let backup = destinationParent.appendingPathComponent(".CodexUsageStatus.app.previous-\(token)")
+            guard let scriptData = Self.installScript.data(using: .utf8) else {
+                throw AppUpdateError.installFailed
+            }
+            try scriptData.write(to: scriptURL, options: [.atomic])
+            try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
+
+            let installerArguments = [
+                scriptURL.path,
+                String(ProcessInfo.processInfo.processIdentifier),
+                source.path,
+                destination.path,
+                staged.path,
+                backup.path
+            ]
+            let helper = Process()
+            if fileManager.isWritableFile(atPath: destinationParent.path) {
+                helper.executableURL = URL(fileURLWithPath: "/bin/sh")
+                helper.arguments = installerArguments
+            } else {
+                helper.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+                helper.arguments = ["-e", Self.privilegedInstallScript, "--"] + installerArguments
+            }
+            helper.standardInput = FileHandle.nullDevice
+            helper.standardOutput = FileHandle.nullDevice
+            helper.standardError = FileHandle.nullDevice
+            try helper.run()
+            NSApp.terminate(nil)
+        } catch {
+            state = .error("\(AppUpdateError.installFailed.localizedDescription)（\(error.localizedDescription)）")
+        }
+    }
+
     func openReleasePage() {
         NSWorkspace.shared.open(state.release?.releaseURL ?? repositoryURL)
     }
@@ -347,6 +408,66 @@ final class AppUpdateService: NSObject {
         try (directory as NSURL).setResourceValue(true, forKey: .isExcludedFromBackupKey)
         return appURL
     }
+
+    private static let installScript = """
+    #!/bin/sh
+    set -u
+    script="$0"
+    pid="$1"
+    source="$2"
+    destination="$3"
+    staged="$4"
+    backup="$5"
+
+    cleanup() {
+        /bin/rm -rf "$staged" 2>/dev/null || true
+        /bin/rm -f "$script" 2>/dev/null || true
+    }
+
+    failed() {
+        if [ -e "$backup" ] && [ ! -e "$destination" ]; then
+            /bin/mv "$backup" "$destination" 2>/dev/null || true
+        fi
+        cleanup
+        /usr/bin/open -n "$destination" >/dev/null 2>&1 || true
+        exit 1
+    }
+
+    i=0
+    while /bin/kill -0 "$pid" 2>/dev/null; do
+        i=$((i + 1))
+        if [ "$i" -ge 150 ]; then
+            failed
+        fi
+        /bin/sleep 0.2
+    done
+
+    /bin/rm -rf "$staged" 2>/dev/null || true
+    /usr/bin/ditto "$source" "$staged" || failed
+    /usr/bin/codesign --verify --deep --strict "$staged" >/dev/null 2>&1 || failed
+
+    if [ -e "$destination" ]; then
+        /bin/mv "$destination" "$backup" || failed
+    fi
+    /bin/mv "$staged" "$destination" || failed
+    /bin/rm -rf "$backup" 2>/dev/null || true
+    /usr/bin/open -n "$destination" >/dev/null 2>&1 || exit 1
+    /bin/rm -f "$script" 2>/dev/null || true
+    exit 0
+    """
+
+    private static let privilegedInstallScript = """
+    on run argv
+        if (count of argv) < 6 then error "missing installer arguments"
+        set scriptPath to quoted form of item 1 of argv
+        set pidValue to quoted form of item 2 of argv
+        set sourcePath to quoted form of item 3 of argv
+        set destinationPath to quoted form of item 4 of argv
+        set stagedPath to quoted form of item 5 of argv
+        set backupPath to quoted form of item 6 of argv
+        do shell script "/bin/sh " & scriptPath & " " & pidValue & " " & sourcePath & " " & destinationPath & " " & stagedPath & " " & backupPath with administrator privileges
+    end run
+    """
 
     private func finish(_ newState: AppUpdateState, completion: ((AppUpdateState) -> Void)?) {
         state = newState

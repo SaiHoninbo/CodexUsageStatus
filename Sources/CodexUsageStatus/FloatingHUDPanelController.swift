@@ -129,6 +129,7 @@ final class FloatingHUDPanelController: NSObject {
             cancelUpdateCheck: { [weak self] in self?.model.cancelUpdateCheck() },
             downloadAvailableUpdate: { [weak self] in self?.model.downloadAvailableUpdate() },
             revealDownloadedUpdate: { [weak self] in self?.model.revealDownloadedUpdate() },
+            installDownloadedUpdate: { [weak self] in self?.model.installDownloadedUpdate() },
             openReleasePage: { [weak self] in self?.model.openUpdateReleasePage() }
         )
         let hostingView = NSHostingView(rootView: rootView)
@@ -711,6 +712,7 @@ private struct CodexFloatingHUDView: View {
     let cancelUpdateCheck: () -> Void
     let downloadAvailableUpdate: () -> Void
     let revealDownloadedUpdate: () -> Void
+    let installDownloadedUpdate: () -> Void
     let openReleasePage: () -> Void
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var isUpdateHovered = false
@@ -890,11 +892,10 @@ private struct CodexFloatingHUDView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
             case .downloaded:
-                Button("顯示") {
-                    revealDownloadedUpdate()
-                    updateFeedback = nil
+                Button("安裝並重新啟動") {
+                    installDownloadedUpdate()
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
                 .controlSize(.small)
             case .error:
                 Button("重試") { requestUpdateCheck() }
@@ -1256,11 +1257,11 @@ private struct CodexFloatingHUDView: View {
                 Label("正在下載並驗證 \(release.version)…", systemImage: "arrow.down.circle.dotted")
             case .downloaded(let release, _):
                 Label("更新 \(release.version) 已驗證", systemImage: "checkmark.seal")
-                Button(action: revealDownloadedUpdate) {
-                    Label("在 Finder 顯示已下載更新", systemImage: "folder")
+                Button(action: installDownloadedUpdate) {
+                    Label("安裝並重新啟動", systemImage: "arrow.down.app")
                 }
                 Button(action: showDetails) {
-                    Label("開啟更新安裝說明", systemImage: "info.circle")
+                    Label("查看更新資訊", systemImage: "info.circle")
                 }
             case .upToDate:
                 Label("目前已是最新版本", systemImage: "checkmark.circle")
@@ -1297,11 +1298,14 @@ private struct CodexFloatingHUDView: View {
                             Image(systemName: profile.id == model.currentProfileID ? "checkmark" : (display.isWarning ? "exclamationmark.triangle" : "person"))
                                 .frame(width: 16)
                             VStack(alignment: .leading, spacing: 1) {
-                                Text(display.title).lineLimit(1)
+                                Text(display.title)
+                                    .lineLimit(2)
+                                    .fixedSize(horizontal: false, vertical: true)
                                 Text(display.subtitle)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                                    .lineLimit(1)
+                                    .lineLimit(2)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                             Spacer(minLength: 0)
                         }
