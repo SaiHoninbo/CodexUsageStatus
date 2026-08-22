@@ -341,7 +341,18 @@ final class UsageViewModel: ObservableObject {
 
     func downloadAvailableUpdate() {
         updateService.download { [weak self] state in
-            self?.updateState = state
+            guard let self else { return }
+            self.updateState = state
+
+            // An update is an explicit user action: once the archive has
+            // passed checksum/signature verification, immediately hand it to
+            // the detached installer.  The installer waits for this process
+            // to exit, swaps the verified bundle at the same path, and
+            // relaunches it.  This keeps the normal flow to one click instead
+            // of leaving a verified archive that the user must copy by hand.
+            guard case .downloaded = state else { return }
+            self.updateService.installDownloadedUpdate()
+            self.updateState = self.updateService.state
         }
     }
 

@@ -880,23 +880,20 @@ private struct CodexFloatingHUDView: View {
                 ProgressView()
                     .controlSize(.small)
             case .available:
-                Button("下載") {
-                    guard let release = model.updateState.release else { return }
+                Button("立即更新") {
                     updateFeedback = UpdateFeedback(
                         kind: .downloading,
-                        title: "正在下載更新…",
-                        message: "正在驗證 \(release.version)"
+                        title: "正在下載並安裝…",
+                        message: "驗證後會自動重新啟動"
                     )
                     downloadAvailableUpdate()
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
             case .downloaded:
-                Button("安裝並重新啟動") {
-                    installDownloadedUpdate()
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+                Text("已驗證，正在啟動安裝器…")
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.green)
             case .error:
                 Button("重試") { requestUpdateCheck() }
                     .buttonStyle(.bordered)
@@ -1244,7 +1241,7 @@ private struct CodexFloatingHUDView: View {
                 Button {
                     downloadAvailableUpdate()
                 } label: {
-                    Label("下載並驗證更新 \(release.version)", systemImage: "arrow.down.app")
+                    Label("立即更新並重新啟動 \(release.version)", systemImage: "arrow.down.app")
                 }
                 Button(action: openReleasePage) {
                     Label("開啟 Release 頁面", systemImage: "safari")

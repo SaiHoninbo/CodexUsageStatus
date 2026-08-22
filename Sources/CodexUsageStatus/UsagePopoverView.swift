@@ -138,7 +138,7 @@ struct UsagePopoverView: View {
             case .available(let release):
                 updateReleaseDetails(release, downloadedURL: nil)
                 HStack(spacing: 8) {
-                    Button("下載並驗證") { model.downloadAvailableUpdate() }
+                    Button("立即更新並重新啟動") { model.downloadAvailableUpdate() }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
                     Button("開啟 Release") { model.openUpdateReleasePage() }
@@ -149,7 +149,7 @@ struct UsagePopoverView: View {
                 updateReleaseDetails(release, downloadedURL: nil)
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
-                    Text("正在下載並驗證…")
+                    Text("正在下載、驗證並安裝…")
                         .font(.caption)
                     Spacer()
                     Button("取消") { model.cancelUpdateDownload() }
@@ -158,15 +158,7 @@ struct UsagePopoverView: View {
                 }
             case .downloaded(let release, let appURL):
                 updateReleaseDetails(release, downloadedURL: appURL)
-                HStack(spacing: 8) {
-                    Button("安裝並重新啟動") { model.installDownloadedUpdate() }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                    Button("開啟 Release") { model.openUpdateReleasePage() }
-                        .buttonStyle(.link)
-                        .font(.caption)
-                }
-                Text("更新檔已通過 SHA-256（若 Release 提供）與 strict code signature 驗證。按下安裝後會先結束目前 App，再由背景安裝器替換同一路徑的 App 並重新啟動。")
+                Text("更新檔已通過 SHA-256（若 Release 提供）與 strict code signature 驗證，正在由背景安裝器替換同一路徑的 App 並重新啟動。")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
