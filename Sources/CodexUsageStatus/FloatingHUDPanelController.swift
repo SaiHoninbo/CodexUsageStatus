@@ -92,6 +92,12 @@ final class FloatingHUDPanelController: NSObject {
     private var lastPositionedPanelSize: NSSize?
     private var lastPlacement: HUDPlacement = .bottomRight
     private let layoutState = FloatingHUDLayoutState()
+    /// macOS can briefly return no focused AX/Quartz window while changing
+    /// Spaces, displays, or focus. Keep a visible HUD in place during that
+    /// short transition instead of orderOut/orderFront blinking it.
+    private var transientHideTask: Task<Void, Never>?
+    private var transientHideGeneration: UInt64 = 0
+    private let transientHideGrace: Duration = .milliseconds(1_500)
 
     init(model: UsageViewModel, gitCoordinator: GitWorkspaceCoordinator) {
         self.model = model
@@ -195,6 +201,7 @@ final class FloatingHUDPanelController: NSObject {
     }
 
     func stop() {
+        cancelTransientHide()
         refreshTimer?.invalidate()
         refreshTimer = nil
         if let workspaceObserver {
@@ -215,6 +222,7 @@ final class FloatingHUDPanelController: NSObject {
     }
 
     func resetPosition() {
+        cancelTransientHide()
         defaults.removeObject(forKey: bottomRightPositionKey)
         defaults.removeObject(forKey: anchorPositionKey)
         defaults.removeObject(forKey: relativePositionKey)
@@ -244,10 +252,8 @@ final class FloatingHUDPanelController: NSObject {
         // or before the first rate-limit read). Primary is preferred, but the
         // model may legitimately expose a fallback window while primary is
         // omitted; keep the HUD consistent with the menu-bar value then.
-        guard model.floatingHUDEnabled,
-              model.hudRemainingPercent != nil else {
-            layoutState.isCodexFocused = false
-            panel.orderOut(nil)
+        guard model.floatingHUDEnabled else {
+            hideImmediately(panel)
             return
         }
 
@@ -257,8 +263,15 @@ final class FloatingHUDPanelController: NSObject {
             // Do not leave a floating usage panel over unrelated apps. Keep
             // the last Codex process/frame in memory so returning to Codex
             // restores the same relative position without a jump.
-            layoutState.isCodexFocused = false
-            panel.orderOut(nil)
+            hideImmediately(panel)
+            return
+        }
+
+        guard model.hudRemainingPercent != nil else {
+            // A quota snapshot can be momentarily empty during reconnect or
+            // account switching. Keep the existing HUD through that brief
+            // gap; a sustained gap is handled by the same grace timer.
+            scheduleTransientHide(panel)
             return
         }
 
@@ -306,15 +319,22 @@ final class FloatingHUDPanelController: NSObject {
             guard let displayMapping else { return nil }
             return appKitWindowFrame(from: quartzFrame, mapping: displayMapping)
         }
-        // Focused-window metadata is authoritative. If it is unavailable,
-        // hide rather than placing the HUD at a guessed screen corner or
-        // beside another Codex window. Returning to Codex will retry once AX
-        // exposes the focused window again.
+        // Focused-window metadata is authoritative. If it is temporarily
+        // unavailable, retain the last known frame for a short grace period
+        // rather than blinking the HUD or placing it at a guessed corner.
+        // A sustained failure still hides the panel fail-closed.
         guard quartzTargetFrame != nil, targetFrame != nil else {
-            layoutState.isCodexFocused = false
-            panel.orderOut(nil)
+            // Keep the last known position during a short AX/Quartz gap. If
+            // the gap persists, the grace task hides the panel; a later valid
+            // frame cancels that task before any visible blink occurs.
+            guard panel.isVisible, lastCodexWindowFrame != nil else {
+                hideImmediately(panel)
+                return
+            }
+            scheduleTransientHide(panel)
             return
         }
+        cancelTransientHide()
         // Use the display that actually contains Codex. If the window list is
         // momentarily unavailable while macOS changes Spaces/displays, keep
         // the last known display instead of falling back to NSScreen.main and
@@ -498,6 +518,39 @@ final class FloatingHUDPanelController: NSObject {
     private func applySize(_ size: NSSize, to panel: NSPanel) {
         guard panel.frame.size != size else { return }
         panel.setContentSize(size)
+    }
+
+    private func scheduleTransientHide(_ panel: NSPanel) {
+        guard panel.isVisible, transientHideTask == nil else { return }
+        transientHideGeneration &+= 1
+        let generation = transientHideGeneration
+        transientHideTask = Task { @MainActor [weak self, weak panel] in
+            do {
+                try await Task.sleep(for: self?.transientHideGrace ?? .milliseconds(1_500))
+            } catch {
+                return
+            }
+            guard let self,
+                  self.transientHideGeneration == generation,
+                  !Task.isCancelled,
+                  let panel,
+                  panel.isVisible else { return }
+            panel.orderOut(nil)
+            self.layoutState.isCodexFocused = false
+            self.transientHideTask = nil
+        }
+    }
+
+    private func cancelTransientHide() {
+        transientHideGeneration &+= 1
+        transientHideTask?.cancel()
+        transientHideTask = nil
+    }
+
+    private func hideImmediately(_ panel: NSPanel) {
+        cancelTransientHide()
+        layoutState.isCodexFocused = false
+        panel.orderOut(nil)
     }
 
     private func savedAnchor() -> HUDAnchor? {
