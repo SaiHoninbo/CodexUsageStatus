@@ -15,6 +15,7 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/ProfileStore.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/AccountProfileDisplay.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/ThresholdPolicy.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/HUDVisibilityPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDPlacementPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDContextMenuPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/GitWorkspaceModels.swift" \

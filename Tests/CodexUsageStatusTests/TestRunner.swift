@@ -28,6 +28,7 @@ struct CodexUsageStatusTests {
             ("corrupt history preserves memory", testCorruptHistoryPreservesMemory),
             ("threshold policy boundaries", testThresholdPolicyBoundaries),
             ("HUD warning and decrease policy", testHUDWarningAndDecreasePolicy),
+            ("HUD visibility policy", testHUDVisibilityPolicy),
             ("HUD placement and adaptive anchors", testHUDPlacementAndAdaptiveAnchors),
             ("token activity decoding", testTokenActivityDecoding),
             ("token activity null fields", testTokenActivityNullFields),
@@ -380,6 +381,162 @@ struct CodexUsageStatusTests {
                 sameProfile: false
             ) == nil,
             "a profile switch should reset the baseline"
+        )
+    }
+
+    private static func testHUDVisibilityPolicy() throws {
+        let profileA = UUID()
+        let profileB = UUID()
+        let cachedA = HUDPresentationSnapshot(
+            profileID: profileA,
+            remainingPercent: 12,
+            resetDescription: "4 分後重置"
+        )
+
+        try expect(
+            HUDVisibilityPolicy.visibilityDecision(
+                enabled: false,
+                focus: .codex,
+                panelIsVisible: true,
+                hasValidQuota: true,
+                position: .positioned
+            ) == .hideImmediately,
+            "explicit HUD disable should hide immediately"
+        )
+        try expect(
+            HUDVisibilityPolicy.visibilityDecision(
+                enabled: true,
+                focus: .codex,
+                panelIsVisible: false,
+                hasValidQuota: true,
+                position: .positioned
+            ) == .show,
+            "Codex plus valid quota and position should show"
+        )
+        try expect(
+            HUDVisibilityPolicy.visibilityDecision(
+                enabled: true,
+                focus: .codex,
+                panelIsVisible: true,
+                hasValidQuota: false,
+                position: .unavailable
+            ) == .retainPanel,
+            "visible Codex HUD should retain through quota loss"
+        )
+        try expect(
+            HUDVisibilityPolicy.positionResult(hasValidFrame: true, panelIsVisible: false) == .positioned,
+            "a valid frame should permit the first show"
+        )
+        try expect(
+            HUDVisibilityPolicy.positionResult(hasValidFrame: false, panelIsVisible: true) == .retainedExistingPosition,
+            "a visible panel should retain its current position during a frame gap"
+        )
+        try expect(
+            HUDVisibilityPolicy.positionResult(hasValidFrame: false, panelIsVisible: false) == .unavailable,
+            "a hidden panel must stay hidden without a verified frame"
+        )
+
+        try expect(
+            HUDVisibilityPolicy.focusDecision(
+                focus: .unknown,
+                panelIsVisible: true,
+                elapsedFocusLoss: 10,
+                grace: 0.5
+            ) == .retainPanel,
+            "unknown focus must not hide a visible panel"
+        )
+        try expect(
+            HUDVisibilityPolicy.focusDecision(
+                focus: .otherApplication,
+                panelIsVisible: true,
+                elapsedFocusLoss: 0.49,
+                grace: 0.5
+            ) == .pendingHide,
+            "focus loss before the grace period should remain pending"
+        )
+        try expect(
+            HUDVisibilityPolicy.focusDecision(
+                focus: .otherApplication,
+                panelIsVisible: true,
+                elapsedFocusLoss: 0.5,
+                grace: 0.5
+            ) == .hideImmediately,
+            "confirmed focus loss should hide after the grace period"
+        )
+        try expect(
+            HUDVisibilityPolicy.focusDecision(
+                focus: .codex,
+                panelIsVisible: true,
+                elapsedFocusLoss: 1,
+                grace: 0.5
+            ) == .retainPanel,
+            "Codex restoration should retain the visible panel"
+        )
+
+        try expect(
+            HUDVisibilityPolicy.cachedPresentation(currentProfileID: profileA, cached: cachedA) == cachedA,
+            "same profile may reuse its cached presentation"
+        )
+        try expect(
+            HUDVisibilityPolicy.cachedPresentation(currentProfileID: profileB, cached: cachedA) == nil,
+            "a profile switch must not reuse another profile's quota"
+        )
+        try expect(
+            HUDVisibilityPolicy.cachedPresentation(currentProfileID: nil, cached: cachedA) == nil,
+            "an unknown profile identity must not reuse cached quota"
+        )
+        let timestamp = Date(timeIntervalSince1970: 1_000)
+        try expect(
+            HUDVisibilityPolicy.presentationSnapshot(
+                currentProfileID: profileA,
+                trackedProfileID: profileA,
+                lastUpdated: timestamp,
+                remainingPercent: 12,
+                resetDescription: "4 分後重置"
+            ) == cachedA,
+            "a valid snapshot may be cached for the tracked profile"
+        )
+        try expect(
+            HUDVisibilityPolicy.presentationSnapshot(
+                currentProfileID: profileB,
+                trackedProfileID: profileA,
+                lastUpdated: timestamp,
+                remainingPercent: 12,
+                resetDescription: "4 分後重置"
+            ) == nil,
+            "a profile switch must reject a snapshot tracked for the previous profile"
+        )
+        try expect(
+            HUDVisibilityPolicy.presentationSnapshot(
+                currentProfileID: profileB,
+                trackedProfileID: profileB,
+                lastUpdated: nil,
+                remainingPercent: 12,
+                resetDescription: "4 分後重置"
+            ) == nil,
+            "a new profile without its own update must remain uncached"
+        )
+        try expect(
+            HUDVisibilityPolicy.presentationSnapshot(
+                currentProfileID: profileB,
+                trackedProfileID: profileB,
+                lastUpdated: timestamp,
+                remainingPercent: 12,
+                resetDescription: "4 分後重置"
+            ) == HUDPresentationSnapshot(
+                profileID: profileB,
+                remainingPercent: 12,
+                resetDescription: "4 分後重置"
+            ),
+            "the new profile may cache its own valid snapshot even at the same percentage"
+        )
+        try expect(
+            HUDVisibilityPolicy.shouldApplyFocusLoss(scheduledGeneration: 4, currentGeneration: 4),
+            "a current focus-loss generation may apply"
+        )
+        try expect(
+            !HUDVisibilityPolicy.shouldApplyFocusLoss(scheduledGeneration: 4, currentGeneration: 5),
+            "an invalidated focus-loss generation must not apply"
         )
     }
 
