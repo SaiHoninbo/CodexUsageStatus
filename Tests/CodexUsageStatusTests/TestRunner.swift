@@ -44,7 +44,11 @@ struct CodexUsageStatusTests {
             ("managed profile has isolated CODEX_HOME", testManagedProfileHasIsolatedCodexHome),
             ("managed profile imports auth atomically", testManagedProfileImportsAuth),
             ("update version comparison", testUpdateVersionComparison),
-            ("HUD context menu policy", testHUDContextMenuPolicy)
+            ("HUD context menu policy", testHUDContextMenuPolicy),
+            ("Git status parser and safety policies", testGitWorkspacePolicies),
+            ("Git selected commit isolation", testGitSelectedCommitIsolation),
+            ("Git untracked commit and sensitive boundaries", testGitUntrackedCommitAndSensitiveBoundaries),
+            ("Git push identity freeze", testGitPushIdentityFreeze)
         ]
 
         var failures = 0
@@ -714,11 +718,123 @@ struct CodexUsageStatusTests {
         try expect(!AppVersionComparator.isNewer("2.4.10", than: "2.4.11"), "older version is not newer")
     }
 
+    private static func testGitWorkspacePolicies() throws {
+        let payload = "# branch.oid abcdef123\0# branch.head main\0# branch.upstream origin/main\0# branch.ab +2 -1\01 .M N... 100644 100644 100644 abc def file.swift\0? .env\0"
+        let parsed = GitStatusPorcelainParser.parse(Data(payload.utf8))
+        try expect(parsed.branch == "main", "branch parses")
+        try expect(parsed.ahead == 2 && parsed.behind == 1, "ahead/behind parses")
+        try expect(parsed.changes.contains { $0.path == "file.swift" && $0.isUnstaged }, "modified path parses")
+        try expect(parsed.changes.contains { $0.path == ".env" && $0.isSensitive }, "sensitive path parses")
+
+        let commit = GitCommitPolicy.arguments(message: "safe change", paths: ["file.swift"])
+        try expect(commit?.contains("--only") == true, "commit isolates selected paths")
+        try expect(commit?.suffix(1).first == "file.swift", "commit uses explicit pathspec")
+        try expect(GitCommitPolicy.arguments(message: " ", paths: ["file.swift"]) == nil, "empty message rejected")
+        try expect(GitCommitPolicy.arguments(message: "safe", paths: ["../secret"]) == nil, "unsafe path rejected")
+
+        let identity = GitWorkspaceIdentity(repositoryRoot: "/repo", gitDirectory: "/repo/.git", branch: "main", head: "abc", remote: "origin", upstream: "origin/main", remoteFingerprint: "test-remote")
+        try expect(GitPushPolicy.arguments(identity: identity) == ["push", "origin", "HEAD:refs/heads/main"], "push uses explicit refspec")
+        try expect(GitWorkspaceSensitivity.isSensitive(path: "credentials/token.pem"), "credential extension is sensitive")
+        try expect(!GitWorkspaceSensitivity.isSensitive(path: "Sources/App.swift"), "normal source is not sensitive")
+    }
+
+    /// Exercises the exact commit contract against a disposable repository:
+    /// an already-staged path must remain staged when a different modified
+    /// path is committed with `--only`.
+    private static func testGitSelectedCommitIsolation() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("codex-git-commit-isolation-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        _ = try runGit(["init", "-q"], at: root)
+        _ = try runGit(["config", "user.name", "Codex Test"], at: root)
+        _ = try runGit(["config", "user.email", "codex-test@example.invalid"], at: root)
+        try Data("a0\n".utf8).write(to: root.appendingPathComponent("A.swift"))
+        try Data("b0\n".utf8).write(to: root.appendingPathComponent("B.swift"))
+        _ = try runGit(["add", "--", "A.swift", "B.swift"], at: root)
+        _ = try runGit(["commit", "-q", "-m", "baseline"], at: root)
+
+        try Data("a1\n".utf8).write(to: root.appendingPathComponent("A.swift"))
+        try Data("b1\n".utf8).write(to: root.appendingPathComponent("B.swift"))
+        _ = try runGit(["add", "--", "A.swift"], at: root)
+        guard let arguments = GitCommitPolicy.arguments(message: "selected B", paths: ["B.swift"]) else {
+            throw HarnessError.unwrap("selected commit arguments")
+        }
+        _ = try runGit(arguments, at: root)
+
+        let committed = try runGit(["show", "--format=", "--name-only", "HEAD"], at: root)
+        try expect(committed.contains("B.swift"), "selected modified path must be committed")
+        try expect(!committed.contains("A.swift"), "pre-existing staged path must not be committed")
+        let status = try runGit(["status", "--short"], at: root)
+        try expect(status.split(separator: "\n").contains { $0.hasSuffix("A.swift") }, "pre-existing staged path remains staged")
+    }
+
+    /// Verifies the selected-untracked intent-to-add flow and the sensitive
+    /// diff boundary used by the service before any raw preview is rendered.
+    private static func testGitUntrackedCommitAndSensitiveBoundaries() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("codex-git-untracked-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        _ = try runGit(["init", "-q"], at: root)
+        _ = try runGit(["config", "user.name", "Codex Test"], at: root)
+        _ = try runGit(["config", "user.email", "codex-test@example.invalid"], at: root)
+        try Data("tracked\n".utf8).write(to: root.appendingPathComponent("Tracked.swift"))
+        _ = try runGit(["add", "--", "Tracked.swift"], at: root)
+        _ = try runGit(["commit", "-q", "-m", "baseline"], at: root)
+        try Data("staged\n".utf8).write(to: root.appendingPathComponent("Tracked.swift"))
+        _ = try runGit(["add", "--", "Tracked.swift"], at: root)
+        try Data("new\n".utf8).write(to: root.appendingPathComponent("New.swift"))
+        _ = try runGit(["add", "--intent-to-add", "--", "New.swift"], at: root)
+        guard let arguments = GitCommitPolicy.arguments(message: "selected new", paths: ["New.swift"]) else {
+            throw HarnessError.unwrap("untracked commit arguments")
+        }
+        _ = try runGit(arguments, at: root)
+        let committed = try runGit(["show", "--format=", "--name-only", "HEAD"], at: root)
+        try expect(committed.contains("New.swift"), "selected untracked path must be committed")
+        try expect(!committed.contains("Tracked.swift"), "unrelated staged path must remain outside commit")
+        let status = try runGit(["status", "--short"], at: root)
+        try expect(status.split(separator: "\n").contains { $0.hasSuffix("Tracked.swift") }, "unrelated staged path remains staged")
+
+        for sensitive in [".env", "auth.json", "accounts/profile.json", "keys/private.pem", "token-activity.json"] {
+            try expect(GitWorkspaceSensitivity.isSensitive(path: sensitive), "sensitive path must be suppressed: \(sensitive)")
+        }
+        try expect(!GitWorkspaceSensitivity.isSensitive(path: "Sources/Feature.swift"), "normal path remains previewable")
+    }
+
+    private static func testGitPushIdentityFreeze() throws {
+        let base = GitWorkspaceIdentity(repositoryRoot: "/repo", gitDirectory: "/repo/.git", branch: "main", head: "abc", remote: "origin", upstream: "origin/main", remoteFingerprint: "fingerprint")
+        try expect(GitPushPolicy.arguments(identity: base) == ["push", "origin", "HEAD:refs/heads/main"], "push uses frozen explicit refspec")
+        let changedHead = GitWorkspaceIdentity(repositoryRoot: base.repositoryRoot, gitDirectory: base.gitDirectory, branch: base.branch, head: "def", remote: base.remote, upstream: base.upstream, remoteFingerprint: base.remoteFingerprint)
+        try expect(changedHead != base, "HEAD drift must invalidate frozen identity")
+        let changedRemote = GitWorkspaceIdentity(repositoryRoot: base.repositoryRoot, gitDirectory: base.gitDirectory, branch: base.branch, head: base.head, remote: base.remote, upstream: base.upstream, remoteFingerprint: "other")
+        try expect(changedRemote != base, "remote drift must invalidate frozen identity")
+        let missingFingerprint = GitWorkspaceIdentity(repositoryRoot: base.repositoryRoot, gitDirectory: base.gitDirectory, branch: base.branch, head: base.head, remote: base.remote, upstream: base.upstream, remoteFingerprint: nil)
+        try expect(GitPushPolicy.arguments(identity: missingFingerprint) == nil, "missing remote identity must fail closed")
+    }
+
+    private static func runGit(_ arguments: [String], at root: URL) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = arguments
+        process.currentDirectoryURL = root
+        process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "GIT_TERMINAL_PROMPT": "0"]
+        let output = Pipe()
+        let error = Pipe()
+        process.standardOutput = output
+        process.standardError = error
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw HarnessError.assertion("git fixture command failed: \(arguments.joined(separator: " "))")
+        }
+        return String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    }
+
     private static func testHUDContextMenuPolicy() throws {
         let actions = HUDContextMenuPolicy.sections.flatMap { $0 }
         try expect(actions.contains(.refresh) && actions.contains(.showDetails), "status actions are present")
         try expect(actions.contains(.openCodex) && actions.contains(.resetPosition), "Codex actions are present")
         try expect(actions.contains(.paste) && actions.contains(.pasteAndSubmit), "clipboard actions are distinct")
+        try expect(actions.contains(.openGitWorkspace) && actions.contains(.refreshGitWorkspace), "git actions are present")
         try expect(actions.contains(.currentAccount) && actions.contains(.allAccounts) && actions.contains(.manageAccounts), "account actions are present")
         try expect(actions.contains(.checkForUpdates) && actions.contains(.quit), "update and quit actions are present")
         try expect(HUDContextMenuPolicy.pasteActionsEnabled(isCodexFocused: true), "focused paste is enabled")

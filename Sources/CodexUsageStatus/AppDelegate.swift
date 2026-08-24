@@ -3,12 +3,19 @@ import Combine
 import SwiftUI
 
 @MainActor
+final class DetailsRouter: ObservableObject {
+    @Published var destination: DetailsDestination = .overview
+}
+
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private var model: UsageViewModel!
     private var modelObservation: AnyCancellable?
     private var floatingHUD: FloatingHUDPanelController!
+    private let gitCoordinator = GitWorkspaceCoordinator()
+    private let detailsRouter = DetailsRouter()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -37,14 +44,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController = NSHostingController(
             rootView: UsagePopoverView(
                 model: model,
+                gitCoordinator: gitCoordinator,
+                detailsRouter: detailsRouter,
                 openCodex: { [weak self] in self?.openCodex() },
                 resetHUDPosition: { [weak self] in self?.floatingHUD?.resetPosition() },
                 quit: { NSApp.terminate(nil) }
             )
         )
 
-        floatingHUD = FloatingHUDPanelController(model: model)
-        floatingHUD.onShowDetails = { [weak self] in self?.showPopover() }
+        floatingHUD = FloatingHUDPanelController(model: model, gitCoordinator: gitCoordinator)
+        floatingHUD.onShowDetails = { [weak self] in self?.showPopover(destination: .overview) }
+        floatingHUD.onShowGitWorkspace = { [weak self] in self?.showPopover(destination: .gitWorkspace) }
         floatingHUD.onOpenCodex = { [weak self] in self?.openCodex() }
         floatingHUD.onQuit = { NSApp.terminate(nil) }
         floatingHUD.start()
@@ -69,8 +79,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showPopover(toggle: true, sender: sender)
     }
 
-    private func showPopover(toggle: Bool = false, sender: Any? = nil) {
+    private func showPopover(destination: DetailsDestination = .overview, toggle: Bool = false, sender: Any? = nil) {
         guard let button = statusItem.button else { return }
+        detailsRouter.destination = destination
+        if destination == .gitWorkspace { gitCoordinator.refreshNow() }
         if toggle && popover.isShown {
             popover.performClose(sender)
         } else {
@@ -105,11 +117,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openCodex() {
-        let appURL = URL(fileURLWithPath: "/Applications/ChatGPT.app")
-        if FileManager.default.fileExists(atPath: appURL.path) {
-            NSWorkspace.shared.open(appURL)
-        } else {
-            NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications"))
+        if let running = NSWorkspace.shared.runningApplications.first(where: CodexWorkspaceResolver.isCodexApplication) {
+            running.activate(options: [])
+            return
+        }
+        let candidates = ["/Applications/Codex.app", "/Applications/ChatGPT.app"]
+        if let appPath = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }) {
+            NSWorkspace.shared.open(URL(fileURLWithPath: appPath))
         }
     }
 }

@@ -17,6 +17,7 @@ APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 ICONSET_DIR="$ROOT_DIR/Resources/AppIcon.iconset"
+ICON_FILE="$ROOT_DIR/Resources/AppIcon.icns"
 ## Release bundles must not carry developer-local source/object paths in
 ## embedded debug information. The shipped app is not a debug artifact, so
 ## omit DWARF entirely rather than publishing machine-specific paths.
@@ -37,9 +38,16 @@ if [[ -d "$ICONSET_DIR" ]]; then
   # iconset (the app remains fully functional without an embedded icns).
   # Keep packaging deterministic instead of aborting the signed bundle.
   if ! TMPDIR=/private/tmp iconutil --convert icns --output "$APP_RESOURCES/AppIcon.icns" "$ICONSET_DIR"; then
-    echo "warning: iconutil could not convert AppIcon.iconset; continuing without embedded icns" >&2
-    rm -f "$APP_RESOURCES/AppIcon.icns"
+    if [[ -f "$ICON_FILE" ]]; then
+      echo "warning: iconutil could not convert AppIcon.iconset; using the checked-in AppIcon.icns fallback" >&2
+      cp "$ICON_FILE" "$APP_RESOURCES/AppIcon.icns"
+    else
+      echo "warning: iconutil could not convert AppIcon.iconset; continuing without embedded icns" >&2
+      rm -f "$APP_RESOURCES/AppIcon.icns"
+    fi
   fi
+elif [[ -f "$ICON_FILE" ]]; then
+  cp "$ICON_FILE" "$APP_RESOURCES/AppIcon.icns"
 fi
 
 cat > "$INFO_PLIST" <<PLIST
@@ -64,9 +72,9 @@ cat > "$INFO_PLIST" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>2.4.28</string>
+  <string>2.4.29</string>
   <key>CFBundleVersion</key>
-  <string>48</string>
+  <string>49</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
   <key>LSUIElement</key>

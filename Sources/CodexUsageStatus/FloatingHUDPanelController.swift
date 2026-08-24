@@ -69,7 +69,9 @@ private final class DraggableHUDPanel: NSPanel {
 @MainActor
 final class FloatingHUDPanelController: NSObject {
     private let model: UsageViewModel
+    private let gitCoordinator: GitWorkspaceCoordinator
     var onShowDetails: (() -> Void)?
+    var onShowGitWorkspace: (() -> Void)?
     var onOpenCodex: (() -> Void)?
     var onQuit: (() -> Void)?
     private var panel: NSPanel?
@@ -91,8 +93,9 @@ final class FloatingHUDPanelController: NSObject {
     private var lastPlacement: HUDPlacement = .bottomRight
     private let layoutState = FloatingHUDLayoutState()
 
-    init(model: UsageViewModel) {
+    init(model: UsageViewModel, gitCoordinator: GitWorkspaceCoordinator) {
         self.model = model
+        self.gitCoordinator = gitCoordinator
         super.init()
     }
 
@@ -104,6 +107,7 @@ final class FloatingHUDPanelController: NSObject {
 
         let rootView = CodexFloatingHUDView(
             model: model,
+            gitCoordinator: gitCoordinator,
             layoutState: layoutState,
             pasteClipboard: { [weak self] in self?.pasteClipboard() },
             pasteAndSubmit: { [weak self] completion in
@@ -114,6 +118,7 @@ final class FloatingHUDPanelController: NSObject {
                 self.pasteAndSubmit(completion: completion)
             },
             showDetails: { [weak self] in self?.onShowDetails?() },
+            showGitWorkspace: { [weak self] in self?.onShowGitWorkspace?() },
             openCodex: { [weak self] in self?.onOpenCodex?() },
             quit: { [weak self] in self?.onQuit?() },
             resetPosition: { [weak self] in self?.resetPosition() },
@@ -268,6 +273,7 @@ final class FloatingHUDPanelController: NSObject {
         }
         lastCodexProcessID = codexApp.processIdentifier
         layoutState.isCodexFocused = true
+        gitCoordinator.refreshIfNeeded()
         position(panel, beside: codexApp)
         panel.alphaValue = 1.0
         // Re-ordering the hosting panel while a SwiftUI context menu is open
@@ -299,6 +305,15 @@ final class FloatingHUDPanelController: NSObject {
         let targetFrame: NSRect? = quartzTargetFrame.flatMap { quartzFrame in
             guard let displayMapping else { return nil }
             return appKitWindowFrame(from: quartzFrame, mapping: displayMapping)
+        }
+        // Focused-window metadata is authoritative. If it is unavailable,
+        // hide rather than placing the HUD at a guessed screen corner or
+        // beside another Codex window. Returning to Codex will retry once AX
+        // exposes the focused window again.
+        guard quartzTargetFrame != nil, targetFrame != nil else {
+            layoutState.isCodexFocused = false
+            panel.orderOut(nil)
+            return
         }
         // Use the display that actually contains Codex. If the window list is
         // momentarily unavailable while macOS changes Spaces/displays, keep
@@ -653,12 +668,16 @@ final class FloatingHUDPanelController: NSObject {
     }
 
     private func codexWindowFrame(for processID: pid_t) -> CGRect? {
-        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+        guard let application = NSRunningApplication(processIdentifier: processID),
+              let focusedBounds = CodexWorkspaceResolver.focusedWindowBounds(for: application) else {
+            // There is deliberately no largest-window or previous-window
+            // fallback.  Without the focused-window metadata, positioning
+            // beside another Codex window would be worse than hiding HUD.
             return nil
         }
-
-        return windows.compactMap { info -> CGRect? in
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return nil }
+        let candidates = windows.compactMap { info -> CGRect? in
             guard let ownerPID = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
                   ownerPID == processID,
                   (info[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
@@ -667,11 +686,20 @@ final class FloatingHUDPanelController: NSObject {
                   let y = (bounds["Y"] as? NSNumber)?.doubleValue,
                   let width = (bounds["Width"] as? NSNumber)?.doubleValue,
                   let height = (bounds["Height"] as? NSNumber)?.doubleValue,
-                  width >= 300,
-                  height >= 200 else { return nil }
+                  width >= 300, height >= 200 else { return nil }
             return CGRect(x: x, y: y, width: width, height: height)
         }
-        .max { lhs, rhs in lhs.width * lhs.height < rhs.width * rhs.height }
+        // AX and Quartz normally share the same top-left global coordinate
+        // space.  Require a unique close match so two windows cannot be
+        // cross-wired; if the coordinate systems disagree, fail closed.
+        let matches = candidates.filter { candidate in
+            abs(candidate.minX - focusedBounds.minX) <= 24
+                && abs(candidate.minY - focusedBounds.minY) <= 24
+                && abs(candidate.width - focusedBounds.width) <= 24
+                && abs(candidate.height - focusedBounds.height) <= 24
+        }
+        guard matches.count == 1 else { return nil }
+        return matches[0]
     }
 }
 
@@ -693,10 +721,12 @@ private struct CodexFloatingHUDView: View {
     }
 
     @ObservedObject var model: UsageViewModel
+    @ObservedObject var gitCoordinator: GitWorkspaceCoordinator
     @ObservedObject var layoutState: FloatingHUDLayoutState
     let pasteClipboard: () -> Void
     let pasteAndSubmit: (@escaping (Bool) -> Void) -> Void
     let showDetails: () -> Void
+    let showGitWorkspace: () -> Void
     let openCodex: () -> Void
     let quit: () -> Void
     let resetPosition: () -> Void
@@ -1042,14 +1072,30 @@ private struct CodexFloatingHUDView: View {
             // UsageViewModel keeps it in the in-memory health snapshot and
             // never persists or logs it. Tightening preserves the complete
             // address instead of truncating it with an ellipsis.
-            Text(verbatim: model.currentAccountEmail ?? "未提供 Email")
-                .font(.system(size: 10.5, weight: .medium, design: .rounded))
-                .foregroundStyle(.primary.opacity(model.currentAccountEmail == nil ? 0.48 : 0.82))
-                .lineLimit(1)
-                .minimumScaleFactor(0.42)
-                .allowsTightening(true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .help(model.currentAccountEmail ?? "目前帳號尚未提供 Email")
+            HStack(spacing: 6) {
+                Text(verbatim: model.currentAccountEmail ?? "未提供 Email")
+                    .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                    .foregroundStyle(.primary.opacity(model.currentAccountEmail == nil ? 0.48 : 0.82))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.42)
+                    .allowsTightening(true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .help(model.currentAccountEmail ?? "目前帳號尚未提供 Email")
+
+                Button(action: showGitWorkspace) {
+                    Text(gitCoordinator.compactStatusLabel)
+                        .font(.system(size: 8.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.primary.opacity(gitCoordinator.isWorkspaceKnown ? 0.76 : 0.42))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.5)
+                }
+                .buttonStyle(.plain)
+                .disabled(!gitCoordinator.isWorkspaceKnown)
+                .help(gitCoordinator.isWorkspaceKnown ? "開啟 Git 工作區" : "目前 Codex 工作區尚未解析")
+                .accessibilityLabel("Git 工作區")
+                .accessibilityValue(gitCoordinator.compactStatusLabel)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 5)
         .padding(.vertical, layoutState.placement == .topRight ? 1 : 2)
@@ -1231,6 +1277,17 @@ private struct CodexFloatingHUDView: View {
         // the HUD's context menu.  The previous version placed these under
         // the collapsed "通知與同步" submenu, which made an available
         // release look as if the app had no update action at all.
+        Section {
+            Button(action: showGitWorkspace) {
+                Label("開啟 Git 工作區", systemImage: "arrow.triangle.branch")
+            }
+            .disabled(!gitCoordinator.isWorkspaceKnown)
+            Button(action: { gitCoordinator.refreshNow() }) {
+                Label("重新整理 Git 狀態", systemImage: "arrow.clockwise")
+            }
+            .disabled(!layoutState.isCodexFocused)
+        }
+
         Section {
             Button(action: requestUpdateCheck) {
                 Label("檢查更新", systemImage: "arrow.down.circle")

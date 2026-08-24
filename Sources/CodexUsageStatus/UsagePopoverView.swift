@@ -4,6 +4,8 @@ import SwiftUI
 
 struct UsagePopoverView: View {
     @ObservedObject var model: UsageViewModel
+    @ObservedObject var gitCoordinator: GitWorkspaceCoordinator
+    @ObservedObject var detailsRouter: DetailsRouter
     let openCodex: () -> Void
     let resetHUDPosition: () -> Void
     let quit: () -> Void
@@ -16,13 +18,15 @@ struct UsagePopoverView: View {
     @State private var profilePendingRemoval: AccountProfile?
 
     var body: some View {
-        ScrollView {
+        ScrollViewReader { proxy in
+            ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 header
                 updateSection
                 Divider()
                 accountSelector
                 accountManagementSection
+                gitWorkspaceSection.id("gitWorkspace")
                 if model.accountScope == .current {
                     accountHealthSection
                     turnActivitySection
@@ -51,6 +55,42 @@ struct UsagePopoverView: View {
             .padding(18)
         }
         .frame(width: 410, height: 820)
+        .onChange(of: detailsRouter.destination) { _, destination in
+            guard destination == .gitWorkspace else { return }
+            withAnimation(.easeOut(duration: 0.2)) {
+                proxy.scrollTo("gitWorkspace", anchor: .top)
+            }
+        }
+        }
+        .confirmationDialog("確認 Git 操作", isPresented: Binding(
+            get: { gitCoordinator.confirmation != nil },
+            set: { if !$0 { gitCoordinator.cancelConfirmation() } }
+        ), titleVisibility: .visible) {
+            if let confirmation = gitCoordinator.confirmation {
+                switch confirmation {
+                case .commit, .sensitiveCommit:
+                    Button(confirmation == .sensitiveCommit ? "確認提交（含敏感檔案）" : "確認 Commit", role: .destructive) {
+                        gitCoordinator.confirmCommit()
+                    }
+                case .push:
+                    Button("確認 Push", role: .destructive) {
+                        gitCoordinator.confirmPush()
+                    }
+                }
+            }
+            Button("取消", role: .cancel) { gitCoordinator.cancelConfirmation() }
+        } message: {
+            if let confirmation = gitCoordinator.confirmation {
+                switch confirmation {
+                case .commit:
+                    Text("只會提交目前勾選的路徑，不會帶入其他既有 staged 檔案。")
+                case .sensitiveCommit:
+                    Text("選取內容包含可能的敏感檔案。仍要提交嗎？敏感檔案不會在此面板顯示 raw diff。")
+                case .push:
+                    Text("將 Push \(gitCoordinator.branchLabel) 到目前已確認的 upstream。執行前若 repo identity 改變，操作會中止。")
+                }
+            }
+        }
         .alert("清除本機歷史？", isPresented: $showClearHistoryConfirmation) {
             Button("清除", role: .destructive) { model.clearHistory() }
             Button("取消", role: .cancel) {}
@@ -343,6 +383,103 @@ struct UsagePopoverView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.top, 6)
+        }
+    }
+
+    private var gitWorkspaceSection: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Label("Git 工作區", systemImage: "arrow.triangle.branch")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Button(action: { gitCoordinator.refreshNow() }) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .help("重新整理 Git 狀態")
+                .disabled(gitCoordinator.operationState.isBusy)
+            }
+
+            if !gitCoordinator.resolution.isKnown {
+                Text(gitCoordinator.resolution.reason.isEmpty ? "請先選擇工作區" : gitCoordinator.resolution.reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("只使用目前 Codex focused window 的公開 metadata；無法可靠判定時不會猜測路徑。")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            } else if let snapshot = gitCoordinator.snapshot {
+                HStack {
+                    Text(snapshot.isDetached ? "detached" : (snapshot.identity.branch ?? "—"))
+                        .font(.caption.weight(.semibold))
+                    if snapshot.ahead > 0 || snapshot.behind > 0 {
+                        Text("↑\(snapshot.ahead) ↓\(snapshot.behind)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Text(snapshot.changes.isEmpty ? "clean" : "\(snapshot.changes.count) 個變更")
+                        .font(.caption2)
+                        .foregroundStyle(snapshot.hasConflicts ? .red : .secondary)
+                }
+                if snapshot.changes.isEmpty {
+                    Text("工作區乾淨，沒有可提交的變更。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(snapshot.changes) { change in
+                        HStack(alignment: .top, spacing: 6) {
+                            Toggle(isOn: Binding(
+                                get: { gitCoordinator.selectedPaths.contains(change.path) },
+                                set: { _ in gitCoordinator.toggleSelection(path: change.path) }
+                            )) {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(change.path)
+                                        .font(.caption)
+                                        .lineLimit(1)
+                                    Text(change.isSensitive ? "敏感檔案：只顯示路徑，不顯示 raw diff" : change.kind.rawValue)
+                                        .font(.caption2)
+                                        .foregroundStyle(change.isSensitive ? .orange : .secondary)
+                                }
+                            }
+                            .toggleStyle(.checkbox)
+                            if !change.isSensitive {
+                                Button(action: { gitCoordinator.loadDiff(path: change.path) }) {
+                                    Image(systemName: "doc.text.magnifyingglass")
+                                }
+                                .buttonStyle(.plain)
+                                .help("預覽差異")
+                            }
+                        }
+                    }
+                }
+                TextField("Commit 訊息", text: $gitCoordinator.commitMessage)
+                    .textFieldStyle(.roundedBorder)
+                HStack(spacing: 8) {
+                    Button("Commit") { gitCoordinator.requestCommitConfirmation() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(gitCoordinator.selectedPaths.isEmpty || gitCoordinator.commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || gitCoordinator.operationState.isBusy)
+                    Button("Push") { gitCoordinator.requestPushConfirmation() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(snapshot.identity.upstream == nil || snapshot.isDetached || gitCoordinator.operationState.isBusy)
+                }
+                if let diff = gitCoordinator.diffPreview {
+                    Text(diff)
+                        .font(.system(.caption2, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(14)
+                        .padding(6)
+                        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+                }
+            }
+
+            switch gitCoordinator.operationState {
+            case .success(let message), .error(let message), .unavailable(let message):
+                Text(message).font(.caption2).foregroundStyle(.secondary)
+            default:
+                EmptyView()
+            }
         }
     }
 
