@@ -323,41 +323,25 @@ final class FloatingHUDPanelController: NSObject {
     }
 
     private func position(_ panel: NSPanel, beside application: NSRunningApplication) -> HUDPositionResult {
-        let quartzTargetFrame = codexWindowFrame(for: application.processIdentifier)
-        let displayMapping = quartzTargetFrame.flatMap(quartzDisplayMapping(for:))
-        let targetFrame: NSRect? = quartzTargetFrame.flatMap { quartzFrame in
-            guard let displayMapping else { return nil }
-            return appKitWindowFrame(from: quartzFrame, mapping: displayMapping)
+        guard let quartzTargetFrame = codexWindowFrame(for: application.processIdentifier),
+              let displayMapping = quartzDisplayMapping(for: quartzTargetFrame) else {
+            return HUDVisibilityPolicy.positionResult(
+                hasValidFrame: false,
+                panelIsVisible: panel.isVisible
+            )
         }
+        let targetFrame = appKitWindowFrame(from: quartzTargetFrame, mapping: displayMapping)
         // Focused-window metadata is authoritative. If it is temporarily
         // unavailable, retain an already visible panel at its current origin.
         // A hidden panel remains hidden until a new frame is verifiable.
-        guard quartzTargetFrame != nil, targetFrame != nil else {
-            return HUDVisibilityPolicy.positionResult(
-                hasValidFrame: false,
-                panelIsVisible: panel.isVisible
-            )
-        }
-        // Use the display that actually contains Codex. If the window list is
-        // momentarily unavailable while macOS changes Spaces/displays, keep
-        // the last known display instead of falling back to NSScreen.main and
-        // making the HUD jump across monitors.
-        let visibleFrame = displayMapping?.screen.visibleFrame
-            ?? lastCodexVisibleFrame
-            ?? NSScreen.main?.visibleFrame
-            ?? NSScreen.screens.first?.visibleFrame
-
-        guard let visibleFrame, let targetFrame else {
-            return HUDVisibilityPolicy.positionResult(
-                hasValidFrame: false,
-                panelIsVisible: panel.isVisible
-            )
-        }
+        // Use only the display selected by the validated Quartz geometry. If
+        // the window list is momentarily unavailable while macOS changes
+        // Spaces/displays, the guard above keeps a hidden HUD hidden or retains
+        // a visible HUD without moving it to a guessed screen.
+        let visibleFrame = displayMapping.screen.visibleFrame
 
         lastCodexWindowFrame = targetFrame
-        if let displayVisibleFrame = displayMapping?.screen.visibleFrame {
-            lastCodexVisibleFrame = displayVisibleFrame
-        }
+        lastCodexVisibleFrame = visibleFrame
 
         // The HUD is refreshed every second so it can follow Codex, but a
         // repeated frame read must not re-apply the same anchor. Window-list
@@ -685,6 +669,13 @@ final class FloatingHUDPanelController: NSObject {
             guard let number = screen.deviceDescription[key] as? NSNumber else { return nil }
             let quartzFrame = CGDisplayBounds(CGDirectDisplayID(number.uint32Value))
             guard quartzFrame.width > 0, quartzFrame.height > 0 else { return nil }
+            // `.optionAll` can return a window from a Space that is not
+            // currently visible. It still must belong to a real display before
+            // AppKit coordinates are derived; otherwise selecting a zero-score
+            // screen would be a guessed position.
+            let intersection = quartzFrame.intersection(windowFrame)
+            let hasPositiveOverlap = intersection.width > 0 && intersection.height > 0
+            guard quartzFrame.contains(center) || hasPositiveOverlap else { return nil }
             return QuartzDisplayMapping(
                 screen: screen,
                 quartzFrame: quartzFrame,
@@ -693,16 +684,21 @@ final class FloatingHUDPanelController: NSObject {
             )
         }
 
-        // Prefer the display containing the window center. If a window spans
-        // two displays, the largest overlap is the stable fallback.
-        return candidates.max { lhs, rhs in
-            func score(_ mapping: QuartzDisplayMapping) -> CGFloat {
-                let intersection = mapping.quartzFrame.intersection(windowFrame)
-                let area = max(0, intersection.width) * max(0, intersection.height)
-                return mapping.quartzFrame.contains(center) ? 1_000_000_000 + area : area
-            }
-            return score(lhs) < score(rhs)
-        }
+        // Prefer the unique display containing the window center. If the
+        // window spans displays, select a unique largest positive overlap;
+        // ties are ambiguous and must remain unavailable rather than guessing.
+        let centered = candidates.filter { $0.quartzFrame.contains(center) }
+        if centered.count == 1 { return centered[0] }
+        guard centered.isEmpty else { return nil }
+
+        let scored = candidates.map { mapping in
+            let intersection = mapping.quartzFrame.intersection(windowFrame)
+            let area = max(0, intersection.width) * max(0, intersection.height)
+            return (mapping, area)
+        }.sorted { $0.1 > $1.1 }
+        guard let best = scored.first, best.1 > 0 else { return nil }
+        guard scored.dropFirst().allSatisfy({ $0.1 < best.1 }) else { return nil }
+        return best.0
     }
 
     /// Window-list coordinates use a top-left origin. Convert to AppKit's
@@ -726,7 +722,10 @@ final class FloatingHUDPanelController: NSObject {
             // beside another Codex window would be worse than hiding HUD.
             return nil
         }
-        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        // `.optionAll` is required because the HUD joins all Spaces and the
+        // focused Codex window may be reported outside the active Space.
+        // Identity remains fail-closed through PID/layer/size and AX geometry.
+        let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
         guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return nil }
         let candidates = windows.compactMap { info -> CGRect? in
             guard let ownerPID = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
@@ -741,16 +740,12 @@ final class FloatingHUDPanelController: NSObject {
             return CGRect(x: x, y: y, width: width, height: height)
         }
         // AX and Quartz normally share the same top-left global coordinate
-        // space.  Require a unique close match so two windows cannot be
+        // space. Require exactly one close match so two windows cannot be
         // cross-wired; if the coordinate systems disagree, fail closed.
-        let matches = candidates.filter { candidate in
-            abs(candidate.minX - focusedBounds.minX) <= 24
-                && abs(candidate.minY - focusedBounds.minY) <= 24
-                && abs(candidate.width - focusedBounds.width) <= 24
-                && abs(candidate.height - focusedBounds.height) <= 24
-        }
-        guard matches.count == 1 else { return nil }
-        return matches[0]
+        return HUDVisibilityPolicy.uniqueQuartzWindowMatch(
+            focusedBounds: focusedBounds,
+            candidates: candidates
+        )
     }
 }
 

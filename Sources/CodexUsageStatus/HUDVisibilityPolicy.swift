@@ -112,4 +112,23 @@ enum HUDVisibilityPolicy {
     ) -> Bool {
         scheduledGeneration == currentGeneration
     }
+
+    /// Match a normalized AX focused-window frame against Quartz candidates.
+    /// The caller owns PID, layer, and minimum-size filtering; this helper only
+    /// decides whether geometry identifies exactly one candidate. Returning nil
+    /// for zero or multiple matches keeps first-show positioning fail-closed.
+    static func uniqueQuartzWindowMatch(
+        focusedBounds: CGRect,
+        candidates: [CGRect],
+        tolerance: CGFloat = 24
+    ) -> CGRect? {
+        let matches = candidates.filter { candidate in
+            abs(candidate.minX - focusedBounds.minX) <= tolerance
+                && abs(candidate.minY - focusedBounds.minY) <= tolerance
+                && abs(candidate.width - focusedBounds.width) <= tolerance
+                && abs(candidate.height - focusedBounds.height) <= tolerance
+        }
+        guard matches.count == 1 else { return nil }
+        return matches[0]
+    }
 }

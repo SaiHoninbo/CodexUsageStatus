@@ -29,6 +29,7 @@ struct CodexUsageStatusTests {
             ("threshold policy boundaries", testThresholdPolicyBoundaries),
             ("HUD warning and decrease policy", testHUDWarningAndDecreasePolicy),
             ("HUD visibility policy", testHUDVisibilityPolicy),
+            ("HUD cross-Space unique Quartz matching", testHUDCrossSpaceUniqueQuartzMatching),
             ("HUD placement and adaptive anchors", testHUDPlacementAndAdaptiveAnchors),
             ("token activity decoding", testTokenActivityDecoding),
             ("token activity null fields", testTokenActivityNullFields),
@@ -537,6 +538,53 @@ struct CodexUsageStatusTests {
         try expect(
             !HUDVisibilityPolicy.shouldApplyFocusLoss(scheduledGeneration: 4, currentGeneration: 5),
             "an invalidated focus-loss generation must not apply"
+        )
+    }
+
+    private static func testHUDCrossSpaceUniqueQuartzMatching() throws {
+        // Negative global coordinates represent a valid display to the left of
+        // the primary display and must not be rejected as an off-Space window.
+        let focused = CGRect(x: -1_600, y: 140, width: 1_200, height: 800)
+        let exact = focused
+        let unrelatedPrimaryDisplay = CGRect(x: 100, y: 140, width: 1_200, height: 800)
+        try expect(
+            HUDVisibilityPolicy.uniqueQuartzWindowMatch(
+                focusedBounds: focused,
+                candidates: [unrelatedPrimaryDisplay, exact]
+            ) == exact,
+            "a uniquely matching negative-origin candidate should be accepted"
+        )
+
+        let boundary = CGRect(x: focused.minX + 24, y: focused.minY, width: focused.width, height: focused.height)
+        try expect(
+            HUDVisibilityPolicy.uniqueQuartzWindowMatch(
+                focusedBounds: focused,
+                candidates: [boundary]
+            ) == boundary,
+            "the existing inclusive 24-point tolerance should be preserved"
+        )
+        try expect(
+            HUDVisibilityPolicy.uniqueQuartzWindowMatch(
+                focusedBounds: focused,
+                candidates: [CGRect(x: focused.minX + 24.01, y: focused.minY, width: focused.width, height: focused.height)]
+            ) == nil,
+            "a candidate outside the 24-point tolerance must be rejected"
+        )
+
+        let closeCollision = CGRect(x: focused.minX + 12, y: focused.minY + 12, width: focused.width + 12, height: focused.height + 12)
+        try expect(
+            HUDVisibilityPolicy.uniqueQuartzWindowMatch(
+                focusedBounds: focused,
+                candidates: [exact, closeCollision]
+            ) == nil,
+            "multiple close candidates must fail closed instead of choosing one"
+        )
+        try expect(
+            HUDVisibilityPolicy.uniqueQuartzWindowMatch(
+                focusedBounds: focused,
+                candidates: []
+            ) == nil,
+            "no candidate must remain unavailable for a hidden first show"
         )
     }
 
