@@ -802,6 +802,8 @@ private struct CodexFloatingHUDView: View {
     @State private var isDetailsHovered = false
     @State private var isPasteHovered = false
     @State private var isPasteAndSubmitHovered = false
+    @State private var isCommitHovered = false
+    @State private var isPushHovered = false
     @State private var isPasteAndSubmitInFlight = false
     @State private var trackedProfileID: UUID?
     @State private var lastLivePercent: Int?
@@ -823,19 +825,12 @@ private struct CodexFloatingHUDView: View {
                 // during an account/focus transition.
                 Color.clear
                     .frame(width: layoutState.size.width, height: layoutState.size.height)
-            } else if let profile = HUDWarningPolicy.framePulseProfile(
-                remainingPercent: model.hudRemainingPercent,
-                connectionState: model.connectionState,
-                isStale: model.isStale
-            ), !accessibilityReduceMotion {
-                TimelineView(.periodic(from: .now, by: profile.period / 10.0)) { context in
-                    hudContainer(frameOpacity: frameOpacity(at: context.date, profile: profile), glowRadius: profile.glowRadius)
-                }
             } else {
-                hudContainer(
-                    frameOpacity: accessibilityReduceMotion && hasLiveHUDData ? 0.14 : 0,
-                    glowRadius: 0
-                )
+                // Keep the content tree stable. The status contour is attached
+                // as a separate overlay; rebuilding all text and buttons on
+                // every pulse made the HUD visibly flash.
+                hudContainer()
+                    .overlay { hudPulseOverlay }
             }
 
             // A borderless, non-activating NSPanel cannot reliably present a
@@ -1021,7 +1016,7 @@ private struct CodexFloatingHUDView: View {
     }
 
     @ViewBuilder
-    private func hudContainer(frameOpacity: Double, glowRadius: Double) -> some View {
+    private func hudContainer() -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
                 // Keep the percentage and countdown together. The action
@@ -1125,12 +1120,12 @@ private struct CodexFloatingHUDView: View {
             // UsageViewModel keeps it in the in-memory health snapshot and
             // never persists or logs it. Tightening preserves the complete
             // address instead of truncating it with an ellipsis.
-            HStack(spacing: 6) {
+            HStack(spacing: 4) {
                 Text(verbatim: model.currentAccountEmail ?? "未提供 Email")
                     .font(.system(size: 10.5, weight: .medium, design: .rounded))
                     .foregroundStyle(.primary.opacity(model.currentAccountEmail == nil ? 0.48 : 0.82))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.42)
+                    .minimumScaleFactor(0.34)
                     .allowsTightening(true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .help(model.currentAccountEmail ?? "目前帳號尚未提供 Email")
@@ -1147,6 +1142,34 @@ private struct CodexFloatingHUDView: View {
                 .help(gitCoordinator.isWorkspaceKnown ? "開啟 Git 工作區" : "目前 Codex 工作區尚未解析")
                 .accessibilityLabel("Git 工作區")
                 .accessibilityValue(gitCoordinator.compactStatusLabel)
+
+                Button(action: commitShortcutAction) {
+                    Image(systemName: "checkmark.seal")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.primary.opacity(isCommitHovered ? 0.96 : 0.68))
+                        .frame(width: 20, height: 22)
+                        .background(isCommitHovered ? Color.primary.opacity(0.13) : .clear, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(gitCoordinator.operationState.isBusy)
+                .onHover { isCommitHovered = $0 }
+                .help("Commit：開啟 Git 工作區並要求確認")
+                .accessibilityLabel("Commit")
+                .accessibilityValue(gitCoordinator.isWorkspaceKnown ? "開啟 Git 工作區並要求確認" : "工作區尚未解析")
+
+                Button(action: pushShortcutAction) {
+                    Image(systemName: "arrow.up.circle")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.primary.opacity(isPushHovered ? 0.96 : 0.68))
+                        .frame(width: 20, height: 22)
+                        .background(isPushHovered ? Color.primary.opacity(0.13) : .clear, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(gitCoordinator.operationState.isBusy)
+                .onHover { isPushHovered = $0 }
+                .help("Push：開啟 Git 工作區並要求確認")
+                .accessibilityLabel("Push")
+                .accessibilityValue(gitCoordinator.isWorkspaceKnown ? "開啟 Git 工作區並要求確認" : "工作區尚未解析")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -1155,30 +1178,9 @@ private struct CodexFloatingHUDView: View {
         .frame(width: layoutState.size.width, height: layoutState.size.height, alignment: .leading)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous))
-        .overlay {
-            if frameOpacity > 0 {
-                ZStack {
-                    RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous)
-                        .stroke(
-                            model.menuBarColor.opacity(max(0.28, frameOpacity)),
-                            lineWidth: frameOpacity > 0.48 ? 2.35 : 2.0
-                        )
-                        .shadow(
-                            color: model.menuBarColor.opacity(min(0.9, frameOpacity * 1.18)),
-                            radius: glowRadius
-                        )
-                    // A second blurred contour keeps the breathing readable
-                    // on light and dark Codex surfaces without changing HUD
-                    // geometry or adding a hard gray border.
-                    RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous)
-                        .stroke(model.menuBarColor.opacity(min(0.62, frameOpacity * 0.74)), lineWidth: 1.4)
-                        .blur(radius: max(2, glowRadius * 0.42))
-                }
-            }
-        }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Codex 用量")
-        .accessibilityValue("\(model.menuBarTitle)，\(model.dataAgeText)，帳號 \(model.currentAccountEmail ?? "未提供 Email")。提供更新通知、詳細面板、只貼上與貼上並送出按鈕")
+        .accessibilityValue("\(model.menuBarTitle)，\(model.dataAgeText)，帳號 \(model.currentAccountEmail ?? "未提供 Email")。提供更新通知、詳細面板、只貼上、貼上並送出、Commit 與 Push 快捷鈕")
         .animation(.easeOut(duration: 0.18), value: decreaseAmount)
         .onAppear {
             trackedProfileID = model.currentProfileID
@@ -1205,6 +1207,47 @@ private struct CodexFloatingHUDView: View {
                 decreaseBounce = false
             }
         }
+    }
+
+    @ViewBuilder
+    private var hudPulseOverlay: some View {
+        if let profile = HUDWarningPolicy.framePulseProfile(
+            remainingPercent: model.hudRemainingPercent,
+            connectionState: model.connectionState,
+            isStale: model.isStale
+        ) {
+            // Keep the HUD visually stable. The earlier TimelineView rebuilt
+            // an animated edge several times per second, which looked like a
+            // panel flash on some macOS/window-manager combinations. A
+            // color-matched static contour still communicates quota state
+            // without moving or blinking the HUD.
+            let opacity = profile.minOpacity + ((profile.maxOpacity - profile.minOpacity) * 0.45)
+            hudPulseBorder(
+                frameOpacity: opacity,
+                glowRadius: accessibilityReduceMotion ? 0 : min(profile.glowRadius, 4)
+            )
+        } else if accessibilityReduceMotion && hasLiveHUDData {
+            hudPulseBorder(frameOpacity: 0.14, glowRadius: 0)
+        }
+    }
+
+    private func hudPulseBorder(frameOpacity: Double, glowRadius: Double) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous)
+                .stroke(
+                    model.menuBarColor.opacity(max(0.28, frameOpacity)),
+                    lineWidth: frameOpacity > 0.48 ? 2.35 : 2.0
+                )
+                .shadow(
+                    color: model.menuBarColor.opacity(min(0.9, frameOpacity * 1.18)),
+                    radius: glowRadius
+                )
+            RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous)
+                .stroke(model.menuBarColor.opacity(min(0.62, frameOpacity * 0.74)), lineWidth: 1.4)
+                .blur(radius: max(2, glowRadius * 0.42))
+        }
+        .frame(width: layoutState.size.width, height: layoutState.size.height)
+        .allowsHitTesting(false)
     }
 
     private var hasAvailableUpdate: Bool {
@@ -1238,38 +1281,45 @@ private struct CodexFloatingHUDView: View {
         }
     }
 
-    @ViewBuilder
     private var updateShortcutButton: some View {
-        if hasAvailableUpdate && !accessibilityReduceMotion {
-            TimelineView(.periodic(from: .now, by: 0.12)) { context in
-                let phase = context.date.timeIntervalSinceReferenceDate
-                    .truncatingRemainder(dividingBy: 0.9) / 0.9
-                let wave = (sin(phase * 2 * .pi) + 1) / 2
-                updateShortcutButtonContent(pulse: wave)
-            }
-        } else {
-            updateShortcutButtonContent(pulse: 0)
-        }
-    }
-
-    private func updateShortcutButtonContent(pulse: Double) -> some View {
         Button(action: updateShortcutAction) {
-            Image(systemName: updateShortcutIcon)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(hasAvailableUpdate ? Color.orange : .primary.opacity(isUpdateHovered ? 0.95 : 0.66))
-                .scaleEffect(1 + (hasAvailableUpdate ? 0.10 * pulse : 0))
-                .rotationEffect(.degrees(hasAvailableUpdate ? (pulse - 0.5) * 8 : 0))
-                .frame(maxWidth: .infinity, minHeight: 26)
-                .background(
-                    isUpdateHovered ? Color.primary.opacity(0.12) : Color.clear,
-                    in: Circle()
-                )
+            // Keep the update affordance static as well. Availability is
+            // already conveyed by the orange bell and menu feedback; an
+            // animated icon made the whole HUD appear to flicker.
+            updateShortcutIconView(pulse: 0)
+            .frame(maxWidth: .infinity, minHeight: 26)
+            .background(isUpdateHovered ? Color.primary.opacity(0.12) : Color.clear, in: Circle())
         }
         .buttonStyle(.plain)
         .onHover { isUpdateHovered = $0 }
         .help(hasAvailableUpdate ? "有更新可用，開啟更新面板" : "檢查更新")
         .accessibilityLabel(hasAvailableUpdate ? "有更新可用" : "檢查更新")
         .accessibilityValue(hasAvailableUpdate ? "開啟更新面板" : "檢查目前版本")
+    }
+
+    private func updateShortcutIconView(pulse: Double) -> some View {
+        Image(systemName: updateShortcutIcon)
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(hasAvailableUpdate ? Color.orange : .primary.opacity(isUpdateHovered ? 0.95 : 0.66))
+            .scaleEffect(1 + (hasAvailableUpdate ? 0.10 * pulse : 0))
+            .rotationEffect(.degrees(hasAvailableUpdate ? (pulse - 0.5) * 8 : 0))
+    }
+
+    private func commitShortcutAction() {
+        // Opening the workspace is always safe. If the user has already
+        // selected files and entered a message, surface the existing
+        // confirmation in that panel; no Git mutation happens here.
+        if gitCoordinator.isWorkspaceKnown {
+            gitCoordinator.requestCommitConfirmation()
+        }
+        showGitWorkspace()
+    }
+
+    private func pushShortcutAction() {
+        if gitCoordinator.isWorkspaceKnown {
+            gitCoordinator.requestPushConfirmation()
+        }
+        showGitWorkspace()
     }
 
     @ViewBuilder
