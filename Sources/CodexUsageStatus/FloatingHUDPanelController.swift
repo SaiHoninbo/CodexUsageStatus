@@ -1388,7 +1388,10 @@ private struct CodexFloatingHUDView: View {
             // shared AppUpdateState, so the HUD never starts a second request.
             showDetails()
         case .idle, .upToDate, .error:
-            checkForUpdates()
+            // Route manual HUD checks through the same feedback path as the
+            // context menu so the user sees checking/available/error state
+            // immediately instead of only receiving a silent state update.
+            requestUpdateCheck()
         }
     }
 
