@@ -803,9 +803,11 @@ private struct HUDQuotaRow: View {
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(Color.primary.opacity(isUpdating ? 0.08 : 0.10))
+                        // Use a neutral dark track so the unfilled portion stays
+                        // visible over both light and dark HUD materials.
+                        .fill(Color.black.opacity(isUpdating ? 0.18 : 0.24))
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(accent.opacity(isUpdating ? 0.20 : 0.38))
+                        .fill(accent.opacity(isUpdating ? 0.32 : 0.58))
                         .frame(width: proxy.size.width * fillFraction)
                 }
             }
@@ -1213,64 +1215,78 @@ private struct CodexFloatingHUDView: View {
     }
 
     private var topControlsRow: some View {
-        HStack(spacing: 0) {
-            updateShortcutButton
-
-            Button(action: showDetails) {
-                Image(systemName: "rectangle.and.text.magnifyingglass")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.primary.opacity(isDetailsHovered ? 0.95 : 0.66))
-                    .frame(maxWidth: .infinity, minHeight: 26)
-                    .background(
-                        isDetailsHovered ? Color.primary.opacity(0.12) : Color.clear,
-                        in: Circle()
-                    )
+        HStack(spacing: 10) {
+            HStack(spacing: 4) {
+                pasteShortcutButton
+                pasteAndSubmitShortcutButton
             }
-            .buttonStyle(.plain)
-            .onHover { isDetailsHovered = $0 }
-            .help("開啟詳細面板")
-            .accessibilityLabel("開啟詳細面板")
 
-            Button(action: pasteClipboard) {
-                Image(systemName: "doc.on.clipboard")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .frame(maxWidth: .infinity, minHeight: 26)
-                    .background(
-                        isPasteHovered ? Color.primary.opacity(0.14) : Color.clear,
-                        in: Circle()
-                    )
+            HStack(spacing: 4) {
+                detailsShortcutButton
+                updateShortcutButton
             }
-            .buttonStyle(.plain)
-            .disabled(!layoutState.isCodexFocused)
-            .onHover { isPasteHovered = $0 }
-            .help(layoutState.isCodexFocused ? "貼上剪貼簿內容" : "切換回 Codex 後可貼上")
-            .accessibilityLabel("貼上剪貼簿內容")
-
-            Button {
-                guard !isPasteAndSubmitInFlight else { return }
-                isPasteAndSubmitInFlight = true
-                pasteAndSubmit { _ in
-                    isPasteAndSubmitInFlight = false
-                }
-            } label: {
-                Image(systemName: "paperplane.fill")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .frame(maxWidth: .infinity, minHeight: 26)
-                    .background(
-                        isPasteAndSubmitHovered ? Color.primary.opacity(0.14) : Color.clear,
-                        in: Circle()
-                    )
-                    .opacity(isPasteAndSubmitInFlight ? 0.45 : 1)
-            }
-            .buttonStyle(.plain)
-            .disabled(isPasteAndSubmitInFlight || !layoutState.isCodexFocused)
-            .onHover { isPasteAndSubmitHovered = $0 }
-            .help(layoutState.isCodexFocused ? "貼上並送出" : "切換回 Codex 後可貼上並送出")
-            .accessibilityLabel("貼上並送出")
         }
-        .frame(width: 152, height: 26)
+        .frame(width: 152, height: 26, alignment: .trailing)
+    }
+
+    private var detailsShortcutButton: some View {
+        Button(action: showDetails) {
+            Image(systemName: "rectangle.and.text.magnifyingglass")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.primary.opacity(isDetailsHovered ? 0.95 : 0.66))
+                .frame(width: 30, height: 26)
+                .background(
+                    isDetailsHovered ? Color.primary.opacity(0.12) : Color.clear,
+                    in: Circle()
+                )
+        }
+        .buttonStyle(.plain)
+        .onHover { isDetailsHovered = $0 }
+        .help("開啟詳細面板")
+        .accessibilityLabel("開啟詳細面板")
+    }
+
+    private var pasteShortcutButton: some View {
+        Button(action: pasteClipboard) {
+            Image(systemName: "doc.on.clipboard")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.primary)
+                .frame(width: 30, height: 26)
+                .background(
+                    isPasteHovered ? Color.primary.opacity(0.14) : Color.clear,
+                    in: Circle()
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(!layoutState.isCodexFocused)
+        .onHover { isPasteHovered = $0 }
+        .help(layoutState.isCodexFocused ? "貼上剪貼簿內容" : "切換回 Codex 後可貼上")
+        .accessibilityLabel("貼上剪貼簿內容")
+    }
+
+    private var pasteAndSubmitShortcutButton: some View {
+        Button {
+            guard !isPasteAndSubmitInFlight else { return }
+            isPasteAndSubmitInFlight = true
+            pasteAndSubmit { _ in
+                isPasteAndSubmitInFlight = false
+            }
+        } label: {
+            Image(systemName: "paperplane.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.primary)
+                .frame(width: 30, height: 26)
+                .background(
+                    isPasteAndSubmitHovered ? Color.primary.opacity(0.14) : Color.clear,
+                    in: Circle()
+                )
+                .opacity(isPasteAndSubmitInFlight ? 0.45 : 1)
+        }
+        .buttonStyle(.plain)
+        .disabled(isPasteAndSubmitInFlight || !layoutState.isCodexFocused)
+        .onHover { isPasteAndSubmitHovered = $0 }
+        .help(layoutState.isCodexFocused ? "貼上並送出" : "切換回 Codex 後可貼上並送出")
+        .accessibilityLabel("貼上並送出")
     }
 
     private var gitControlsRow: some View {
