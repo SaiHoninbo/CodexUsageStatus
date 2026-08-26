@@ -272,7 +272,11 @@ final class FloatingHUDPanelController: NSObject {
         let codexApp = frontmostApplication
         layoutState.isCodexFocused = true
 
-        guard model.hudRemainingPercent != nil else {
+        guard HUDQuotaPresentationPolicy.make(
+            snapshot: model.snapshot,
+            profileID: model.currentProfileID,
+            now: model.currentDate
+        )?.hasRecognizedWindow == true else {
             // Keep a visible panel through account boundaries, reconnects,
             // and sparse quota responses. The view owns profile-bound cached
             // presentation and renders an updating state without blanking.
@@ -715,13 +719,8 @@ final class FloatingHUDPanelController: NSObject {
     }
 
     private func codexWindowFrame(for processID: pid_t) -> CGRect? {
-        guard let application = NSRunningApplication(processIdentifier: processID),
-              let focusedBounds = CodexWorkspaceResolver.focusedWindowBounds(for: application) else {
-            // There is deliberately no largest-window or previous-window
-            // fallback.  Without the focused-window metadata, positioning
-            // beside another Codex window would be worse than hiding HUD.
-            return nil
-        }
+        let application = NSRunningApplication(processIdentifier: processID)
+        let focusedBounds = application.flatMap(CodexWorkspaceResolver.focusedWindowBounds)
         // `.optionAll` is required because the HUD joins all Spaces and the
         // focused Codex window may be reported outside the active Space.
         // Identity remains fail-closed through PID/layer/size and AX geometry.
@@ -741,10 +740,97 @@ final class FloatingHUDPanelController: NSObject {
         }
         // AX and Quartz normally share the same top-left global coordinate
         // space. Require exactly one close match so two windows cannot be
-        // cross-wired; if the coordinate systems disagree, fail closed.
+        // cross-wired; when AX is unavailable, only a single filtered Quartz
+        // candidate is accepted, preserving the same fail-closed behavior.
         return HUDVisibilityPolicy.uniqueQuartzWindowMatch(
             focusedBounds: focusedBounds,
             candidates: candidates
+        )
+    }
+}
+
+private struct HUDQuotaRow: View {
+    let kind: HUDQuotaWindowKind
+    let presentation: HUDQuotaWindowPresentation?
+    let isUpdating: Bool
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+
+    private var accent: Color {
+        switch kind {
+        case .fiveHour: return .orange
+        case .sevenDay: return .blue
+        }
+    }
+
+    private var fillFraction: CGFloat {
+        CGFloat(max(0, min(1, presentation?.fillFraction ?? 0)))
+    }
+
+    private var percentText: String {
+        presentation.map { "\($0.remainingPercent)%" } ?? "—%"
+    }
+
+    private var resetText: String {
+        presentation?.resetDescription ?? "更新中"
+    }
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "clock")
+                .font(.system(size: 9, weight: .semibold))
+                .frame(width: 11)
+            Text(kind.label)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+            Text(percentText)
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+            Text(resetText)
+                .font(.system(size: 9, weight: .medium, design: .rounded))
+                .foregroundStyle(.primary.opacity(0.86))
+        }
+        // Keep labels readable independently of the fill strength. Updating
+        // state changes the shell/fill only; it must not wash out the text.
+        .foregroundStyle(.primary.opacity(0.96))
+        .lineLimit(1)
+        .minimumScaleFactor(0.58)
+        .allowsTightening(true)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 1)
+        .fixedSize(horizontal: true, vertical: false)
+        .background {
+            // This reader measures the already content-sized row. It never
+            // participates in the parent's 138pt allocation, so the fill
+            // cannot create a trailing empty track or stretch the shell.
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.primary.opacity(isUpdating ? 0.08 : 0.10))
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(accent.opacity(isUpdating ? 0.20 : 0.38))
+                        .frame(width: proxy.size.width * fillFraction)
+                }
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(
+                    accent.opacity(isUpdating ? 0.24 : 0.32),
+                    lineWidth: 0.6
+                )
+        }
+        .animation(
+            isUpdating || accessibilityReduceMotion ? nil : .easeOut(duration: 0.24),
+            value: presentation?.remainingPercent
+        )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(kind.label)配額")
+        .accessibilityValue(
+            presentation.map {
+                let reset = $0.resetDescription == "更新中" || $0.resetDescription == "已重置"
+                    ? $0.resetDescription
+                    : "\($0.resetDescription)後重置"
+                return "剩餘 \($0.remainingPercent)%，\(reset)"
+            } ?? "資料更新中"
         )
     }
 }
@@ -801,7 +887,7 @@ private struct CodexFloatingHUDView: View {
     @State private var trackedProfileID: UUID?
     @State private var lastLivePercent: Int?
     @State private var hasPresentedHUD = false
-    @State private var presentationCache: HUDPresentationSnapshot?
+    @State private var presentationCache: HUDDualQuotaPresentation?
     @State private var decreaseAmount: Int?
     @State private var decreaseBounce = false
     @State private var decreaseAnimationID = 0
@@ -814,7 +900,7 @@ private struct CodexFloatingHUDView: View {
         // breathing border; attaching the menu inside it recreates the
         // AppKit anchor on every pulse and makes an open menu jitter.
         ZStack {
-            if hasPresentedHUD || model.hudRemainingPercent != nil {
+            if hasPresentedHUD || livePresentation != nil || displayedPresentation != nil {
                 // Keep the content tree mounted while quota transport is
                 // temporarily empty. The cached presentation is profile-bound
                 // and renders an updating state instead of blanking the panel.
@@ -1011,161 +1097,18 @@ private struct CodexFloatingHUDView: View {
 
     @ViewBuilder
     private func hudContainer() -> some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                // Keep the percentage and countdown together. The action
-                // group gets the remaining width so every button has the
-                // same hit target and the old empty middle column disappears.
-                VStack(alignment: .leading, spacing: -2) {
-                    ZStack(alignment: .topTrailing) {
-                        percentTextView
-                        if let decreaseAmount {
-                            Text("−\(decreaseAmount)%")
-                                .font(.system(size: 11, weight: .bold, design: .rounded))
-                                .foregroundStyle(.red)
-                                .shadow(color: .red.opacity(0.26), radius: 1.5, y: 0.2)
-                                .scaleEffect(accessibilityReduceMotion ? 1 : (decreaseBounce ? 1.08 : 0.94), anchor: .center)
-                                .offset(x: 5, y: -2)
-                                .transition(
-                                    accessibilityReduceMotion
-                                        ? .opacity
-                                        : .scale(scale: 0.78).combined(with: .opacity)
-                                )
-                                .zIndex(1)
-                        }
-                    }
-                    .frame(width: 86, height: 28, alignment: .leading)
-
-                    Text(hudResetDescription)
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .foregroundStyle(effectiveHUDColor)
-                        .multilineTextAlignment(.leading)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.78)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .shadow(color: .black.opacity(0.12), radius: 0.7, y: 0.4)
-                }
-                .frame(width: 156, alignment: .leading)
-
-                Spacer(minLength: 0)
-
-                HStack(spacing: 0) {
-                    updateShortcutButton
-
-                    Button(action: showDetails) {
-                        Image(systemName: "rectangle.and.text.magnifyingglass")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.primary.opacity(isDetailsHovered ? 0.95 : 0.66))
-                            .frame(maxWidth: .infinity, minHeight: 26)
-                            .background(
-                                isDetailsHovered ? Color.primary.opacity(0.12) : Color.clear,
-                                in: Circle()
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .onHover { isDetailsHovered = $0 }
-                    .help("開啟詳細面板")
-                    .accessibilityLabel("開啟詳細面板")
-
-                    Button(action: pasteClipboard) {
-                        Image(systemName: "doc.on.clipboard")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(.primary)
-                            .frame(maxWidth: .infinity, minHeight: 26)
-                            .background(
-                                isPasteHovered ? Color.primary.opacity(0.14) : Color.clear,
-                                in: Circle()
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!layoutState.isCodexFocused)
-                    .onHover { isPasteHovered = $0 }
-                    .help(layoutState.isCodexFocused ? "貼上剪貼簿內容" : "切換回 Codex 後可貼上")
-                    .accessibilityLabel("貼上剪貼簿內容")
-
-                    Button {
-                        guard !isPasteAndSubmitInFlight else { return }
-                        isPasteAndSubmitInFlight = true
-                        pasteAndSubmit { _ in
-                            isPasteAndSubmitInFlight = false
-                        }
-                    } label: {
-                        Image(systemName: "paperplane.fill")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.primary)
-                            .frame(maxWidth: .infinity, minHeight: 26)
-                            .background(
-                                isPasteAndSubmitHovered ? Color.primary.opacity(0.14) : Color.clear,
-                                in: Circle()
-                            )
-                            .opacity(isPasteAndSubmitInFlight ? 0.45 : 1)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(isPasteAndSubmitInFlight || !layoutState.isCodexFocused)
-                    .onHover { isPasteAndSubmitHovered = $0 }
-                    .help(layoutState.isCodexFocused ? "貼上並送出" : "切換回 Codex 後可貼上並送出")
-                    .accessibilityLabel("貼上並送出")
-                }
-                .frame(width: 134, height: 26)
+        HStack(alignment: .top, spacing: 0) {
+            VStack(alignment: .leading, spacing: 2) {
+                quotaStack
+                accountEmailView
             }
+            .frame(width: 138, alignment: .leading)
 
-            // Full email is deliberately shown only for the active account;
-            // UsageViewModel keeps it in the in-memory health snapshot and
-            // never persists or logs it. Tightening preserves the complete
-            // address instead of truncating it with an ellipsis.
-            HStack(spacing: 4) {
-                Text(verbatim: model.currentAccountEmail ?? "未提供 Email")
-                    .font(.system(size: 10.5, weight: .medium, design: .rounded))
-                    .foregroundStyle(.primary.opacity(model.currentAccountEmail == nil ? 0.48 : 0.82))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.34)
-                    .allowsTightening(true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .help(model.currentAccountEmail ?? "目前帳號尚未提供 Email")
-
-                Button(action: showGitWorkspace) {
-                    Text(gitCoordinator.compactStatusLabel)
-                        .font(.system(size: 8.5, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.primary.opacity(gitCoordinator.isWorkspaceKnown ? 0.76 : 0.42))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.5)
-                }
-                .buttonStyle(.plain)
-                .disabled(!gitCoordinator.isWorkspaceKnown)
-                .help(gitCoordinator.isWorkspaceKnown ? "開啟 Git 工作區" : "目前 Codex 工作區尚未解析")
-                .accessibilityLabel("Git 工作區")
-                .accessibilityValue(gitCoordinator.compactStatusLabel)
-
-                Button(action: commitShortcutAction) {
-                    Image(systemName: "checkmark.seal")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.primary.opacity(isCommitHovered ? 0.96 : 0.68))
-                        .frame(width: 20, height: 22)
-                        .background(isCommitHovered ? Color.primary.opacity(0.13) : .clear, in: Circle())
-                }
-                .buttonStyle(.plain)
-                .disabled(gitCoordinator.operationState.isBusy)
-                .onHover { isCommitHovered = $0 }
-                .help("Commit：開啟 Git 工作區並要求確認")
-                .accessibilityLabel("Commit")
-                .accessibilityValue(gitCoordinator.isWorkspaceKnown ? "開啟 Git 工作區並要求確認" : "工作區尚未解析")
-
-                Button(action: pushShortcutAction) {
-                    Image(systemName: "arrow.up.circle")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.primary.opacity(isPushHovered ? 0.96 : 0.68))
-                        .frame(width: 20, height: 22)
-                        .background(isPushHovered ? Color.primary.opacity(0.13) : .clear, in: Circle())
-                }
-                .buttonStyle(.plain)
-                .disabled(gitCoordinator.operationState.isBusy)
-                .onHover { isPushHovered = $0 }
-                .help("Push：開啟 Git 工作區並要求確認")
-                .accessibilityLabel("Push")
-                .accessibilityValue(gitCoordinator.isWorkspaceKnown ? "開啟 Git 工作區並要求確認" : "工作區尚未解析")
+            VStack(alignment: .trailing, spacing: 0) {
+                topControlsRow
+                gitControlsRow
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(width: 152, alignment: .trailing)
         }
         .padding(.horizontal, 5)
         .padding(.vertical, layoutState.placement == .topRight ? 1 : 2)
@@ -1174,8 +1117,7 @@ private struct CodexFloatingHUDView: View {
         .clipShape(RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Codex 用量")
-        .accessibilityValue("\(hudAccessibilityTitle)，\(model.dataAgeText)，帳號 \(model.currentAccountEmail ?? "未提供 Email")。提供更新通知、詳細面板、只貼上、貼上並送出、Commit 與 Push 快捷鈕")
-        .animation(.easeOut(duration: 0.18), value: decreaseAmount)
+        .accessibilityValue(hudAccessibilityValue)
         .onAppear {
             trackedProfileID = model.currentProfileID
             cacheCurrentPresentation()
@@ -1186,6 +1128,7 @@ private struct CodexFloatingHUDView: View {
             // panel remains mounted, but the new profile renders —/updating
             // until it receives its own valid snapshot.
             presentationCache = nil
+            trackedProfileID = newProfileID
             resetTracking(for: newProfileID)
             // UsageViewModel clears the old snapshot and lastUpdated before
             // publishing a profile switch. If the new profile already has a
@@ -1193,16 +1136,13 @@ private struct CodexFloatingHUDView: View {
             // equal to the previous profile and SwiftUI coalesces onChange.
             if newProfileID == model.currentProfileID,
                model.lastUpdated != nil,
-               model.hudRemainingPercent != nil {
+               livePresentation != nil {
                 cacheCurrentPresentation()
             }
         }
-        .onChange(of: model.hudRemainingPercent) { _, _ in
+        .onChange(of: model.snapshot) { _, _ in
             cacheCurrentPresentation()
             observePercentChange()
-        }
-        .onChange(of: model.hudResetTimestamp) { _, _ in
-            cacheCurrentPresentation()
         }
         .onChange(of: model.lastUpdated) { _, newValue in
             // A managed profile can restore a cached snapshot with the same
@@ -1227,6 +1167,157 @@ private struct CodexFloatingHUDView: View {
                 decreaseBounce = false
             }
         }
+    }
+
+    private var quotaStack: some View {
+        ZStack(alignment: .topTrailing) {
+            VStack(alignment: .leading, spacing: 2) {
+                HUDQuotaRow(
+                    kind: .fiveHour,
+                    presentation: displayedPresentation?.fiveHour,
+                    isUpdating: isQuotaUpdating
+                )
+                HUDQuotaRow(
+                    kind: .sevenDay,
+                    presentation: displayedPresentation?.sevenDay,
+                    isUpdating: isQuotaUpdating
+                )
+            }
+            if let decreaseAmount {
+                Text("−\(decreaseAmount)%")
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .foregroundStyle(.red)
+                    .shadow(color: .red.opacity(0.26), radius: 1.5, y: 0.2)
+                    .scaleEffect(accessibilityReduceMotion ? 1 : (decreaseBounce ? 1.08 : 0.94))
+                    .offset(x: 1, y: -3)
+                    .transition(
+                        accessibilityReduceMotion
+                            ? .opacity
+                            : .scale(scale: 0.78).combined(with: .opacity)
+                    )
+                    .zIndex(1)
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var accountEmailView: some View {
+        Text(verbatim: model.currentAccountEmail ?? "未提供 Email")
+            .font(.system(size: 10.5, weight: .medium, design: .rounded))
+            .foregroundStyle(.primary.opacity(model.currentAccountEmail == nil ? 0.48 : 0.82))
+            .lineLimit(1)
+            .minimumScaleFactor(0.34)
+            .allowsTightening(true)
+            .frame(width: 138, alignment: .leading)
+            .help(model.currentAccountEmail ?? "目前帳號尚未提供 Email")
+    }
+
+    private var topControlsRow: some View {
+        HStack(spacing: 0) {
+            updateShortcutButton
+
+            Button(action: showDetails) {
+                Image(systemName: "rectangle.and.text.magnifyingglass")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(isDetailsHovered ? 0.95 : 0.66))
+                    .frame(maxWidth: .infinity, minHeight: 26)
+                    .background(
+                        isDetailsHovered ? Color.primary.opacity(0.12) : Color.clear,
+                        in: Circle()
+                    )
+            }
+            .buttonStyle(.plain)
+            .onHover { isDetailsHovered = $0 }
+            .help("開啟詳細面板")
+            .accessibilityLabel("開啟詳細面板")
+
+            Button(action: pasteClipboard) {
+                Image(systemName: "doc.on.clipboard")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, minHeight: 26)
+                    .background(
+                        isPasteHovered ? Color.primary.opacity(0.14) : Color.clear,
+                        in: Circle()
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(!layoutState.isCodexFocused)
+            .onHover { isPasteHovered = $0 }
+            .help(layoutState.isCodexFocused ? "貼上剪貼簿內容" : "切換回 Codex 後可貼上")
+            .accessibilityLabel("貼上剪貼簿內容")
+
+            Button {
+                guard !isPasteAndSubmitInFlight else { return }
+                isPasteAndSubmitInFlight = true
+                pasteAndSubmit { _ in
+                    isPasteAndSubmitInFlight = false
+                }
+            } label: {
+                Image(systemName: "paperplane.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, minHeight: 26)
+                    .background(
+                        isPasteAndSubmitHovered ? Color.primary.opacity(0.14) : Color.clear,
+                        in: Circle()
+                    )
+                    .opacity(isPasteAndSubmitInFlight ? 0.45 : 1)
+            }
+            .buttonStyle(.plain)
+            .disabled(isPasteAndSubmitInFlight || !layoutState.isCodexFocused)
+            .onHover { isPasteAndSubmitHovered = $0 }
+            .help(layoutState.isCodexFocused ? "貼上並送出" : "切換回 Codex 後可貼上並送出")
+            .accessibilityLabel("貼上並送出")
+        }
+        .frame(width: 152, height: 26)
+    }
+
+    private var gitControlsRow: some View {
+        HStack(spacing: 0) {
+            Button(action: showGitWorkspace) {
+                Text(gitCoordinator.compactStatusLabel)
+                    .font(.system(size: 8.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.primary.opacity(gitCoordinator.isWorkspaceKnown ? 0.76 : 0.42))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .disabled(!gitCoordinator.isWorkspaceKnown)
+            .help(gitCoordinator.isWorkspaceKnown ? "開啟 Git 工作區" : "目前 Codex 工作區尚未解析")
+            .accessibilityLabel("Git 工作區")
+            .accessibilityValue(gitCoordinator.compactStatusLabel)
+
+            Button(action: commitShortcutAction) {
+                Image(systemName: "checkmark.seal")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(isCommitHovered ? 0.96 : 0.68))
+                    .frame(width: 20, height: 22)
+                    .background(isCommitHovered ? Color.primary.opacity(0.13) : .clear, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(gitCoordinator.operationState.isBusy)
+            .onHover { isCommitHovered = $0 }
+            .help("Commit：開啟 Git 工作區並要求確認")
+            .accessibilityLabel("Commit")
+            .accessibilityValue(gitCoordinator.isWorkspaceKnown ? "開啟 Git 工作區並要求確認" : "工作區尚未解析")
+
+            Button(action: pushShortcutAction) {
+                Image(systemName: "arrow.up.circle")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(isPushHovered ? 0.96 : 0.68))
+                    .frame(width: 20, height: 22)
+                    .background(isPushHovered ? Color.primary.opacity(0.13) : .clear, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(gitCoordinator.operationState.isBusy)
+            .onHover { isPushHovered = $0 }
+            .help("Push：開啟 Git 工作區並要求確認")
+            .accessibilityLabel("Push")
+            .accessibilityValue(gitCoordinator.isWorkspaceKnown ? "開啟 Git 工作區並要求確認" : "工作區尚未解析")
+        }
+        .frame(width: 152, height: 22, alignment: .trailing)
     }
 
     @ViewBuilder
@@ -1582,38 +1673,16 @@ private struct CodexFloatingHUDView: View {
         }
     }
 
-    private var percentTextView: some View {
-        percentLabel(scale: 1)
-    }
-
-    private func percentLabel(scale: CGFloat) -> some View {
-        Text(percentWithSymbol)
-            .font(.system(size: 25, weight: .bold, design: .rounded))
-            .foregroundStyle(effectiveHUDColor)
-            .lineLimit(1)
-            .minimumScaleFactor(0.78)
-            .allowsTightening(true)
-            .scaleEffect(scale * (accessibilityReduceMotion || !decreaseBounce ? 1 : 1.16))
-            .shadow(color: .black.opacity(0.16), radius: 0.8, y: 0.5)
-            .animation(
-                accessibilityReduceMotion
-                    ? .easeOut(duration: 0.18)
-                    : .spring(response: 0.25, dampingFraction: 0.58),
-                value: decreaseBounce
-            )
-    }
-
-    private func frameOpacity(at date: Date, profile: HUDFramePulseProfile) -> Double {
-        let phase = date.timeIntervalSinceReferenceDate
-            .truncatingRemainder(dividingBy: profile.period) / profile.period
-        let wave = (sin(phase * 2 * .pi) + 1) / 2
-        return profile.minOpacity + ((profile.maxOpacity - profile.minOpacity) * wave)
-    }
-
     private var hasLiveHUDData: Bool {
         model.connectionState == .connected
             && !model.isStale
             && model.hudRemainingPercent != nil
+    }
+
+    private var isQuotaUpdating: Bool {
+        livePresentation == nil
+            || model.connectionState != .connected
+            || model.isStale
     }
 
     private func resetTracking(for profileID: UUID?) {
@@ -1679,51 +1748,51 @@ private struct CodexFloatingHUDView: View {
         }
     }
 
-    private var hudResetDescription: String {
-        if model.hudRemainingPercent == nil {
-            guard let cached = HUDVisibilityPolicy.cachedPresentation(
-                currentProfileID: model.currentProfileID,
-                cached: presentationCache
-            ) else { return "更新中" }
-            return "\(cached.resetDescription) · 更新中"
-        }
-        return formattedResetDescription(model.resetDescription(model.hudResetTimestamp))
+    private var livePresentation: HUDDualQuotaPresentation? {
+        HUDQuotaPresentationPolicy.make(
+            snapshot: model.snapshot,
+            profileID: model.currentProfileID,
+            now: model.currentDate
+        )
     }
 
-    private func formattedResetDescription(_ description: String) -> String {
-        guard description.hasSuffix("後重置") else { return description }
-        return description
-            .replacingOccurrences(of: "後重置", with: "")
-            .replacingOccurrences(of: " ", with: "")
+    private var displayedPresentation: HUDDualQuotaPresentation? {
+        livePresentation ?? HUDVisibilityPolicy.cachedPresentation(
+            currentProfileID: model.currentProfileID,
+            cached: presentationCache
+        )
     }
 
-    private var percentWithSymbol: String {
-        guard let remaining = model.hudRemainingPercent
-            ?? HUDVisibilityPolicy.cachedPresentation(
-                currentProfileID: model.currentProfileID,
-                cached: presentationCache
-            )?.remainingPercent else { return "—" }
-        return "\(remaining)%"
-    }
-
-    private var effectiveHUDColor: Color {
-        model.hudRemainingPercent == nil ? .secondary : model.menuBarColor
-    }
-
-    private var hudAccessibilityTitle: String {
-        "Codex \(percentWithSymbol)"
+    private var hudAccessibilityValue: String {
+        let rows = [
+            (label: HUDQuotaWindowKind.fiveHour.label, presentation: displayedPresentation?.fiveHour),
+            (label: HUDQuotaWindowKind.sevenDay.label, presentation: displayedPresentation?.sevenDay)
+        ]
+        let quotaText = rows.map { row in
+            guard let presentation = row.presentation else {
+                return "\(row.label)窗口，資料更新中"
+            }
+            let reset = presentation.resetDescription == "更新中" || presentation.resetDescription == "已重置"
+                ? presentation.resetDescription
+                : "\(presentation.resetDescription)後重置"
+            return "\(row.label)窗口，剩餘 \(presentation.remainingPercent)%，\(reset)"
+        }.joined(separator: "；")
+        return "Codex，\(quotaText)，\(model.dataAgeText)，帳號 \(model.currentAccountEmail ?? "未提供 Email")。提供更新通知、詳細面板、只貼上、貼上並送出、Commit 與 Push 快捷鈕"
     }
 
     private func cacheCurrentPresentation() {
-        guard let snapshot = HUDVisibilityPolicy.presentationSnapshot(
+        guard let presentation = HUDQuotaPresentationPolicy.make(
+            snapshot: model.snapshot,
+            profileID: model.currentProfileID,
+            now: model.currentDate
+        ), let cached = HUDVisibilityPolicy.presentationSnapshot(
             currentProfileID: model.currentProfileID,
             trackedProfileID: trackedProfileID,
             lastUpdated: model.lastUpdated,
-            remainingPercent: model.hudRemainingPercent,
-            resetDescription: formattedResetDescription(model.resetDescription(model.hudResetTimestamp))
+            presentation: presentation
         ) else { return }
         hasPresentedHUD = true
-        presentationCache = snapshot
+        presentationCache = cached
     }
 
 }

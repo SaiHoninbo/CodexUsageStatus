@@ -20,12 +20,6 @@ enum HUDVisibilityDecision: Equatable {
     case pendingHide
 }
 
-struct HUDPresentationSnapshot: Equatable {
-    let profileID: UUID
-    let remainingPercent: Int
-    let resetDescription: String
-}
-
 enum HUDVisibilityPolicy {
     static func visibilityDecision(
         enabled: Bool,
@@ -80,8 +74,8 @@ enum HUDVisibilityPolicy {
 
     static func cachedPresentation(
         currentProfileID: UUID?,
-        cached: HUDPresentationSnapshot?
-    ) -> HUDPresentationSnapshot? {
+        cached: HUDDualQuotaPresentation?
+    ) -> HUDDualQuotaPresentation? {
         guard let currentProfileID,
               let cached,
               cached.profileID == currentProfileID else { return nil }
@@ -92,18 +86,15 @@ enum HUDVisibilityPolicy {
         currentProfileID: UUID?,
         trackedProfileID: UUID?,
         lastUpdated: Date?,
-        remainingPercent: Int?,
-        resetDescription: String
-    ) -> HUDPresentationSnapshot? {
+        presentation: HUDDualQuotaPresentation?
+    ) -> HUDDualQuotaPresentation? {
         guard let currentProfileID,
               currentProfileID == trackedProfileID,
               lastUpdated != nil,
-              let remainingPercent else { return nil }
-        return HUDPresentationSnapshot(
-            profileID: currentProfileID,
-            remainingPercent: remainingPercent,
-            resetDescription: resetDescription
-        )
+              let presentation,
+              presentation.profileID == currentProfileID,
+              presentation.hasRecognizedWindow else { return nil }
+        return presentation
     }
 
     static func shouldApplyFocusLoss(
@@ -114,21 +105,36 @@ enum HUDVisibilityPolicy {
     }
 
     /// Match a normalized AX focused-window frame against Quartz candidates.
-    /// The caller owns PID, layer, and minimum-size filtering; this helper only
-    /// decides whether geometry identifies exactly one candidate. Returning nil
-    /// for zero or multiple matches keeps first-show positioning fail-closed.
+    /// The caller owns PID, layer, and minimum-size filtering. When AX is
+    /// unavailable, a single filtered Quartz candidate is still unambiguous
+    /// for the frontmost process and may be accepted. When AX reports a
+    /// synthetic full-screen window (as current Codex builds can), that same
+    /// single-candidate rule bridges the geometry mismatch. Multiple
+    /// candidates without a geometry match remain unavailable so first-show
+    /// positioning never cross-wires another Codex window.
     static func uniqueQuartzWindowMatch(
-        focusedBounds: CGRect,
+        focusedBounds: CGRect?,
         candidates: [CGRect],
         tolerance: CGFloat = 24
     ) -> CGRect? {
+        guard let focusedBounds else {
+            guard candidates.count == 1 else { return nil }
+            return candidates[0]
+        }
         let matches = candidates.filter { candidate in
             abs(candidate.minX - focusedBounds.minX) <= tolerance
                 && abs(candidate.minY - focusedBounds.minY) <= tolerance
                 && abs(candidate.width - focusedBounds.width) <= tolerance
                 && abs(candidate.height - focusedBounds.height) <= tolerance
         }
-        guard matches.count == 1 else { return nil }
-        return matches[0]
+        if matches.count == 1 { return matches[0] }
+        guard matches.isEmpty, candidates.count == 1,
+              let candidate = candidates.first,
+              focusedBounds.contains(candidate),
+              focusedBounds.width > candidate.width + tolerance,
+              focusedBounds.height > candidate.height + tolerance else {
+            return nil
+        }
+        return candidate
     }
 }

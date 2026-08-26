@@ -29,6 +29,7 @@ struct CodexUsageStatusTests {
             ("threshold policy boundaries", testThresholdPolicyBoundaries),
             ("HUD warning and decrease policy", testHUDWarningAndDecreasePolicy),
             ("HUD visibility policy", testHUDVisibilityPolicy),
+            ("HUD dual quota presentation policy", testHUDQuotaPresentationPolicy),
             ("HUD cross-Space unique Quartz matching", testHUDCrossSpaceUniqueQuartzMatching),
             ("HUD placement and adaptive anchors", testHUDPlacementAndAdaptiveAnchors),
             ("token activity decoding", testTokenActivityDecoding),
@@ -388,10 +389,26 @@ struct CodexUsageStatusTests {
     private static func testHUDVisibilityPolicy() throws {
         let profileA = UUID()
         let profileB = UUID()
-        let cachedA = HUDPresentationSnapshot(
-            profileID: profileA,
+        let fiveHour = HUDQuotaWindowPresentation(
+            kind: .fiveHour,
+            durationMins: 300,
+            label: "5 小時",
             remainingPercent: 12,
-            resetDescription: "4 分後重置"
+            resetsAt: 1_240,
+            resetDescription: "4小時"
+        )
+        let sevenDay = HUDQuotaWindowPresentation(
+            kind: .sevenDay,
+            durationMins: 10_080,
+            label: "7 天",
+            remainingPercent: 62,
+            resetsAt: 2_000,
+            resetDescription: "1天"
+        )
+        let cachedA = HUDDualQuotaPresentation(
+            profileID: profileA,
+            fiveHour: fiveHour,
+            sevenDay: sevenDay
         )
 
         try expect(
@@ -492,8 +509,7 @@ struct CodexUsageStatusTests {
                 currentProfileID: profileA,
                 trackedProfileID: profileA,
                 lastUpdated: timestamp,
-                remainingPercent: 12,
-                resetDescription: "4 分後重置"
+                presentation: cachedA
             ) == cachedA,
             "a valid snapshot may be cached for the tracked profile"
         )
@@ -502,8 +518,7 @@ struct CodexUsageStatusTests {
                 currentProfileID: profileB,
                 trackedProfileID: profileA,
                 lastUpdated: timestamp,
-                remainingPercent: 12,
-                resetDescription: "4 分後重置"
+                presentation: cachedA
             ) == nil,
             "a profile switch must reject a snapshot tracked for the previous profile"
         )
@@ -512,24 +527,23 @@ struct CodexUsageStatusTests {
                 currentProfileID: profileB,
                 trackedProfileID: profileB,
                 lastUpdated: nil,
-                remainingPercent: 12,
-                resetDescription: "4 分後重置"
+                presentation: cachedA
             ) == nil,
             "a new profile without its own update must remain uncached"
+        )
+        let cachedB = HUDDualQuotaPresentation(
+            profileID: profileB,
+            fiveHour: fiveHour,
+            sevenDay: sevenDay
         )
         try expect(
             HUDVisibilityPolicy.presentationSnapshot(
                 currentProfileID: profileB,
                 trackedProfileID: profileB,
                 lastUpdated: timestamp,
-                remainingPercent: 12,
-                resetDescription: "4 分後重置"
-            ) == HUDPresentationSnapshot(
-                profileID: profileB,
-                remainingPercent: 12,
-                resetDescription: "4 分後重置"
-            ),
-            "the new profile may cache its own valid snapshot even at the same percentage"
+                presentation: cachedB
+            ) == cachedB,
+            "the new profile may cache its own valid dual snapshot even at the same percentage"
         )
         try expect(
             HUDVisibilityPolicy.shouldApplyFocusLoss(scheduledGeneration: 4, currentGeneration: 4),
@@ -538,6 +552,142 @@ struct CodexUsageStatusTests {
         try expect(
             !HUDVisibilityPolicy.shouldApplyFocusLoss(scheduledGeneration: 4, currentGeneration: 5),
             "an invalidated focus-loss generation must not apply"
+        )
+    }
+
+    private static func testHUDQuotaPresentationPolicy() throws {
+        let profileID = UUID()
+        let now = Date(timeIntervalSince1970: 10_000)
+        let fiveReset = Int64(now.timeIntervalSince1970) + 4 * 3_600 + 45 * 60
+        let sevenReset = Int64(now.timeIntervalSince1970) + 2 * 86_400 + 14 * 3_600
+        let primary = RateLimitWindow(usedPercent: 4, resetsAt: fiveReset, windowDurationMins: 300)
+        let secondary = RateLimitWindow(usedPercent: 38, resetsAt: sevenReset, windowDurationMins: 10_080)
+        let snapshot = UsageSnapshot(
+            limitId: "codex",
+            limitName: "Codex",
+            planType: "pro",
+            primary: primary,
+            secondary: secondary,
+            individualLimit: nil,
+            rateLimitReachedType: nil,
+            spendControlReached: nil,
+            receivedAt: now
+        )
+
+        guard let presentation = HUDQuotaPresentationPolicy.make(snapshot: snapshot, profileID: profileID, now: now) else {
+            throw HarnessError.unwrap("dual quota presentation")
+        }
+        try expect(presentation.fiveHour?.remainingPercent == 96, "5-hour remaining percent")
+        try expect(presentation.sevenDay?.remainingPercent == 62, "7-day remaining percent")
+        try expect(presentation.fiveHour?.label == "5 小時", "5-hour label")
+        try expect(presentation.sevenDay?.label == "7 天", "7-day label")
+        try expect(presentation.fiveHour?.resetDescription == "4小時45分", "5-hour countdown")
+        try expect(presentation.sevenDay?.resetDescription == "2天14小時", "7-day countdown")
+        try expect(presentation.fiveHour?.fillFraction == 0.96, "5-hour fill fraction")
+        try expect(presentation.sevenDay?.fillFraction == 0.62, "7-day fill fraction")
+        try expect(
+            HUDQuotaWindowPresentation(
+                kind: .fiveHour,
+                durationMins: 300,
+                label: "5 小時",
+                remainingPercent: 100,
+                resetsAt: nil,
+                resetDescription: "更新中"
+            ).fillFraction == 1,
+            "full remaining quota fills the entire compact row"
+        )
+        try expect(
+            HUDQuotaWindowPresentation(
+                kind: .fiveHour,
+                durationMins: 300,
+                label: "5 小時",
+                remainingPercent: 0,
+                resetsAt: nil,
+                resetDescription: "更新中"
+            ).fillFraction == 0,
+            "depleted quota leaves no fill"
+        )
+        try expect(
+            HUDQuotaWindowPresentation(
+                kind: .fiveHour,
+                durationMins: 300,
+                label: "5 小時",
+                remainingPercent: 1,
+                resetsAt: nil,
+                resetDescription: "更新中"
+            ).fillFraction == 0.01,
+            "one-percent quota uses one-percent row fill"
+        )
+
+        let reversed = UsageSnapshot(
+            limitId: "codex",
+            limitName: nil,
+            planType: nil,
+            primary: secondary,
+            secondary: primary,
+            individualLimit: nil,
+            rateLimitReachedType: nil,
+            spendControlReached: nil,
+            receivedAt: now
+        )
+        let reversedPresentation = HUDQuotaPresentationPolicy.make(snapshot: reversed, profileID: profileID, now: now)
+        try expect(reversedPresentation?.fiveHour == presentation.fiveHour, "window order must not change 5-hour row")
+        try expect(reversedPresentation?.sevenDay == presentation.sevenDay, "window order must not change 7-day row")
+
+        let onlyFive = UsageSnapshot(
+            limitId: nil, limitName: nil, planType: nil,
+            primary: primary, secondary: nil, individualLimit: nil,
+            rateLimitReachedType: nil, spendControlReached: nil, receivedAt: now
+        )
+        let onlyFivePresentation = HUDQuotaPresentationPolicy.make(snapshot: onlyFive, profileID: profileID, now: now)
+        try expect(onlyFivePresentation?.fiveHour != nil, "available 5-hour row remains present")
+        try expect(onlyFivePresentation?.sevenDay == nil, "missing 7-day row is unavailable")
+
+        let unknown = RateLimitWindow(usedPercent: 50, resetsAt: fiveReset, windowDurationMins: 60)
+        let unknownSnapshot = UsageSnapshot(
+            limitId: nil, limitName: nil, planType: nil,
+            primary: unknown, secondary: nil, individualLimit: nil,
+            rateLimitReachedType: nil, spendControlReached: nil, receivedAt: now
+        )
+        let unknownPresentation = HUDQuotaPresentationPolicy.make(snapshot: unknownSnapshot, profileID: profileID, now: now)
+        try expect(
+            unknownPresentation == nil || unknownPresentation?.hasRecognizedWindow == false,
+            "unknown duration must not be rendered as a quota row"
+        )
+
+        let duplicate = UsageSnapshot(
+            limitId: nil, limitName: nil, planType: nil,
+            primary: primary,
+            secondary: RateLimitWindow(usedPercent: 10, resetsAt: sevenReset, windowDurationMins: 300),
+            individualLimit: nil, rateLimitReachedType: nil, spendControlReached: nil, receivedAt: now
+        )
+        try expect(
+            HUDQuotaPresentationPolicy.make(snapshot: duplicate, profileID: profileID, now: now)?.fiveHour == nil,
+            "duplicate 5-hour durations must fail closed"
+        )
+
+        let missingReset = RateLimitWindow(usedPercent: 100, resetsAt: nil, windowDurationMins: 300)
+        let missingResetSnapshot = UsageSnapshot(
+            limitId: nil, limitName: nil, planType: nil,
+            primary: missingReset, secondary: nil, individualLimit: nil,
+            rateLimitReachedType: nil, spendControlReached: nil, receivedAt: now
+        )
+        try expect(
+            HUDQuotaPresentationPolicy.make(snapshot: missingResetSnapshot, profileID: profileID, now: now)?.fiveHour?.resetDescription == "更新中",
+            "missing reset timestamp must render updating state"
+        )
+        let past = RateLimitWindow(usedPercent: 99, resetsAt: Int64(now.timeIntervalSince1970) - 1, windowDurationMins: 300)
+        try expect(
+            HUDQuotaPresentationPolicy.make(
+                snapshot: UsageSnapshot(limitId: nil, limitName: nil, planType: nil, primary: past, secondary: nil, individualLimit: nil, rateLimitReachedType: nil, spendControlReached: nil, receivedAt: now),
+                profileID: profileID,
+                now: now
+            )?.fiveHour?.resetDescription == "已重置",
+            "past reset timestamp must render reset state"
+        )
+        try expect(
+            HUDQuotaPresentationPolicy.make(snapshot: snapshot, profileID: nil, now: now) == nil,
+            "unknown profile must not produce a presentation"
         )
     }
 
@@ -585,6 +735,40 @@ struct CodexUsageStatusTests {
                 candidates: []
             ) == nil,
             "no candidate must remain unavailable for a hidden first show"
+        )
+
+        // Current Codex builds can expose a synthetic full-screen AX window
+        // while Quartz exposes the actual single content window. The PID,
+        // layer, and size filters already make this candidate unambiguous.
+        let syntheticAXFrame = CGRect(x: 0, y: 0, width: 2_048, height: 1_280)
+        let actualSingleWindow = CGRect(x: 218, y: 30, width: 1_612, height: 1_250)
+        try expect(
+            HUDVisibilityPolicy.uniqueQuartzWindowMatch(
+                focusedBounds: syntheticAXFrame,
+                candidates: [actualSingleWindow]
+            ) == actualSingleWindow,
+            "a single filtered Quartz window should bridge synthetic full-screen AX geometry"
+        )
+        try expect(
+            HUDVisibilityPolicy.uniqueQuartzWindowMatch(
+                focusedBounds: syntheticAXFrame,
+                candidates: [actualSingleWindow, CGRect(x: 500, y: 100, width: 900, height: 700)]
+            ) == nil,
+            "synthetic AX geometry must not choose among multiple Quartz windows"
+        )
+        try expect(
+            HUDVisibilityPolicy.uniqueQuartzWindowMatch(
+                focusedBounds: nil,
+                candidates: [actualSingleWindow]
+            ) == actualSingleWindow,
+            "a single filtered Quartz window should remain usable when Accessibility is unavailable"
+        )
+        try expect(
+            HUDVisibilityPolicy.uniqueQuartzWindowMatch(
+                focusedBounds: nil,
+                candidates: [actualSingleWindow, CGRect(x: 500, y: 100, width: 900, height: 700)]
+            ) == nil,
+            "Accessibility fallback must remain unavailable when multiple Quartz windows exist"
         )
     }
 
