@@ -836,6 +836,72 @@ private struct HUDQuotaRow: View {
     }
 }
 
+private struct HUDActionCard: View {
+    let title: String
+    let systemImage: String
+    let iconSize: CGFloat
+    let action: () -> Void
+    let isDisabled: Bool
+    let helpText: String
+    let accessibilityLabel: String
+    let iconColor: Color
+    @Binding var isHovered: Bool
+
+    init(
+        title: String,
+        systemImage: String,
+        iconSize: CGFloat,
+        action: @escaping () -> Void,
+        isDisabled: Bool,
+        helpText: String,
+        accessibilityLabel: String,
+        iconColor: Color = .primary,
+        isHovered: Binding<Bool>
+    ) {
+        self.title = title
+        self.systemImage = systemImage
+        self.iconSize = iconSize
+        self.action = action
+        self.isDisabled = isDisabled
+        self.helpText = helpText
+        self.accessibilityLabel = accessibilityLabel
+        self.iconColor = iconColor
+        self._isHovered = isHovered
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Image(systemName: systemImage)
+                    .font(.system(size: iconSize, weight: .semibold))
+                    .foregroundStyle(iconColor.opacity(isHovered ? 0.96 : 0.78))
+                Text(title)
+                    .font(.system(size: 8.5, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.primary.opacity(0.90))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.55)
+                    .allowsTightening(true)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .buttonStyle(.plain)
+        .frame(width: 72, height: 18)
+        .background(
+            isHovered ? Color.primary.opacity(0.10) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(Color.primary.opacity(0.22), lineWidth: 0.8)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .disabled(isDisabled)
+        .onHover { isHovered = $0 }
+        .help(helpText)
+        .accessibilityLabel(accessibilityLabel)
+    }
+}
+
 private struct CodexFloatingHUDView: View {
     private enum UpdateFeedbackKind {
         case checking
@@ -882,6 +948,7 @@ private struct CodexFloatingHUDView: View {
     @State private var isDetailsHovered = false
     @State private var isPasteHovered = false
     @State private var isPasteAndSubmitHovered = false
+    @State private var isGitHovered = false
     @State private var isCommitHovered = false
     @State private var isPushHovered = false
     @State private var isPasteAndSubmitInFlight = false
@@ -1111,6 +1178,16 @@ private struct CodexFloatingHUDView: View {
         .padding(.horizontal, 5)
         .padding(.vertical, layoutState.placement == .topRight ? 1 : 2)
         .frame(width: layoutState.size.width, height: layoutState.size.height, alignment: .leading)
+        .overlay(alignment: .leading) {
+            // The separator is a visual boundary only. It overlays the
+            // existing 5pt inset + 138pt quota allocation and never consumes
+            // width from the fixed 300pt HUD contract.
+            Rectangle()
+                .fill(Color.primary.opacity(0.18))
+                .frame(width: 1, height: 55)
+                .offset(x: 143)
+                .allowsHitTesting(false)
+        }
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous))
         .accessibilityElement(children: .combine)
@@ -1196,7 +1273,6 @@ private struct CodexFloatingHUDView: View {
                     .zIndex(1)
             }
         }
-        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var accountEmailView: some View {
@@ -1230,87 +1306,90 @@ private struct CodexFloatingHUDView: View {
     }
 
     private var detailsShortcutButton: some View {
-        Button(action: showDetails) {
-            Image(systemName: "rectangle.and.text.magnifyingglass")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.primary.opacity(isDetailsHovered ? 0.95 : 0.66))
-                .frame(width: 72, height: 18)
-                .background(
-                    isDetailsHovered ? Color.primary.opacity(0.12) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
-                )
-        }
-        .buttonStyle(.plain)
-        .onHover { isDetailsHovered = $0 }
-        .help("開啟詳細面板")
-        .accessibilityLabel("開啟詳細面板")
+        HUDActionCard(
+            title: "詳細",
+            systemImage: "rectangle.and.text.magnifyingglass",
+            iconSize: 12,
+            action: showDetails,
+            isDisabled: false,
+            helpText: "開啟詳細面板",
+            accessibilityLabel: "開啟詳細面板",
+            isHovered: $isDetailsHovered
+        )
     }
 
     private var pasteShortcutButton: some View {
-        Button(action: pasteClipboard) {
-            Image(systemName: "doc.on.clipboard")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.primary)
-                .frame(width: 72, height: 18)
-                .background(
-                    isPasteHovered ? Color.primary.opacity(0.14) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
-                )
-        }
-        .buttonStyle(.plain)
-        .disabled(!layoutState.isCodexFocused)
-        .onHover { isPasteHovered = $0 }
-        .help(layoutState.isCodexFocused ? "貼上剪貼簿內容" : "切換回 Codex 後可貼上")
-        .accessibilityLabel("貼上剪貼簿內容")
+        HUDActionCard(
+            title: "貼上",
+            systemImage: "doc.on.clipboard",
+            iconSize: 14,
+            action: pasteClipboard,
+            isDisabled: !layoutState.isCodexFocused,
+            helpText: layoutState.isCodexFocused ? "貼上剪貼簿內容" : "切換回 Codex 後可貼上",
+            accessibilityLabel: "貼上剪貼簿內容",
+            isHovered: $isPasteHovered
+        )
     }
 
     private var pasteAndSubmitShortcutButton: some View {
-        Button {
-            guard !isPasteAndSubmitInFlight else { return }
-            isPasteAndSubmitInFlight = true
-            pasteAndSubmit { _ in
-                isPasteAndSubmitInFlight = false
-            }
-        } label: {
-            Image(systemName: "paperplane.fill")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.primary)
-                .frame(width: 72, height: 18)
-                .background(
-                    isPasteAndSubmitHovered ? Color.primary.opacity(0.14) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
-                )
-                .opacity(isPasteAndSubmitInFlight ? 0.45 : 1)
-        }
-        .buttonStyle(.plain)
-        .disabled(isPasteAndSubmitInFlight || !layoutState.isCodexFocused)
-        .onHover { isPasteAndSubmitHovered = $0 }
-        .help(layoutState.isCodexFocused ? "貼上並送出" : "切換回 Codex 後可貼上並送出")
-        .accessibilityLabel("貼上並送出")
+        HUDActionCard(
+            title: "貼上並送出",
+            systemImage: "paperplane.fill",
+            iconSize: 12,
+            action: {
+                guard !isPasteAndSubmitInFlight else { return }
+                isPasteAndSubmitInFlight = true
+                pasteAndSubmit { _ in
+                    isPasteAndSubmitInFlight = false
+                }
+            },
+            isDisabled: isPasteAndSubmitInFlight || !layoutState.isCodexFocused,
+            helpText: layoutState.isCodexFocused ? "貼上並送出" : "切換回 Codex 後可貼上並送出",
+            accessibilityLabel: "貼上並送出",
+            isHovered: $isPasteAndSubmitHovered
+        )
+        .opacity(isPasteAndSubmitInFlight ? 0.45 : 1)
     }
 
     private var gitControlsRow: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 0) {
             Button(action: showGitWorkspace) {
-                Text(gitCoordinator.compactStatusLabel)
-                    .font(.system(size: 8.5, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.primary.opacity(gitCoordinator.isWorkspaceKnown ? 0.76 : 0.42))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.5)
-                    .frame(width: 96, alignment: .leading)
+                HStack(spacing: 2) {
+                    Text("<>")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    Text("Git 工作區")
+                        .font(.system(size: 8.2, weight: .semibold, design: .rounded))
+                }
+                .foregroundStyle(.primary.opacity(gitCoordinator.isWorkspaceKnown ? 0.82 : 0.46))
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+                .allowsTightening(true)
+                .frame(width: 72, height: 17)
+                .background(
+                    isGitHovered ? Color.primary.opacity(0.10) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+                )
             }
             .buttonStyle(.plain)
             .disabled(!gitCoordinator.isWorkspaceKnown)
-            .help(gitCoordinator.isWorkspaceKnown ? "開啟 Git 工作區" : "目前 Codex 工作區尚未解析")
+            .onHover { isGitHovered = $0 }
+            .help(gitCoordinator.isWorkspaceKnown ? "開啟 Git 工作區（\(gitCoordinator.compactStatusLabel)）" : "目前 Codex 工作區尚未解析")
             .accessibilityLabel("Git 工作區")
             .accessibilityValue(gitCoordinator.compactStatusLabel)
 
             Button(action: commitShortcutAction) {
-                Image(systemName: "checkmark.seal")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.primary.opacity(isCommitHovered ? 0.96 : 0.68))
-                    .frame(width: 24, height: 17)
-                    .background(isCommitHovered ? Color.primary.opacity(0.13) : .clear, in: Circle())
+                HStack(spacing: 2) {
+                    Image(systemName: "checkmark.seal")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("Commit")
+                        .font(.system(size: 8.2, weight: .semibold, design: .rounded))
+                }
+                .foregroundStyle(.primary.opacity(isCommitHovered ? 0.96 : 0.76))
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .allowsTightening(true)
+                .frame(width: 44, height: 17)
+                .background(isCommitHovered ? Color.primary.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
             }
             .buttonStyle(.plain)
             .disabled(gitCoordinator.operationState.isBusy)
@@ -1320,11 +1399,18 @@ private struct CodexFloatingHUDView: View {
             .accessibilityValue(gitCoordinator.isWorkspaceKnown ? "開啟 Git 工作區並要求確認" : "工作區尚未解析")
 
             Button(action: pushShortcutAction) {
-                Image(systemName: "arrow.up.circle")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.primary.opacity(isPushHovered ? 0.96 : 0.68))
-                    .frame(width: 24, height: 17)
-                    .background(isPushHovered ? Color.primary.opacity(0.13) : .clear, in: Circle())
+                HStack(spacing: 2) {
+                    Image(systemName: "arrow.up.circle")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("Push")
+                        .font(.system(size: 8.2, weight: .semibold, design: .rounded))
+                }
+                .foregroundStyle(.primary.opacity(isPushHovered ? 0.96 : 0.76))
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .allowsTightening(true)
+                .frame(width: 36, height: 17)
+                .background(isPushHovered ? Color.primary.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
             }
             .buttonStyle(.plain)
             .disabled(gitCoordinator.operationState.isBusy)
@@ -1334,6 +1420,22 @@ private struct CodexFloatingHUDView: View {
             .accessibilityValue(gitCoordinator.isWorkspaceKnown ? "開啟 Git 工作區並要求確認" : "工作區尚未解析")
         }
         .frame(width: 152, height: 17, alignment: .trailing)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(Color.primary.opacity(0.22), lineWidth: 0.8)
+        }
+        .overlay {
+            HStack(spacing: 0) {
+                Color.clear.frame(width: 72, height: 17)
+                Rectangle().fill(Color.primary.opacity(0.18)).frame(width: 1, height: 11)
+                Color.clear.frame(width: 43, height: 17)
+                Rectangle().fill(Color.primary.opacity(0.18)).frame(width: 1, height: 11)
+                Color.clear.frame(width: 35, height: 17)
+            }
+            .allowsHitTesting(false)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 
     @ViewBuilder
@@ -1412,30 +1514,18 @@ private struct CodexFloatingHUDView: View {
     }
 
     private var updateShortcutButton: some View {
-        Button(action: updateShortcutAction) {
-            // Keep the update affordance static as well. Availability is
-            // already conveyed by the orange bell and menu feedback; an
-            // animated icon made the whole HUD appear to flicker.
-            updateShortcutIconView(pulse: 0)
-            .frame(width: 72, height: 18)
-            .background(
-                isUpdateHovered ? Color.primary.opacity(0.12) : Color.clear,
-                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
-            )
-        }
-        .buttonStyle(.plain)
-        .onHover { isUpdateHovered = $0 }
-        .help(hasAvailableUpdate ? "有更新可用，開啟更新面板" : "檢查更新")
-        .accessibilityLabel(hasAvailableUpdate ? "有更新可用" : "檢查更新")
+        HUDActionCard(
+            title: "更新",
+            systemImage: updateShortcutIcon,
+            iconSize: 13,
+            action: updateShortcutAction,
+            isDisabled: false,
+            helpText: hasAvailableUpdate ? "有更新可用，開啟更新面板" : "檢查更新",
+            accessibilityLabel: hasAvailableUpdate ? "有更新可用" : "檢查更新",
+            iconColor: hasAvailableUpdate ? .orange : .primary,
+            isHovered: $isUpdateHovered
+        )
         .accessibilityValue(hasAvailableUpdate ? "開啟更新面板" : "檢查目前版本")
-    }
-
-    private func updateShortcutIconView(pulse: Double) -> some View {
-        Image(systemName: updateShortcutIcon)
-            .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(hasAvailableUpdate ? Color.orange : .primary.opacity(isUpdateHovered ? 0.95 : 0.66))
-            .scaleEffect(1 + (hasAvailableUpdate ? 0.10 * pulse : 0))
-            .rotationEffect(.degrees(hasAvailableUpdate ? (pulse - 0.5) * 8 : 0))
     }
 
     private func commitShortcutAction() {
