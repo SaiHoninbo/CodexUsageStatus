@@ -1244,6 +1244,10 @@ struct CodexUsageStatusTests {
             appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua,
             "popover opens with the stable dark appearance"
         )
+        try expect(
+            PopoverPresentationPolicy.reappliesAfterPopoverDidShow,
+            "popover reapplies appearance after its window is created"
+        )
     }
 
     private static func testHUDScaleLevels() throws {

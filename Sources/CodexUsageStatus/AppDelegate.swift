@@ -198,6 +198,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 extension AppDelegate: NSPopoverDelegate {
+    func popoverDidShow(_ notification: Notification) {
+        guard PopoverPresentationPolicy.reappliesAfterPopoverDidShow,
+              let popoverView = popover.contentViewController?.view else { return }
+        // NSPopover creates its backing window during show(). Reapply after
+        // the delegate callback so the real window, rather than a pre-show
+        // view with no window, receives the stable appearance on first open.
+        PopoverPresentationPolicy.apply(to: popoverView)
+    }
+
     func popoverDidClose(_ notification: Notification) {
         removeOutsideClickMonitor()
         removeLocalClickMonitor()

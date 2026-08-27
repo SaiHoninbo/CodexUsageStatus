@@ -6,6 +6,7 @@ import AppKit
 /// inactive surface and change to the dark surface only after a second click.
 enum PopoverPresentationPolicy {
     static let preferredAppearanceName: NSAppearance.Name = .darkAqua
+    static let reappliesAfterPopoverDidShow = true
 
     static func makeAppearance() -> NSAppearance {
         // .darkAqua is provided by every supported macOS release.
