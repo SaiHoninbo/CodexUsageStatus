@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import AppKit
 
 enum HarnessError: Error, CustomStringConvertible {
     case assertion(String)
@@ -48,6 +49,7 @@ struct CodexUsageStatusTests {
             ("managed profile imports auth atomically", testManagedProfileImportsAuth),
             ("update version comparison", testUpdateVersionComparison),
             ("HUD context menu policy", testHUDContextMenuPolicy),
+            ("popover presentation appearance policy", testPopoverPresentationAppearancePolicy),
             ("HUD scale levels", testHUDScaleLevels),
             ("HUD C metrics", testHUDMetrics),
             ("Codex prompt shortcuts", testCodexPromptShortcuts),
@@ -1234,6 +1236,14 @@ struct CodexUsageStatusTests {
         try expect(HUDContextMenuPolicy.pasteActionsEnabled(isCodexFocused: true), "focused paste is enabled")
         try expect(!HUDContextMenuPolicy.pasteActionsEnabled(isCodexFocused: false), "unfocused paste is disabled")
         try expect(HUDContextMenuPolicy.sections.last == [.quit], "quit is isolated at the bottom")
+    }
+
+    private static func testPopoverPresentationAppearancePolicy() throws {
+        let appearance = PopoverPresentationPolicy.makeAppearance()
+        try expect(
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua,
+            "popover opens with the stable dark appearance"
+        )
     }
 
     private static func testHUDScaleLevels() throws {

@@ -98,7 +98,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.performClose(sender)
         } else {
             if popover.isShown { popover.performClose(sender) }
+            // Accessory apps can present an inactive NSPopover on its first
+            // click. Pin the content and popover window to the same dark
+            // appearance before showing it so the surface does not change
+            // after a second click inside the panel.
+            if let popoverView = popover.contentViewController?.view {
+                PopoverPresentationPolicy.apply(to: popoverView)
+            }
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            if let popoverView = popover.contentViewController?.view {
+                PopoverPresentationPolicy.apply(to: popoverView)
+            }
             installOutsideClickMonitor()
             model.refresh()
         }

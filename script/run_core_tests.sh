@@ -23,6 +23,7 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDVisibilityPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDPlacementPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDContextMenuPolicy.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/PopoverPresentationPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/GitWorkspaceModels.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/AppUpdateService.swift" \
   "$ROOT_DIR/Tests/CodexUsageStatusTests/TestRunner.swift" \
