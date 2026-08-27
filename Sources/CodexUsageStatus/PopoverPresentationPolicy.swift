@@ -7,6 +7,36 @@ import AppKit
 enum PopoverPresentationPolicy {
     static let preferredAppearanceName: NSAppearance.Name = .darkAqua
     static let reappliesAfterPopoverDidShow = true
+    /// Status-item apps are normally inactive when their menu extra is clicked.
+    /// Activating only for a user-requested popover presentation makes AppKit
+    /// resolve the popover's active material on the first click.
+    static let activatesApplicationBeforePresentation = true
+
+    static func shouldActivateApplication(isActive: Bool) -> Bool {
+        activatesApplicationBeforePresentation && !isActive
+    }
+
+    static func prepareForPresentation(application: NSApplication, popover: NSPopover) {
+        if shouldActivateApplication(isActive: application.isActive) {
+            application.activate(ignoringOtherApps: true)
+        }
+        apply(to: popover)
+    }
+
+    /// NSPopover's backing window contains an NSVisualEffectView whose default
+    /// state follows window activity.  A menu-extra app can briefly remain
+    /// inactive while the popover is being created, so pin the semantic
+    /// popover material to its active appearance instead of waiting for a
+    /// second click to make it look selected.
+    static func applyActiveMaterial(to view: NSView) {
+        if let effectView = view as? NSVisualEffectView {
+            effectView.material = .popover
+            effectView.state = .active
+        }
+        for subview in view.subviews {
+            applyActiveMaterial(to: subview)
+        }
+    }
 
     static func makeAppearance() -> NSAppearance {
         // .darkAqua is provided by every supported macOS release.
@@ -27,7 +57,12 @@ enum PopoverPresentationPolicy {
         popover.appearance = appearance
         if let popoverView = popover.contentViewController?.view {
             popoverView.appearance = appearance
-            popoverView.window?.appearance = appearance
+            if let window = popoverView.window {
+                window.appearance = appearance
+                if let contentView = window.contentView {
+                    applyActiveMaterial(to: contentView)
+                }
+            }
         }
     }
 }

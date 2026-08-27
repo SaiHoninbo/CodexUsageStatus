@@ -99,10 +99,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             if popover.isShown { popover.performClose(sender) }
             // Accessory apps can present an inactive NSPopover on its first
-            // click. Pin the content and popover window to the same dark
-            // appearance before showing it so the surface does not change
-            // after a second click inside the panel.
-            PopoverPresentationPolicy.apply(to: popover)
+            // click from either the status item or the HUD Details/Git action.
+            // Activate the app first so AppKit resolves the popover's active
+            // material immediately, then pin the appearance before the
+            // backing window is created.
+            PopoverPresentationPolicy.prepareForPresentation(application: NSApp, popover: popover)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             PopoverPresentationPolicy.apply(to: popover)
             installOutsideClickMonitor()

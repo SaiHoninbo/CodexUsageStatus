@@ -1265,6 +1265,24 @@ struct CodexUsageStatusTests {
             popover.appearance?.name == .darkAqua,
             "popover appearance is pinned directly on the popover"
         )
+        try expect(
+            PopoverPresentationPolicy.shouldActivateApplication(isActive: false),
+            "an inactive accessory app is activated before the first popover presentation"
+        )
+        try expect(
+            !PopoverPresentationPolicy.shouldActivateApplication(isActive: true),
+            "an already-active app is not redundantly activated"
+        )
+        let effectView = NSVisualEffectView()
+        PopoverPresentationPolicy.applyActiveMaterial(to: effectView)
+        try expect(
+            effectView.state == .active,
+            "popover material is active on the first presentation"
+        )
+        try expect(
+            effectView.material == .popover,
+            "popover uses the semantic popover material"
+        )
     }
 
     private static func testHUDScaleLevels() throws {
