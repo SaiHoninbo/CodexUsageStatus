@@ -7,19 +7,24 @@ import Foundation
 struct HUDMetrics: Equatable {
     let scaleLevel: HUDScaleLevel
 
-    static let canonicalPanelSize = CGSize(width: 520, height: 260)
-    static let canonicalOuterPadding: CGFloat = 18
-    static let canonicalQuotaRowHeight: CGFloat = 50
-    static let canonicalQuotaGap: CGFloat = 8
-    static let canonicalSectionGap: CGFloat = 14
-    static let canonicalActionHeight: CGFloat = 48
-    static let canonicalFooterHeight: CGFloat = 40
-    static let canonicalActionSpacing: CGFloat = 10
-    static let canonicalFooterSpacing: CGFloat = 12
-    static let canonicalFooterCommitWidth: CGFloat = 80
-    static let canonicalFooterPushWidth: CGFloat = 68
-    static let canonicalFooterCommitPushWidth: CGFloat = 116
-    static let canonicalCornerRadius: CGFloat = 24
+    // The current smallest C-layout HUD is the user's 100% reference.
+    // Larger/smaller levels are derived from this 416x208 base as a single
+    // proportional layout, rather than treating the old 520x260 draft as
+    // the standard.
+    static let canonicalPanelSize = CGSize(width: 416, height: 208)
+    static let canonicalOuterPadding: CGFloat = 14.4
+    static let canonicalQuotaRowHeight: CGFloat = 40
+    static let canonicalQuotaGap: CGFloat = 6.4
+    static let canonicalSectionGap: CGFloat = 11.2
+    static let canonicalActionHeight: CGFloat = 38.4
+    static let canonicalFooterHeight: CGFloat = 32
+    static let canonicalActionSpacing: CGFloat = 8
+    static let canonicalFooterSpacing: CGFloat = 9.6
+    static let canonicalFooterCommitWidth: CGFloat = 64
+    static let canonicalFooterPushWidth: CGFloat = 54.4
+    static let canonicalFooterCommitPushWidth: CGFloat = 92.8
+    static let canonicalFooterDividerGap: CGFloat = 3.2
+    static let canonicalCornerRadius: CGFloat = 19.2
 
     init(scaleLevel: HUDScaleLevel = .standard) {
         self.scaleLevel = scaleLevel
@@ -27,6 +32,9 @@ struct HUDMetrics: Equatable {
 
     var factor: CGFloat { scaleLevel.scaleFactor }
     var panelSize: CGSize {
+        // Keep the AppKit frame and all internal tokens on the same exact
+        // proportion. AppKit handles device-pixel alignment; rounding only
+        // the outer frame would make fractional levels clip at the bottom.
         CGSize(width: Self.canonicalPanelSize.width * factor,
                height: Self.canonicalPanelSize.height * factor)
     }
@@ -42,7 +50,7 @@ struct HUDMetrics: Equatable {
     var footerCommitWidth: CGFloat { Self.canonicalFooterCommitWidth * factor }
     var footerPushWidth: CGFloat { Self.canonicalFooterPushWidth * factor }
     var footerCommitPushWidth: CGFloat { Self.canonicalFooterCommitPushWidth * factor }
-    var footerDividerGap: CGFloat { 4 * factor }
+    var footerDividerGap: CGFloat { Self.canonicalFooterDividerGap * factor }
     var footerControlsWidth: CGFloat {
         footerCommitWidth + footerPushWidth + footerCommitPushWidth
             + (3 * 1) + (6 * footerDividerGap)

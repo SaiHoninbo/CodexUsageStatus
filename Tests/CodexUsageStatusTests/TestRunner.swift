@@ -1265,18 +1265,36 @@ struct CodexUsageStatusTests {
         defaults.set(5, forKey: HUDScaleLevel.userDefaultsKey)
         defaults.set(2, forKey: HUDScaleLevel.schemaVersionKey)
         try expect(HUDScaleLevel.load(from: defaults) == .standard, "unknown interim level falls back")
+
+        defaults.set(1, forKey: HUDScaleLevel.userDefaultsKey)
+        defaults.set(3, forKey: HUDScaleLevel.schemaVersionKey)
+        try expect(HUDScaleLevel.load(from: defaults) == .standard, "old smallest becomes new standard")
+        defaults.set(2, forKey: HUDScaleLevel.userDefaultsKey)
+        defaults.set(3, forKey: HUDScaleLevel.schemaVersionKey)
+        try expect(HUDScaleLevel.load(from: defaults) == .larger1, "old level 2 maps to nearest larger level")
+        defaults.set(3, forKey: HUDScaleLevel.userDefaultsKey)
+        defaults.set(3, forKey: HUDScaleLevel.schemaVersionKey)
+        try expect(HUDScaleLevel.load(from: defaults) == .larger2, "old standard maps to nearest larger level")
+        defaults.set(1, forKey: HUDScaleLevel.userDefaultsKey)
+        defaults.set(4, forKey: HUDScaleLevel.schemaVersionKey)
+        try expect(HUDScaleLevel.load(from: defaults) == .standard, "schema 4 smallest becomes new standard")
+        defaults.set(3, forKey: HUDScaleLevel.userDefaultsKey)
+        defaults.set(4, forKey: HUDScaleLevel.schemaVersionKey)
+        try expect(HUDScaleLevel.load(from: defaults) == .larger2, "schema 4 old standard maps upward")
     }
 
     private static func testHUDMetrics() throws {
         let standard = HUDMetrics(scaleLevel: .standard)
-        try expect(standard.panelSize == CGSize(width: 520, height: 260), "level 3 panel size")
-        try expect(standard.contentWidth == 484, "content width follows outer padding")
-        try expect(standard.quotaColumnHeight == 108, "quota rows close to 108pt")
-        try expect(standard.verticalContentHeight == 224, "vertical content closes without hidden spacer")
-        try expect(standard.verticalContentHeight + standard.outerPadding * 2 == 260, "canonical height closes")
-        try expect(HUDMetrics(scaleLevel: .smaller2).panelSize == CGSize(width: 416, height: 208), "level 1 scales one layout")
-        try expect(HUDMetrics(scaleLevel: .larger2).panelSize == CGSize(width: 676, height: 338), "level 5 scales one layout")
-        try expect(standard.footerEmailWidth > 150, "footer leaves readable email width")
+        try expect(standard.panelSize == CGSize(width: 416, height: 208), "level 3 panel size")
+        try expectApproximately(standard.contentWidth, 387.2, "content width follows outer padding")
+        try expectApproximately(standard.quotaColumnHeight, 86.4, "quota rows close to 86.4pt")
+        try expectApproximately(standard.verticalContentHeight, 179.2, "vertical content closes without hidden spacer")
+        try expectApproximately(standard.verticalContentHeight + standard.outerPadding * 2, 208, "canonical height closes")
+        try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller2).panelSize, CGSize(width: 332.8, height: 166.4), "level 1 scales one layout")
+        try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller1).panelSize, CGSize(width: 374.4, height: 187.2), "level 2 scales one layout")
+        try expectSizeApproximately(HUDMetrics(scaleLevel: .larger1).panelSize, CGSize(width: 478.4, height: 239.2), "level 4 scales one layout")
+        try expectSizeApproximately(HUDMetrics(scaleLevel: .larger2).panelSize, CGSize(width: 540.8, height: 270.4), "level 5 scales one layout")
+        try expect(standard.footerEmailWidth > 120, "footer leaves readable email width")
     }
 
     private static func testCodexPromptShortcuts() throws {
@@ -1310,5 +1328,27 @@ struct CodexUsageStatusTests {
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         guard condition() else { throw HarnessError.assertion(message) }
+    }
+
+    private static func expectApproximately(
+        _ actual: CGFloat,
+        _ expected: CGFloat,
+        _ message: String,
+        tolerance: CGFloat = 0.001
+    ) throws {
+        try expect(abs(actual - expected) <= tolerance, message)
+    }
+
+    private static func expectSizeApproximately(
+        _ actual: CGSize,
+        _ expected: CGSize,
+        _ message: String,
+        tolerance: CGFloat = 0.001
+    ) throws {
+        try expect(
+            abs(actual.width - expected.width) <= tolerance
+                && abs(actual.height - expected.height) <= tolerance,
+            message
+        )
     }
 }

@@ -6,8 +6,8 @@ import SwiftUI
 private enum FloatingHUDLayout {
     // C layout: both placements use one scalable panel geometry. Placement
     // changes the anchor only; it never creates a second size contract.
-    static let bottomRightSize = NSSize(width: 520, height: 260)
-    static let topRightSize = NSSize(width: 520, height: 260)
+    static let bottomRightSize = NSSize(width: 416, height: 208)
+    static let topRightSize = NSSize(width: 416, height: 208)
     // Sizes used by the previous shipped HUD builds. These are only used
     // while migrating persisted screen anchors; new anchors are size-agnostic.
     static let previousWideSize = NSSize(width: 360, height: 60)
@@ -863,6 +863,10 @@ private struct HUDQuotaRow: View {
         max(4, height * 0.12)
     }
 
+    private var scaleFactor: CGFloat {
+        height / HUDMetrics.canonicalQuotaRowHeight
+    }
+
     var body: some View {
         ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -900,7 +904,7 @@ private struct HUDQuotaRow: View {
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .stroke(
                     accent.opacity(isUpdating ? 0.24 : 0.32),
-                    lineWidth: 0.6
+                    lineWidth: 0.6 * scaleFactor
                 )
         }
         .animation(
@@ -950,8 +954,8 @@ private struct HUDActionCard: View {
         helpText: String,
         accessibilityLabel: String,
         iconColor: Color = .primary,
-        width: CGFloat = 72,
-        height: CGFloat = 18,
+        width: CGFloat,
+        height: CGFloat,
         isHovered: Binding<Bool>
     ) {
         self.title = title
@@ -969,7 +973,7 @@ private struct HUDActionCard: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 3) {
+            HStack(spacing: 3 * scaleFactor) {
                 Image(systemName: systemImage)
                     .font(.system(size: iconSize * scaleFactor, weight: .semibold))
                     .foregroundStyle(iconColor.opacity(isHovered ? 0.96 : 0.78))
@@ -992,7 +996,7 @@ private struct HUDActionCard: View {
         )
         .overlay {
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .stroke(Color.primary.opacity(0.22), lineWidth: 0.8)
+                .stroke(Color.primary.opacity(0.22), lineWidth: 0.8 * scaleFactor)
         }
         .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .disabled(isDisabled)

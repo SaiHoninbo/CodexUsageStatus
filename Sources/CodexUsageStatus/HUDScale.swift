@@ -1,7 +1,8 @@
 import Foundation
 
-/// Five proportional HUD sizes centered on the standard C layout: two below,
-/// standard, and two above. The standard level remains the 520x260 reference.
+/// Five proportional HUD sizes centered on the current smallest C layout:
+/// two below, standard, and two above. The standard level is the 416x208
+/// reference shown by the current smallest UI.
 enum HUDScaleLevel: Int, CaseIterable, Codable, Equatable {
     case smaller2 = 1
     case smaller1 = 2
@@ -11,7 +12,7 @@ enum HUDScaleLevel: Int, CaseIterable, Codable, Equatable {
 
     static let userDefaultsKey = "ui.floatingHUD.scaleLevel"
     static let schemaVersionKey = "ui.floatingHUD.scaleLevel.schemaVersion"
-    static let currentSchemaVersion = 3
+    static let currentSchemaVersion = 5
 
     var scaleFactor: CGFloat {
         switch self {
@@ -44,6 +45,37 @@ enum HUDScaleLevel: Int, CaseIterable, Codable, Equatable {
             return storedLevel
         }
 
+        if schemaVersion == 4 {
+            // Schema 4 briefly treated the former 520x260 draft as the
+            // canonical 100% size. Its level 1 was the 416x208 UI now used
+            // as the standard reference, so preserve that visible size.
+            let migrated: HUDScaleLevel
+            switch rawValue {
+            case 1: migrated = .standard
+            case 2: migrated = .larger1
+            case 3, 4, 5: migrated = .larger2
+            default: migrated = .standard
+            }
+            migrated.persist(to: defaults)
+            return migrated
+        }
+
+        if schemaVersion == 3 {
+            // Schema 3 used 520x260 as 100%. The user's currently visible
+            // smallest HUD was schema-3 level 1 (416x208), so preserve that
+            // physical size as the new standard and map larger legacy levels
+            // to the nearest available level in the new 416x208 scale space.
+            let migrated: HUDScaleLevel
+            switch rawValue {
+            case 1: migrated = .standard
+            case 2: migrated = .larger1
+            case 3, 4, 5: migrated = .larger2
+            default: migrated = .standard
+            }
+            migrated.persist(to: defaults)
+            return migrated
+        }
+
         if schemaVersion == 2 {
             // A short-lived build temporarily used level 1 as standard and
             // shifted every larger level upward. Map that representation to
@@ -59,8 +91,8 @@ enum HUDScaleLevel: Int, CaseIterable, Codable, Equatable {
             return migrated
         }
 
-        // v1 already used the desired raw ordering (0.80/0.90/1.00/1.15/1.30).
-        // Mark it as migrated without changing the user's selected level.
+        // v1 already used the desired raw ordering. With no schema marker,
+        // preserve the stored logical level and mark it as migrated.
         defaults.set(currentSchemaVersion, forKey: schemaVersionKey)
         return storedLevel
     }
