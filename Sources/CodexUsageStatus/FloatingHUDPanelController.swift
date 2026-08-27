@@ -750,6 +750,9 @@ final class FloatingHUDPanelController: NSObject {
 }
 
 private struct HUDQuotaRow: View {
+    private static let shellWidth: CGFloat = 138
+    private static let shellHeight: CGFloat = 17
+
     let kind: HUDQuotaWindowKind
     let presentation: HUDQuotaWindowPresentation?
     let isUpdating: Bool
@@ -775,43 +778,39 @@ private struct HUDQuotaRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 3) {
-            Image(systemName: "clock")
-                .font(.system(size: 9, weight: .semibold))
-                .frame(width: 11)
-            Text(kind.label)
-                .font(.system(size: 10, weight: .semibold, design: .rounded))
-            Text(percentText)
-                .font(.system(size: 10, weight: .bold, design: .rounded))
-            Text(resetText)
-                .font(.system(size: 9, weight: .medium, design: .rounded))
-                .foregroundStyle(.primary.opacity(0.86))
-        }
-        // Keep labels readable independently of the fill strength. Updating
-        // state changes the shell/fill only; it must not wash out the text.
-        .foregroundStyle(.primary.opacity(0.96))
-        .lineLimit(1)
-        .minimumScaleFactor(0.58)
-        .allowsTightening(true)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 1)
-        .fixedSize(horizontal: true, vertical: false)
-        .background {
-            // This reader measures the already content-sized row. It never
-            // participates in the parent's 138pt allocation, so the fill
-            // cannot create a trailing empty track or stretch the shell.
-            GeometryReader { proxy in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        // Use a neutral dark track so the unfilled portion stays
-                        // visible over both light and dark HUD materials.
-                        .fill(Color.black.opacity(isUpdating ? 0.18 : 0.24))
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(accent.opacity(isUpdating ? 0.32 : 0.58))
-                        .frame(width: proxy.size.width * fillFraction)
-                }
+        ZStack(alignment: .leading) {
+            // Both quota rows intentionally share one fixed shell width. The
+            // fill is embedded in this shell, so changing one window never
+            // changes the geometry of the other row or the left allocation.
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.black.opacity(isUpdating ? 0.18 : 0.24))
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(accent.opacity(isUpdating ? 0.32 : 0.58))
+                .frame(width: Self.shellWidth * fillFraction)
+
+            HStack(spacing: 3) {
+                Image(systemName: "clock")
+                    .font(.system(size: 9, weight: .semibold))
+                    .frame(width: 11)
+                Text(kind.label)
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                Text(percentText)
+                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                Text(resetText)
+                    .font(.system(size: 9, weight: .medium, design: .rounded))
+                    .foregroundStyle(.primary.opacity(0.86))
             }
+            // Keep labels readable independently of fill strength. The fixed
+            // shell receives the proposal, allowing text to tighten without
+            // reintroducing content-hug geometry or a trailing track.
+            .foregroundStyle(.primary.opacity(0.96))
+            .lineLimit(1)
+            .minimumScaleFactor(0.58)
+            .allowsTightening(true)
+            .padding(.horizontal, 6)
+            .frame(width: Self.shellWidth, height: Self.shellHeight, alignment: .leading)
         }
+        .frame(width: Self.shellWidth, height: Self.shellHeight, alignment: .leading)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -1106,10 +1105,7 @@ private struct CodexFloatingHUDView: View {
             }
             .frame(width: 138, alignment: .leading)
 
-            VStack(alignment: .trailing, spacing: 0) {
-                topControlsRow
-                gitControlsRow
-            }
+            controlsColumn
             .frame(width: 152, alignment: .trailing)
         }
         .padding(.horizontal, 5)
@@ -1214,19 +1210,23 @@ private struct CodexFloatingHUDView: View {
             .help(model.currentAccountEmail ?? "目前帳號尚未提供 Email")
     }
 
-    private var topControlsRow: some View {
-        HStack(spacing: 10) {
-            HStack(spacing: 4) {
+    private var controlsColumn: some View {
+        VStack(alignment: .trailing, spacing: 1) {
+            HStack(spacing: 8) {
                 pasteShortcutButton
                 pasteAndSubmitShortcutButton
             }
+            .frame(width: 152, height: 18, alignment: .trailing)
 
-            HStack(spacing: 4) {
+            HStack(spacing: 8) {
                 detailsShortcutButton
                 updateShortcutButton
             }
+            .frame(width: 152, height: 18, alignment: .trailing)
+
+            gitControlsRow
         }
-        .frame(width: 152, height: 26, alignment: .trailing)
+        .frame(width: 152, height: 55, alignment: .topTrailing)
     }
 
     private var detailsShortcutButton: some View {
@@ -1234,10 +1234,10 @@ private struct CodexFloatingHUDView: View {
             Image(systemName: "rectangle.and.text.magnifyingglass")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.primary.opacity(isDetailsHovered ? 0.95 : 0.66))
-                .frame(width: 30, height: 26)
+                .frame(width: 72, height: 18)
                 .background(
                     isDetailsHovered ? Color.primary.opacity(0.12) : Color.clear,
-                    in: Circle()
+                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
                 )
         }
         .buttonStyle(.plain)
@@ -1251,10 +1251,10 @@ private struct CodexFloatingHUDView: View {
             Image(systemName: "doc.on.clipboard")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(.primary)
-                .frame(width: 30, height: 26)
+                .frame(width: 72, height: 18)
                 .background(
                     isPasteHovered ? Color.primary.opacity(0.14) : Color.clear,
-                    in: Circle()
+                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
                 )
         }
         .buttonStyle(.plain)
@@ -1275,10 +1275,10 @@ private struct CodexFloatingHUDView: View {
             Image(systemName: "paperplane.fill")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.primary)
-                .frame(width: 30, height: 26)
+                .frame(width: 72, height: 18)
                 .background(
                     isPasteAndSubmitHovered ? Color.primary.opacity(0.14) : Color.clear,
-                    in: Circle()
+                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
                 )
                 .opacity(isPasteAndSubmitInFlight ? 0.45 : 1)
         }
@@ -1290,14 +1290,14 @@ private struct CodexFloatingHUDView: View {
     }
 
     private var gitControlsRow: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 4) {
             Button(action: showGitWorkspace) {
                 Text(gitCoordinator.compactStatusLabel)
                     .font(.system(size: 8.5, weight: .semibold, design: .rounded))
                     .foregroundStyle(.primary.opacity(gitCoordinator.isWorkspaceKnown ? 0.76 : 0.42))
                     .lineLimit(1)
                     .minimumScaleFactor(0.5)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(width: 96, alignment: .leading)
             }
             .buttonStyle(.plain)
             .disabled(!gitCoordinator.isWorkspaceKnown)
@@ -1309,7 +1309,7 @@ private struct CodexFloatingHUDView: View {
                 Image(systemName: "checkmark.seal")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.primary.opacity(isCommitHovered ? 0.96 : 0.68))
-                    .frame(width: 20, height: 22)
+                    .frame(width: 24, height: 17)
                     .background(isCommitHovered ? Color.primary.opacity(0.13) : .clear, in: Circle())
             }
             .buttonStyle(.plain)
@@ -1323,7 +1323,7 @@ private struct CodexFloatingHUDView: View {
                 Image(systemName: "arrow.up.circle")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.primary.opacity(isPushHovered ? 0.96 : 0.68))
-                    .frame(width: 20, height: 22)
+                    .frame(width: 24, height: 17)
                     .background(isPushHovered ? Color.primary.opacity(0.13) : .clear, in: Circle())
             }
             .buttonStyle(.plain)
@@ -1333,7 +1333,7 @@ private struct CodexFloatingHUDView: View {
             .accessibilityLabel("Push")
             .accessibilityValue(gitCoordinator.isWorkspaceKnown ? "開啟 Git 工作區並要求確認" : "工作區尚未解析")
         }
-        .frame(width: 152, height: 22, alignment: .trailing)
+        .frame(width: 152, height: 17, alignment: .trailing)
     }
 
     @ViewBuilder
@@ -1417,8 +1417,11 @@ private struct CodexFloatingHUDView: View {
             // already conveyed by the orange bell and menu feedback; an
             // animated icon made the whole HUD appear to flicker.
             updateShortcutIconView(pulse: 0)
-            .frame(maxWidth: .infinity, minHeight: 26)
-            .background(isUpdateHovered ? Color.primary.opacity(0.12) : Color.clear, in: Circle())
+            .frame(width: 72, height: 18)
+            .background(
+                isUpdateHovered ? Color.primary.opacity(0.12) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+            )
         }
         .buttonStyle(.plain)
         .onHover { isUpdateHovered = $0 }
