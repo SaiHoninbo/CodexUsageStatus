@@ -20,10 +20,14 @@ struct HUDMetrics: Equatable {
     static let canonicalFooterHeight: CGFloat = 32
     static let canonicalActionSpacing: CGFloat = 8
     static let canonicalFooterSpacing: CGFloat = 9.6
+    static let canonicalFooterHorizontalPaddingMultiplier: CGFloat = 0.65
+    // Keep the three prompt shortcuts at their established readable widths;
+    // recover email space by tightening only the decorative divider insets.
     static let canonicalFooterCommitWidth: CGFloat = 64
     static let canonicalFooterPushWidth: CGFloat = 54.4
     static let canonicalFooterCommitPushWidth: CGFloat = 92.8
-    static let canonicalFooterDividerGap: CGFloat = 3.2
+    static let canonicalFooterDividerGap: CGFloat = 1.5
+    static let canonicalFooterEmailMinimumWidth: CGFloat = 150
     static let canonicalCornerRadius: CGFloat = 19.2
 
     init(scaleLevel: HUDScaleLevel = .standard) {
@@ -46,6 +50,9 @@ struct HUDMetrics: Equatable {
     var footerHeight: CGFloat { Self.canonicalFooterHeight * factor }
     var actionSpacing: CGFloat { Self.canonicalActionSpacing * factor }
     var footerSpacing: CGFloat { Self.canonicalFooterSpacing * factor }
+    var footerHorizontalPadding: CGFloat {
+        footerSpacing * Self.canonicalFooterHorizontalPaddingMultiplier
+    }
     var cornerRadius: CGFloat { Self.canonicalCornerRadius * factor }
     var footerCommitWidth: CGFloat { Self.canonicalFooterCommitWidth * factor }
     var footerPushWidth: CGFloat { Self.canonicalFooterPushWidth * factor }
@@ -56,7 +63,8 @@ struct HUDMetrics: Equatable {
             + (3 * 1) + (6 * footerDividerGap)
     }
     var footerEmailWidth: CGFloat {
-        max(72 * factor, contentWidth - footerControlsWidth - (footerSpacing * 1.4))
+        max(Self.canonicalFooterEmailMinimumWidth * factor,
+            contentWidth - footerControlsWidth - (footerHorizontalPadding * 2))
     }
 
     var contentWidth: CGFloat {

@@ -1349,13 +1349,15 @@ private struct CodexFloatingHUDView: View {
         }
     }
 
-    private var accountEmailView: some View {
+    private func accountEmailView(metrics: HUDMetrics) -> some View {
         Text(verbatim: model.currentAccountEmail ?? "未提供 Email")
-            .font(.system(size: 10.5, weight: .medium, design: .rounded))
-            .foregroundStyle(.primary.opacity(model.currentAccountEmail == nil ? 0.48 : 0.82))
+            .font(.system(size: 12.5 * metrics.factor, weight: .medium, design: .rounded))
+            .foregroundStyle(.primary.opacity(model.currentAccountEmail == nil ? 0.52 : 0.9))
             .lineLimit(1)
-            .minimumScaleFactor(0.34)
+            .minimumScaleFactor(0.62)
             .allowsTightening(true)
+            .truncationMode(.middle)
+            .layoutPriority(1)
             .frame(maxWidth: .infinity, alignment: .leading)
             .help(model.currentAccountEmail ?? "目前帳號尚未提供 Email")
     }
@@ -1376,7 +1378,7 @@ private struct CodexFloatingHUDView: View {
                 Image(systemName: "envelope")
                     .font(.system(size: 16 * metrics.factor, weight: .medium))
                     .foregroundStyle(.primary.opacity(0.72))
-                accountEmailView
+                accountEmailView(metrics: metrics)
             }
             .frame(width: metrics.footerEmailWidth, alignment: .leading)
 
@@ -1390,7 +1392,7 @@ private struct CodexFloatingHUDView: View {
                 .padding(.horizontal, metrics.footerDividerGap)
             promptShortcutButton(.commitPush, metrics: metrics, width: metrics.footerCommitPushWidth, hovered: $isCommitPushHovered)
         }
-        .padding(.horizontal, metrics.footerSpacing * 0.7)
+        .padding(.horizontal, metrics.footerHorizontalPadding)
         .frame(width: metrics.contentWidth, height: metrics.footerHeight, alignment: .leading)
         .background(Color.primary.opacity(0.035), in: Capsule())
         .overlay { Capsule().stroke(Color.primary.opacity(0.16), lineWidth: 0.8) }
