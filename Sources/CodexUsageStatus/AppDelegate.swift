@@ -5,12 +5,20 @@ import SwiftUI
 @MainActor
 final class DetailsRouter: ObservableObject {
     @Published var destination: DetailsDestination = .overview
+    @Published private(set) var requestGeneration = 0
+
+    func route(to destination: DetailsDestination) {
+        self.destination = destination
+        requestGeneration &+= 1
+    }
 }
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
+    private var outsideClickMonitor: Any?
+    private var localClickMonitor: Any?
     private var model: UsageViewModel!
     private var modelObservation: AnyCancellable?
     private var floatingHUD: FloatingHUDPanelController!
@@ -39,8 +47,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         popover = NSPopover()
         popover.behavior = .transient
-        popover.animates = true
-        popover.contentSize = NSSize(width: 410, height: 820)
+        popover.animates = false
+        popover.delegate = self
+        popover.contentSize = NSSize(width: 430, height: 700)
         popover.contentViewController = NSHostingController(
             rootView: UsagePopoverView(
                 model: model,
@@ -67,6 +76,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        removeOutsideClickMonitor()
+        removeLocalClickMonitor()
         floatingHUD?.stop()
         model?.stop()
     }
@@ -81,14 +92,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showPopover(destination: DetailsDestination = .overview, toggle: Bool = false, sender: Any? = nil) {
         guard let button = statusItem.button else { return }
-        detailsRouter.destination = destination
+        detailsRouter.route(to: destination)
         if destination == .gitWorkspace { gitCoordinator.refreshNow() }
         if toggle && popover.isShown {
             popover.performClose(sender)
         } else {
             if popover.isShown { popover.performClose(sender) }
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            installOutsideClickMonitor()
             model.refresh()
+        }
+    }
+
+    private func installOutsideClickMonitor() {
+        removeOutsideClickMonitor()
+        removeLocalClickMonitor()
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.closePopoverForOutsideClick()
+            }
+        }
+        localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.closePopoverForOutsideClick()
+            }
+            return event
+        }
+    }
+
+    private func closePopoverForOutsideClick() {
+        guard popover?.isShown == true else { return }
+        let location = NSEvent.mouseLocation
+        let popoverFrame = popover.contentViewController?.view.window?.frame ?? .zero
+        let statusFrame: NSRect
+        if let button = statusItem.button, let window = button.window {
+            let buttonRectInWindow = button.convert(button.bounds, to: nil)
+            statusFrame = window.convertToScreen(buttonRectInWindow)
+        } else {
+            statusFrame = .zero
+        }
+        guard !popoverFrame.contains(location), !statusFrame.contains(location) else { return }
+        popover.performClose(nil)
+        removeOutsideClickMonitor()
+        removeLocalClickMonitor()
+    }
+
+    private func removeOutsideClickMonitor() {
+        if let outsideClickMonitor {
+            NSEvent.removeMonitor(outsideClickMonitor)
+            self.outsideClickMonitor = nil
+        }
+    }
+
+    private func removeLocalClickMonitor() {
+        if let localClickMonitor {
+            NSEvent.removeMonitor(localClickMonitor)
+            self.localClickMonitor = nil
         }
     }
 
@@ -125,5 +184,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let appPath = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }) {
             NSWorkspace.shared.open(URL(fileURLWithPath: appPath))
         }
+    }
+}
+
+extension AppDelegate: NSPopoverDelegate {
+    func popoverDidClose(_ notification: Notification) {
+        removeOutsideClickMonitor()
+        removeLocalClickMonitor()
     }
 }

@@ -72,9 +72,9 @@ cat > "$INFO_PLIST" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>2.4.40</string>
+  <string>2.4.41</string>
   <key>CFBundleVersion</key>
-  <string>60</string>
+  <string>61</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
   <key>LSUIElement</key>

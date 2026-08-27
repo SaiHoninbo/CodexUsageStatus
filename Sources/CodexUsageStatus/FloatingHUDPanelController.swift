@@ -907,10 +907,6 @@ private struct HUDQuotaRow: View {
                     lineWidth: 0.6 * scaleFactor
                 )
         }
-        .animation(
-            isUpdating || accessibilityReduceMotion ? nil : .easeOut(duration: 0.24),
-            value: presentation?.remainingPercent
-        )
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(kind.label)配額")
         .accessibilityValue(
@@ -1064,7 +1060,6 @@ private struct CodexFloatingHUDView: View {
     @State private var hasPresentedHUD = false
     @State private var presentationCache: HUDDualQuotaPresentation?
     @State private var decreaseAmount: Int?
-    @State private var decreaseBounce = false
     @State private var decreaseAnimationID = 0
     @State private var updateCheckRequested = false
     @State private var updateFeedback: UpdateFeedback?
@@ -1094,7 +1089,6 @@ private struct CodexFloatingHUDView: View {
             // even when Codex remains the frontmost application.
             if let updateFeedback {
                 updateFeedbackBanner(updateFeedback)
-                    .transition(.opacity.combined(with: .scale(scale: 0.97)))
                     .zIndex(20)
             }
         }
@@ -1110,21 +1104,17 @@ private struct CodexFloatingHUDView: View {
                   feedback.kind != .downloading else { return }
             try? await Task.sleep(nanoseconds: 4_500_000_000)
             guard !Task.isCancelled else { return }
-            withAnimation(.easeOut(duration: 0.18)) {
-                updateFeedback = nil
-            }
+            updateFeedback = nil
         }
     }
 
     private func requestUpdateCheck() {
         updateCheckRequested = true
-        withAnimation(.easeOut(duration: 0.16)) {
-            updateFeedback = UpdateFeedback(
-                kind: .checking,
-                title: "正在檢查更新…",
-                message: "正在連線到 GitHub Release"
-            )
-        }
+        updateFeedback = UpdateFeedback(
+            kind: .checking,
+            title: "正在檢查更新…",
+            message: "正在連線到 GitHub Release"
+        )
         checkForUpdates()
     }
 
@@ -1135,13 +1125,11 @@ private struct CodexFloatingHUDView: View {
         // callback is delayed by the system.
         cancelUpdateCheck()
         updateCheckRequested = false
-        withAnimation(.easeOut(duration: 0.16)) {
-            updateFeedback = UpdateFeedback(
-                kind: .error,
-                title: "更新檢查已取消",
-                message: "更新檢查已取消。"
-            )
-        }
+        updateFeedback = UpdateFeedback(
+            kind: .error,
+            title: "更新檢查已取消",
+            message: "更新檢查已取消。"
+        )
     }
 
     private func presentUpdateFeedback(for state: AppUpdateState) {
@@ -1329,10 +1317,7 @@ private struct CodexFloatingHUDView: View {
             guard decreaseAmount != nil else { return }
             try? await Task.sleep(nanoseconds: 1_300_000_000)
             guard !Task.isCancelled else { return }
-            withAnimation(.easeOut(duration: 0.18)) {
-                decreaseAmount = nil
-                decreaseBounce = false
-            }
+            decreaseAmount = nil
         }
     }
 
@@ -1358,14 +1343,7 @@ private struct CodexFloatingHUDView: View {
                 Text("−\(decreaseAmount)%")
                     .font(.system(size: 9, weight: .bold, design: .rounded))
                     .foregroundStyle(.red)
-                    .shadow(color: .red.opacity(0.26), radius: 1.5, y: 0.2)
-                    .scaleEffect(accessibilityReduceMotion ? 1 : (decreaseBounce ? 1.08 : 0.94))
                     .offset(x: 1, y: -3)
-                    .transition(
-                        accessibilityReduceMotion
-                            ? .opacity
-                            : .scale(scale: 0.78).combined(with: .opacity)
-                    )
                     .zIndex(1)
             }
         }
@@ -1526,30 +1504,18 @@ private struct CodexFloatingHUDView: View {
             // color-matched static contour still communicates quota state
             // without moving or blinking the HUD.
             let opacity = profile.minOpacity + ((profile.maxOpacity - profile.minOpacity) * 0.45)
-            hudPulseBorder(
-                frameOpacity: opacity,
-                glowRadius: accessibilityReduceMotion ? 0 : min(profile.glowRadius, 4)
-            )
+            hudPulseBorder(frameOpacity: opacity)
         } else if accessibilityReduceMotion && hasLiveHUDData {
-            hudPulseBorder(frameOpacity: 0.14, glowRadius: 0)
+            hudPulseBorder(frameOpacity: 0.14)
         }
     }
 
-    private func hudPulseBorder(frameOpacity: Double, glowRadius: Double) -> some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: layoutState.scaleLevel), style: .continuous)
-                .stroke(
-                    model.menuBarColor.opacity(max(0.28, frameOpacity)),
-                    lineWidth: frameOpacity > 0.48 ? 2.35 : 2.0
-                )
-                .shadow(
-                    color: model.menuBarColor.opacity(min(0.9, frameOpacity * 1.18)),
-                    radius: glowRadius
-                )
-            RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: layoutState.scaleLevel), style: .continuous)
-                .stroke(model.menuBarColor.opacity(min(0.62, frameOpacity * 0.74)), lineWidth: 1.4)
-                .blur(radius: max(2, glowRadius * 0.42))
-        }
+    private func hudPulseBorder(frameOpacity: Double) -> some View {
+        RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: layoutState.scaleLevel), style: .continuous)
+            .stroke(
+                model.menuBarColor.opacity(max(0.28, frameOpacity)),
+                lineWidth: frameOpacity > 0.48 ? 2.35 : 2.0
+            )
         .frame(width: layoutState.size.width, height: layoutState.size.height)
         .allowsHitTesting(false)
     }
@@ -1872,10 +1838,7 @@ private struct CodexFloatingHUDView: View {
     private func resetTracking(for profileID: UUID?) {
         trackedProfileID = profileID
         lastLivePercent = nil
-        withAnimation(.easeOut(duration: 0.12)) {
-            decreaseAmount = nil
-            decreaseBounce = false
-        }
+        decreaseAmount = nil
         decreaseAnimationID &+= 1
         syncLiveBaseline()
     }
@@ -1921,15 +1884,8 @@ private struct CodexFloatingHUDView: View {
 
         lastLivePercent = current
         let totalAmount = (decreaseAmount ?? 0) + amount
-        withAnimation(
-            accessibilityReduceMotion
-                ? .easeIn(duration: 0.12)
-                : .spring(response: 0.25, dampingFraction: 0.58)
-        ) {
-            decreaseAmount = totalAmount
-            decreaseBounce = !accessibilityReduceMotion
-            decreaseAnimationID &+= 1
-        }
+        decreaseAmount = totalAmount
+        decreaseAnimationID &+= 1
     }
 
     private var livePresentation: HUDDualQuotaPresentation? {

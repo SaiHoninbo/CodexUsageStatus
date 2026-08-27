@@ -15,52 +15,85 @@ struct UsagePopoverView: View {
     @State private var showClearHistoryConfirmation = false
     @State private var showResetCreditConfirmation = false
     @State private var showRemoveProfileConfirmation = false
+    @State private var showAdvancedDetails = false
     @State private var profilePendingRemoval: AccountProfile?
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                header
-                updateSection
-                Divider()
-                accountSelector
-                accountManagementSection
-                gitWorkspaceSection.id("gitWorkspace")
-                if model.accountScope == .current {
-                    accountHealthSection
-                    turnActivitySection
-                } else {
-                    Text("全部帳號模式：帳號健康、Reset Credit 與即時 Turn 僅適用目前帳號。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                if model.accountScope == .all {
-                    aggregateQuotaSection
-                } else {
-                    windowSection(title: "Primary window", window: model.snapshot?.primary)
-                    windowSection(title: "Secondary window", window: model.snapshot?.secondary)
-                    if let spend = model.snapshot?.individualLimit {
-                        spendControlSection(spend)
+                VStack(alignment: .leading, spacing: 16) {
+                    header
+                    accountSelector
+                    quotaSummarySection
+                    updateSection
+                    quickActions
+                    Divider()
+
+                    DisclosureGroup(isExpanded: $showAdvancedDetails) {
+                        VStack(alignment: .leading, spacing: 16) {
+                            accountManagementSection
+                            gitWorkspaceSection.id("gitWorkspace")
+                            if model.accountScope == .current {
+                                accountHealthSection
+                                turnActivitySection
+                            } else {
+                                Text("全部帳號模式：帳號健康、Reset Credit 與即時 Turn 僅適用目前帳號。")
+                                    .font(.body)
+                                    .foregroundStyle(.secondary)
+                            }
+                            if model.accountScope == .all {
+                                aggregateQuotaSection
+                            } else {
+                                windowSection(title: "Primary window", window: model.snapshot?.primary)
+                                windowSection(title: "Secondary window", window: model.snapshot?.secondary)
+                                if let spend = model.snapshot?.individualLimit {
+                                    spendControlSection(spend)
+                                }
+                            }
+                            tokenActivitySection
+                            resetCreditSection
+                            historySection
+                            settingsSection
+                            syncSettingsSection
+                            metadataSection
+                            actions
+                        }
+                        .padding(.top, 10)
+                    } label: {
+                        HStack {
+                            Label("更多資訊", systemImage: "ellipsis.circle")
+                                .font(.headline)
+                            Spacer()
+                            Text(showAdvancedDetails ? "收起" : "帳號、Git、歷史與設定")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
-                tokenActivitySection
-                resetCreditSection
-                historySection
-                settingsSection
-                syncSettingsSection
-                metadataSection
-                actions
+                .padding(20)
             }
-            .padding(18)
-        }
-        .frame(width: 410, height: 820)
-        .onChange(of: detailsRouter.destination) { _, destination in
-            guard destination == .gitWorkspace else { return }
-            withAnimation(.easeOut(duration: 0.2)) {
-                proxy.scrollTo("gitWorkspace", anchor: .top)
+            .frame(width: 430, height: 700)
+            .onAppear {
+                guard detailsRouter.destination == .gitWorkspace else { return }
+                showAdvancedDetails = true
+                DispatchQueue.main.async {
+                    proxy.scrollTo("gitWorkspace", anchor: .top)
+                }
             }
-        }
+            .onChange(of: detailsRouter.destination) { _, destination in
+                guard destination == .gitWorkspace else { return }
+                showAdvancedDetails = true
+                DispatchQueue.main.async {
+                    proxy.scrollTo("gitWorkspace", anchor: .top)
+                }
+            }
+            .onChange(of: detailsRouter.requestGeneration) { _, _ in
+                guard detailsRouter.destination == .gitWorkspace else { return }
+                showAdvancedDetails = true
+                DispatchQueue.main.async {
+                    proxy.scrollTo("gitWorkspace", anchor: .top)
+                }
+            }
         }
         .confirmationDialog("確認 Git 操作", isPresented: Binding(
             get: { gitCoordinator.confirmation != nil },
@@ -122,27 +155,130 @@ struct UsagePopoverView: View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Codex 用量")
-                    .font(.headline)
+                    .font(.title3.weight(.semibold))
                 Text(model.accountDisplayName)
-                    .font(.caption)
+                    .font(.body)
                     .foregroundStyle(.secondary)
                 if let remaining = model.menuBarRemainingPercent {
                     Text("剩餘 \(remaining)%")
-                        .font(.system(size: 30, weight: .semibold, design: .rounded))
+                        .font(.system(size: 32, weight: .bold, design: .rounded))
                         .foregroundStyle(model.menuBarColor)
                 } else {
                     Text("—")
-                        .font(.system(size: 30, weight: .semibold, design: .rounded))
+                        .font(.system(size: 32, weight: .bold, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
                 Text(model.dataAgeText)
-                    .font(.caption)
+                    .font(.subheadline)
                     .foregroundStyle(model.shouldShowOfflineBadge ? .orange : .secondary)
             }
             Spacer()
             Label(model.connectionState.displayName, systemImage: connectionIcon)
-                .font(.caption)
+                .font(.subheadline.weight(.semibold))
                 .foregroundStyle(model.shouldShowOfflineBadge ? Color.secondary : Color.green)
+        }
+    }
+
+    private var quotaSummarySection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("目前用量", systemImage: "chart.bar.fill")
+                    .font(.headline)
+                Spacer()
+                Text(model.accountScope == .current ? "目前帳號" : "全部帳號")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            if model.accountScope == .current {
+                quotaSummaryRow(title: "5 小時", window: model.snapshot?.primary, accent: .orange)
+                quotaSummaryRow(title: "7 天", window: model.snapshot?.secondary, accent: .blue)
+            } else {
+                let summaries = model.profileQuotaSummaries()
+                if summaries.isEmpty {
+                    Text("尚未取得帳號用量。")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(summaries) { summary in
+                        HStack(spacing: 10) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(model.accountProfileDisplay(for: summary.profile).title)
+                                    .font(.body.weight(.semibold))
+                                    .lineLimit(1)
+                                Text(summary.isStale ? "資料較舊" : "已同步")
+                                    .font(.subheadline)
+                                    .foregroundStyle(summary.isStale ? .orange : .secondary)
+                            }
+                            Spacer()
+                            if let remaining = summary.primaryRemainingPercent {
+                                Text("剩餘 \(remaining)%")
+                                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                                    .foregroundStyle(color(for: remaining))
+                            } else {
+                                Text("—")
+                                    .font(.title3.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func quotaSummaryRow(title: String, window: RateLimitWindow?, accent: Color) -> some View {
+        if let window {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(title)
+                        .font(.body.weight(.semibold))
+                    Text("已用 \(window.clampedUsedPercent)%")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("剩餘 \(window.remainingPercent)%")
+                        .font(.system(size: 18, weight: .bold, design: .rounded))
+                        .foregroundStyle(accent)
+                }
+                ProgressView(value: Double(window.remainingPercent), total: 100)
+                    .tint(accent)
+                Text(model.resetDescription(window.resetsAt))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        } else {
+            HStack {
+                Text(title).font(.body.weight(.semibold))
+                Spacer()
+                Text("尚未取得資料").font(.subheadline).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var quickActions: some View {
+        HStack(spacing: 10) {
+            Button {
+                model.refresh()
+            } label: {
+                Label("重新整理", systemImage: "arrow.clockwise")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.regular)
+
+            Button {
+                openCodex()
+            } label: {
+                Label("開啟 Codex", systemImage: "arrow.up.right.square")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.regular)
         }
     }
 
@@ -150,7 +286,7 @@ struct UsagePopoverView: View {
         VStack(alignment: .leading, spacing: 7) {
             HStack {
                 Label("軟體更新", systemImage: "arrow.down.circle")
-                    .font(.subheadline.weight(.semibold))
+                    .font(.headline)
                 Spacer()
                 updateStatusLabel
             }
@@ -158,62 +294,62 @@ struct UsagePopoverView: View {
             switch model.updateState {
             case .idle:
                 Text("啟動後會檢查 GitHub Release。")
-                    .font(.caption)
+                    .font(.body)
                     .foregroundStyle(.secondary)
             case .checking:
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
                     Text("正在檢查 GitHub 更新…")
-                        .font(.caption)
+                        .font(.body)
                         .foregroundStyle(.secondary)
                     Spacer()
                     Button("取消") { model.cancelUpdateCheck() }
                         .buttonStyle(.link)
-                        .font(.caption)
+                        .font(.subheadline)
                 }
             case .upToDate:
                 Text("目前已是最新版本。")
-                    .font(.caption)
+                    .font(.body)
                     .foregroundStyle(.green)
             case .available(let release):
                 updateReleaseDetails(release, downloadedURL: nil)
                 HStack(spacing: 8) {
                     Button("立即更新並重新啟動") { model.downloadAvailableUpdate() }
                         .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
+                        .controlSize(.regular)
                     Button("開啟 Release") { model.openUpdateReleasePage() }
                         .buttonStyle(.link)
-                        .font(.caption)
+                        .font(.subheadline)
                 }
             case .downloading(let release):
                 updateReleaseDetails(release, downloadedURL: nil)
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
                     Text("正在下載、驗證並安裝…")
-                        .font(.caption)
+                        .font(.body)
                     Spacer()
                     Button("取消") { model.cancelUpdateDownload() }
                         .buttonStyle(.link)
-                        .font(.caption)
+                        .font(.subheadline)
                 }
             case .downloaded(let release, let appURL):
                 updateReleaseDetails(release, downloadedURL: appURL)
-                Text("更新檔已通過 SHA-256（若 Release 提供）與 strict code signature 驗證，正在由背景安裝器替換同一路徑的 App 並重新啟動。")
-                    .font(.caption2)
+                    Text("更新檔已通過 SHA-256（若 Release 提供）與 strict code signature 驗證，正在由背景安裝器替換同一路徑的 App 並重新啟動。")
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             case .error(let message):
                 Text(message)
-                    .font(.caption)
+                    .font(.body)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
                     Button("重試") { model.checkForUpdates() }
                         .buttonStyle(.link)
-                        .font(.caption)
+                        .font(.subheadline)
                     Button("開啟 GitHub") { model.openUpdateReleasePage() }
                         .buttonStyle(.link)
-                        .font(.caption)
+                        .font(.subheadline)
                 }
             }
         }
@@ -223,15 +359,15 @@ struct UsagePopoverView: View {
     private var updateStatusLabel: some View {
         switch model.updateState {
         case .checking, .downloading:
-            Text("處理中").font(.caption2).foregroundStyle(.secondary)
+            Text("處理中").font(.subheadline).foregroundStyle(.secondary)
         case .available:
-            Text("有新版").font(.caption2).foregroundStyle(.blue)
+            Text("有新版").font(.subheadline).foregroundStyle(.blue)
         case .downloaded:
-            Text("已驗證").font(.caption2).foregroundStyle(.green)
+            Text("已驗證").font(.subheadline).foregroundStyle(.green)
         case .upToDate:
-            Text("最新").font(.caption2).foregroundStyle(.green)
+            Text("最新").font(.subheadline).foregroundStyle(.green)
         case .error:
-            Text("檢查失敗").font(.caption2).foregroundStyle(.orange)
+            Text("檢查失敗").font(.subheadline).foregroundStyle(.orange)
         case .idle:
             EmptyView()
         }
@@ -240,21 +376,21 @@ struct UsagePopoverView: View {
     private func updateReleaseDetails(_ release: AppUpdateRelease, downloadedURL: URL?) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text("版本 \(release.version)")
-                .font(.caption.weight(.semibold))
+                .font(.body.weight(.semibold))
             if let publishedAt = release.publishedAt {
                 Text("發布：\(publishedAt.formatted(date: .abbreviated, time: .shortened))")
-                    .font(.caption2)
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
             if !release.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Text(release.notes)
-                    .font(.caption2)
+                    .font(.subheadline)
                     .lineLimit(3)
                     .foregroundStyle(.secondary)
             }
             if let downloadedURL {
                 Text("已驗證：\(downloadedURL.deletingLastPathComponent().lastPathComponent)")
-                    .font(.caption2)
+                    .font(.subheadline)
                     .foregroundStyle(.green)
                     .lineLimit(1)
             }
@@ -262,44 +398,65 @@ struct UsagePopoverView: View {
     }
 
     private var accountSelector: some View {
-        HStack {
-            Picker("帳號範圍", selection: $model.accountScope) {
-                ForEach(AccountScope.allCases) { scope in
-                    Text(scope.title).tag(scope)
-                }
-            }
-            .pickerStyle(.segmented)
-            if model.accountScope == .current {
-                Menu {
-                    ForEach(model.accountProfiles) { profile in
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                HStack(spacing: 3) {
+                    ForEach(AccountScope.allCases) { scope in
                         Button {
-                            model.selectProfile(id: profile.id)
+                            guard model.accountScope != scope else { return }
+                            model.setAccountScope(scope)
                         } label: {
-                            HStack(alignment: .top, spacing: 8) {
-                                Image(systemName: profile.id == model.currentProfileID ? "checkmark" : (model.accountProfileDisplay(for: profile).isWarning ? "exclamationmark.triangle" : "person"))
-                                    .frame(width: 16)
-                                accountDisplayStack(profile)
-                                Spacer(minLength: 0)
+                            Text(scope.title)
+                                .font(.body.weight(.semibold))
+                                .frame(maxWidth: .infinity, minHeight: 32)
+                                .contentShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(model.accountScope == scope ? Color.white : Color.primary)
+                        .background(
+                            model.accountScope == scope ? Color.accentColor : Color.clear,
+                            in: Capsule()
+                        )
+                        .accessibilityAddTraits(model.accountScope == scope ? .isSelected : [])
+                    }
+                }
+                .padding(3)
+                .background(Color.secondary.opacity(0.12), in: Capsule())
+                .frame(maxWidth: .infinity)
+                if model.accountScope == .current {
+                    Menu {
+                        ForEach(model.accountProfiles) { profile in
+                            Button {
+                                model.selectProfile(id: profile.id)
+                            } label: {
+                                HStack(alignment: .top, spacing: 8) {
+                                    Image(systemName: profile.id == model.currentProfileID ? "checkmark" : (model.accountProfileDisplay(for: profile).isWarning ? "exclamationmark.triangle" : "person"))
+                                        .frame(width: 16)
+                                    accountDisplayStack(profile)
+                                    Spacer(minLength: 0)
+                                }
                             }
                         }
+                        Divider()
+                        Button("新增受管帳號") { _ = model.createManagedProfile() }
+                    } label: {
+                        Image(systemName: "person.crop.circle.badge.plus")
+                            .font(.title3)
+                            .frame(width: 32, height: 32)
                     }
-                    Divider()
-                    Button("新增受管帳號") { _ = model.createManagedProfile() }
-                } label: {
-                    Image(systemName: "person.crop.circle.badge.plus")
+                    .help("切換或建立本機 profile")
                 }
-                .help("切換或建立本機 profile")
-            }
-            Spacer()
-            if model.accountScope == .current {
-                Text(model.accountHealthState.displayName)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                if model.accountScope == .current {
+                    Text(model.accountHealthState.displayName)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
             }
             if model.accountProfiles.contains(where: \.isUnidentified) {
                 Text("未識別帳號不含穩定 Email，可能需要手動分開管理。")
-                    .font(.caption2)
+                    .font(.subheadline)
                     .foregroundStyle(.orange)
+                    .lineLimit(2)
             }
         }
     }
