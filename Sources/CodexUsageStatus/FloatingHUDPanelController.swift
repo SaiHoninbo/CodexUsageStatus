@@ -4,34 +4,36 @@ import CoreGraphics
 import SwiftUI
 
 private enum FloatingHUDLayout {
-    // The HUD has a second, memory-only account identity line. Keep the
-    // width compact while giving that line enough vertical room to remain
-    // readable; the two placements differ only by their small top/bottom
-    // inset, as before.
-    static let bottomRightSize = NSSize(width: 300, height: 61)
-    static let topRightSize = NSSize(width: 300, height: 57)
+    // C layout: both placements use one scalable panel geometry. Placement
+    // changes the anchor only; it never creates a second size contract.
+    static let bottomRightSize = NSSize(width: 520, height: 260)
+    static let topRightSize = NSSize(width: 520, height: 260)
     // Sizes used by the previous shipped HUD builds. These are only used
     // while migrating persisted screen anchors; new anchors are size-agnostic.
     static let previousWideSize = NSSize(width: 360, height: 60)
     static let previousLegacySize = NSSize(width: 156, height: 66)
-    static let cornerRadius: CGFloat = 15
+    static let cornerRadius: CGFloat = HUDMetrics.canonicalCornerRadius
 
-    static func size(for placement: HUDPlacement) -> NSSize {
-        switch placement {
-        case .topRight: return topRightSize
-        case .bottomRight: return bottomRightSize
-        }
+    static func cornerRadius(for scaleLevel: HUDScaleLevel) -> CGFloat {
+        HUDMetrics(scaleLevel: scaleLevel).cornerRadius
+    }
+
+    static func size(for placement: HUDPlacement, scaleLevel: HUDScaleLevel = .standard) -> NSSize {
+        _ = placement
+        let metrics = HUDMetrics(scaleLevel: scaleLevel)
+        return NSSize(width: metrics.panelSize.width, height: metrics.panelSize.height)
     }
 }
 
 @MainActor
 private final class FloatingHUDLayoutState: ObservableObject {
     @Published var placement: HUDPlacement = .bottomRight
+    @Published var scaleLevel: HUDScaleLevel = HUDScaleLevel.load()
     /// The HUD is a Codex-only overlay. This state is also used by the view
     /// to keep actions disabled during a focus transition.
     @Published var isCodexFocused = true
 
-    var size: NSSize { FloatingHUDLayout.size(for: placement) }
+    var size: NSSize { FloatingHUDLayout.size(for: placement, scaleLevel: scaleLevel) }
 }
 
 private final class DraggableHUDPanel: NSPanel {
@@ -122,6 +124,13 @@ final class FloatingHUDPanelController: NSObject {
                 }
                 self.pasteAndSubmit(completion: completion)
             },
+            promptShortcut: { [weak self] shortcut, completion in
+                guard let self else {
+                    completion(false)
+                    return
+                }
+                self.pastePromptShortcut(shortcut, completion: completion)
+            },
             showDetails: { [weak self] in self?.onShowDetails?() },
             showGitWorkspace: { [weak self] in self?.onShowGitWorkspace?() },
             openCodex: { [weak self] in self?.onOpenCodex?() },
@@ -135,6 +144,7 @@ final class FloatingHUDPanelController: NSObject {
             setAccountRefreshInterval: { [weak self] seconds in self?.model.setGlobalSyncInterval(seconds) },
             setTokenActivityRefreshInterval: { [weak self] seconds in self?.model.setTokenActivityRefreshInterval(seconds) },
             setCredentialWatchInterval: { [weak self] seconds in self?.model.setCredentialWatchInterval(seconds) },
+            setHUDScaleLevel: { [weak self] level in self?.setHUDScaleLevel(level) },
             checkForUpdates: { [weak self] in self?.model.checkForUpdates() },
             cancelUpdateCheck: { [weak self] in self?.model.cancelUpdateCheck() },
             downloadAvailableUpdate: { [weak self] in self?.model.downloadAvailableUpdate() },
@@ -144,7 +154,7 @@ final class FloatingHUDPanelController: NSObject {
         )
         let hostingView = NSHostingView(rootView: rootView)
         let newPanel = DraggableHUDPanel(
-            contentRect: NSRect(origin: .zero, size: FloatingHUDLayout.bottomRightSize),
+            contentRect: NSRect(origin: .zero, size: layoutState.size),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: true
@@ -157,7 +167,7 @@ final class FloatingHUDPanelController: NSObject {
         hostingView.layer?.cornerRadius = 0
         hostingView.layer?.masksToBounds = false
         newPanel.contentView = hostingView
-        newPanel.setContentSize(FloatingHUDLayout.bottomRightSize)
+        newPanel.setContentSize(layoutState.size)
         newPanel.isReleasedWhenClosed = false
         newPanel.isFloatingPanel = true
         newPanel.level = .floating
@@ -233,12 +243,71 @@ final class FloatingHUDPanelController: NSObject {
         refreshVisibility()
     }
 
+    /// Resize transaction for the five persisted HUD levels.  The old panel
+    /// size and origin are captured before calculating the new size so
+    /// `resizedOrigin` can preserve the user's selected edge anchor.
+    func setHUDScaleLevel(_ newLevel: HUDScaleLevel) {
+        guard layoutState.scaleLevel != newLevel else { return }
+        guard let panel else {
+            layoutState.scaleLevel = newLevel
+            newLevel.persist(to: defaults)
+            return
+        }
+
+        let oldPanelSize = panel.frame.size
+        let oldOrigin = panel.frame.origin
+        let placement = layoutState.placement
+        let newSize = FloatingHUDLayout.size(for: placement, scaleLevel: newLevel)
+        let targetFrame = lastCodexWindowFrame
+        let visibleFrame = lastCodexVisibleFrame
+        let resizedOrigin: NSPoint
+        if let targetFrame {
+            resizedOrigin = HUDPlacementPolicy.resizedOrigin(
+                origin: oldOrigin,
+                targetFrame: targetFrame,
+                oldPanelSize: oldPanelSize,
+                newPanelSize: newSize,
+                placement: placement
+            )
+        } else {
+            resizedOrigin = oldOrigin
+        }
+
+        applySize(newSize, to: panel)
+        let correctedOrigin = visibleFrame.map {
+            clampedOrigin(resizedOrigin, panelSize: newSize, visibleFrame: $0)
+        } ?? resizedOrigin
+        panel.setFrameOrigin(correctedOrigin)
+        layoutState.scaleLevel = newLevel
+        newLevel.persist(to: defaults)
+        if let targetFrame {
+            saveAnchor(
+                origin: correctedOrigin,
+                targetFrame: targetFrame,
+                panelSize: newSize,
+                placement: placement
+            )
+        }
+        lastPositionedPanelSize = newSize
+    }
+
     private func pasteClipboard() {
         ClipboardPasteService.pasteToCodex(processID: lastCodexProcessID)
     }
 
     private func pasteAndSubmit(completion: @escaping (Bool) -> Void) {
         ClipboardPasteService.pasteAndSubmitToCodex(
+            processID: lastCodexProcessID,
+            completion: completion
+        )
+    }
+
+    private func pastePromptShortcut(
+        _ shortcut: CodexPromptShortcut,
+        completion: @escaping (Bool) -> Void
+    ) {
+        ClipboardPasteService.pasteTemporaryTextToCodex(
+            shortcut,
             processID: lastCodexProcessID,
             completion: completion
         )
@@ -370,7 +439,7 @@ final class FloatingHUDPanelController: NSObject {
         if let anchor = savedAnchor() {
             lastPlacement = anchor.placement
             layoutState.placement = anchor.placement
-            let size = FloatingHUDLayout.size(for: anchor.placement)
+            let size = FloatingHUDLayout.size(for: anchor.placement, scaleLevel: layoutState.scaleLevel)
             applySize(size, to: panel)
             let origin = HUDPlacementPolicy.origin(
                 for: anchor,
@@ -405,7 +474,7 @@ final class FloatingHUDPanelController: NSObject {
             )
             lastPlacement = placement
             layoutState.placement = placement
-            let size = FloatingHUDLayout.size(for: placement)
+            let size = FloatingHUDLayout.size(for: placement, scaleLevel: layoutState.scaleLevel)
             applySize(size, to: panel)
             let origin = HUDPlacementPolicy.resizedOrigin(
                 origin: oldOrigin,
@@ -433,7 +502,7 @@ final class FloatingHUDPanelController: NSObject {
             )
             lastPlacement = placement
             layoutState.placement = placement
-            let size = FloatingHUDLayout.size(for: placement)
+            let size = FloatingHUDLayout.size(for: placement, scaleLevel: layoutState.scaleLevel)
             applySize(size, to: panel)
             let resizedOrigin = HUDPlacementPolicy.resizedOrigin(
                 origin: origin,
@@ -460,7 +529,7 @@ final class FloatingHUDPanelController: NSObject {
             )
             lastPlacement = placement
             layoutState.placement = placement
-            let size = FloatingHUDLayout.size(for: placement)
+            let size = FloatingHUDLayout.size(for: placement, scaleLevel: layoutState.scaleLevel)
             applySize(size, to: panel)
             let resizedOrigin = HUDPlacementPolicy.resizedOrigin(
                 origin: legacyOrigin,
@@ -476,7 +545,7 @@ final class FloatingHUDPanelController: NSObject {
 
         lastPlacement = .bottomRight
         layoutState.placement = .bottomRight
-        let size = FloatingHUDLayout.bottomRightSize
+        let size = layoutState.size
         applySize(size, to: panel)
         var x = targetFrame.maxX - size.width - 18
         var y = targetFrame.maxY - size.height - 18
@@ -601,7 +670,7 @@ final class FloatingHUDPanelController: NSObject {
         )
         lastPlacement = placement
         layoutState.placement = placement
-        let newSize = FloatingHUDLayout.size(for: placement)
+        let newSize = FloatingHUDLayout.size(for: placement, scaleLevel: layoutState.scaleLevel)
         let resizedOrigin = HUDPlacementPolicy.resizedOrigin(
             origin: origin,
             targetFrame: codexWindowFrame,
@@ -750,13 +819,26 @@ final class FloatingHUDPanelController: NSObject {
 }
 
 private struct HUDQuotaRow: View {
-    private static let shellWidth: CGFloat = 138
-    private static let shellHeight: CGFloat = 17
-
     let kind: HUDQuotaWindowKind
     let presentation: HUDQuotaWindowPresentation?
     let isUpdating: Bool
+    let width: CGFloat
+    let height: CGFloat
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+
+    init(
+        kind: HUDQuotaWindowKind,
+        presentation: HUDQuotaWindowPresentation?,
+        isUpdating: Bool,
+        width: CGFloat,
+        height: CGFloat
+    ) {
+        self.kind = kind
+        self.presentation = presentation
+        self.isUpdating = isUpdating
+        self.width = width
+        self.height = height
+    }
 
     private var accent: Color {
         switch kind {
@@ -777,43 +859,45 @@ private struct HUDQuotaRow: View {
         presentation?.resetDescription ?? "更新中"
     }
 
+    private var cornerRadius: CGFloat {
+        max(4, height * 0.12)
+    }
+
     var body: some View {
         ZStack(alignment: .leading) {
-            // Both quota rows intentionally share one fixed shell width. The
-            // fill is embedded in this shell, so changing one window never
-            // changes the geometry of the other row or the left allocation.
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .fill(Color.black.opacity(isUpdating ? 0.18 : 0.24))
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .fill(accent.opacity(isUpdating ? 0.32 : 0.58))
-                .frame(width: Self.shellWidth * fillFraction)
+                .frame(width: width * fillFraction)
 
-            HStack(spacing: 3) {
+            HStack(spacing: max(5, height * 0.18)) {
                 Image(systemName: "clock")
-                    .font(.system(size: 9, weight: .semibold))
-                    .frame(width: 11)
+                    .font(.system(size: height * 0.42, weight: .semibold))
+                    .frame(width: height * 0.58)
                 Text(kind.label)
-                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .font(.system(size: height * 0.46, weight: .semibold, design: .rounded))
                 Text(percentText)
-                    .font(.system(size: 10, weight: .bold, design: .rounded))
-                Text(resetText)
-                    .font(.system(size: 9, weight: .medium, design: .rounded))
-                    .foregroundStyle(.primary.opacity(0.86))
+                    .font(.system(size: height * 0.48, weight: .bold, design: .rounded))
+                Spacer(minLength: height * 0.12)
+                HStack(spacing: height * 0.12) {
+                    Text("剩餘")
+                    Text(resetText)
+                }
+                .font(.system(size: height * 0.38, weight: .medium, design: .rounded))
+                .foregroundStyle(.primary.opacity(0.86))
             }
-            // Keep labels readable independently of fill strength. The fixed
-            // shell receives the proposal, allowing text to tighten without
-            // reintroducing content-hug geometry or a trailing track.
             .foregroundStyle(.primary.opacity(0.96))
             .lineLimit(1)
-            .minimumScaleFactor(0.58)
+            .minimumScaleFactor(0.52)
             .allowsTightening(true)
-            .padding(.horizontal, 6)
-            .frame(width: Self.shellWidth, height: Self.shellHeight, alignment: .leading)
+            .padding(.horizontal, height * 0.28)
+            .frame(width: width, height: height, alignment: .leading)
         }
-        .frame(width: Self.shellWidth, height: Self.shellHeight, alignment: .leading)
-        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .frame(width: width, height: height, alignment: .leading)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .stroke(
                     accent.opacity(isUpdating ? 0.24 : 0.32),
                     lineWidth: 0.6
@@ -845,7 +929,17 @@ private struct HUDActionCard: View {
     let helpText: String
     let accessibilityLabel: String
     let iconColor: Color
+    let width: CGFloat
+    let height: CGFloat
     @Binding var isHovered: Bool
+
+    private var cornerRadius: CGFloat {
+        max(5, height * 0.14)
+    }
+
+    private var scaleFactor: CGFloat {
+        height / HUDMetrics.canonicalActionHeight
+    }
 
     init(
         title: String,
@@ -856,6 +950,8 @@ private struct HUDActionCard: View {
         helpText: String,
         accessibilityLabel: String,
         iconColor: Color = .primary,
+        width: CGFloat = 72,
+        height: CGFloat = 18,
         isHovered: Binding<Bool>
     ) {
         self.title = title
@@ -866,6 +962,8 @@ private struct HUDActionCard: View {
         self.helpText = helpText
         self.accessibilityLabel = accessibilityLabel
         self.iconColor = iconColor
+        self.width = width
+        self.height = height
         self._isHovered = isHovered
     }
 
@@ -873,10 +971,12 @@ private struct HUDActionCard: View {
         Button(action: action) {
             HStack(spacing: 3) {
                 Image(systemName: systemImage)
-                    .font(.system(size: iconSize, weight: .semibold))
+                    .font(.system(size: iconSize * scaleFactor, weight: .semibold))
                     .foregroundStyle(iconColor.opacity(isHovered ? 0.96 : 0.78))
                 Text(title)
-                    .font(.system(size: 8.5, weight: .semibold, design: .rounded))
+                    // Match the footer Commit/Push labels at the shared 14pt
+                    // baseline while retaining proportional HUD scaling.
+                    .font(.system(size: 14 * scaleFactor, weight: .semibold, design: .rounded))
                     .foregroundStyle(.primary.opacity(0.90))
                     .lineLimit(1)
                     .minimumScaleFactor(0.55)
@@ -885,16 +985,16 @@ private struct HUDActionCard: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .buttonStyle(.plain)
-        .frame(width: 72, height: 18)
+        .frame(width: width, height: height)
         .background(
             isHovered ? Color.primary.opacity(0.10) : Color.clear,
-            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+            in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         )
         .overlay {
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .stroke(Color.primary.opacity(0.22), lineWidth: 0.8)
         }
-        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .disabled(isDisabled)
         .onHover { isHovered = $0 }
         .help(helpText)
@@ -924,6 +1024,7 @@ private struct CodexFloatingHUDView: View {
     @ObservedObject var layoutState: FloatingHUDLayoutState
     let pasteClipboard: () -> Void
     let pasteAndSubmit: (@escaping (Bool) -> Void) -> Void
+    let promptShortcut: (CodexPromptShortcut, @escaping (Bool) -> Void) -> Void
     let showDetails: () -> Void
     let showGitWorkspace: () -> Void
     let openCodex: () -> Void
@@ -937,6 +1038,7 @@ private struct CodexFloatingHUDView: View {
     let setAccountRefreshInterval: (Int) -> Void
     let setTokenActivityRefreshInterval: (Int) -> Void
     let setCredentialWatchInterval: (Int) -> Void
+    let setHUDScaleLevel: (HUDScaleLevel) -> Void
     let checkForUpdates: () -> Void
     let cancelUpdateCheck: () -> Void
     let downloadAvailableUpdate: () -> Void
@@ -948,10 +1050,11 @@ private struct CodexFloatingHUDView: View {
     @State private var isDetailsHovered = false
     @State private var isPasteHovered = false
     @State private var isPasteAndSubmitHovered = false
-    @State private var isGitHovered = false
     @State private var isCommitHovered = false
     @State private var isPushHovered = false
+    @State private var isCommitPushHovered = false
     @State private var isPasteAndSubmitInFlight = false
+    @State private var isPromptShortcutInFlight = false
     @State private var trackedProfileID: UUID?
     @State private var lastLivePercent: Int?
     @State private var hasPresentedHUD = false
@@ -1132,9 +1235,9 @@ private struct CodexFloatingHUDView: View {
         }
         .padding(.horizontal, 8)
         .frame(width: layoutState.size.width, height: layoutState.size.height, alignment: .leading)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: layoutState.scaleLevel), style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: layoutState.scaleLevel), style: .continuous)
                 .stroke(updateFeedbackColor(for: feedback.kind).opacity(0.72), lineWidth: 1.8)
         }
         .shadow(color: updateFeedbackColor(for: feedback.kind).opacity(0.16), radius: 8)
@@ -1165,31 +1268,16 @@ private struct CodexFloatingHUDView: View {
 
     @ViewBuilder
     private func hudContainer() -> some View {
-        HStack(alignment: .top, spacing: 0) {
-            VStack(alignment: .leading, spacing: 2) {
-                quotaStack
-                accountEmailView
-            }
-            .frame(width: 138, alignment: .leading)
-
-            controlsColumn
-            .frame(width: 152, alignment: .trailing)
+        let metrics = HUDMetrics(scaleLevel: layoutState.scaleLevel)
+        VStack(alignment: .leading, spacing: metrics.sectionGap) {
+            quotaStack(width: metrics.contentWidth, height: metrics.quotaRowHeight, gap: metrics.quotaGap)
+            actionCardsRow(metrics: metrics)
+            footerRow(metrics: metrics)
         }
-        .padding(.horizontal, 5)
-        .padding(.vertical, layoutState.placement == .topRight ? 1 : 2)
-        .frame(width: layoutState.size.width, height: layoutState.size.height, alignment: .leading)
-        .overlay(alignment: .leading) {
-            // The separator is a visual boundary only. It overlays the
-            // existing 5pt inset + 138pt quota allocation and never consumes
-            // width from the fixed 300pt HUD contract.
-            Rectangle()
-                .fill(Color.primary.opacity(0.18))
-                .frame(width: 1, height: 55)
-                .offset(x: 143)
-                .allowsHitTesting(false)
-        }
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous))
-        .clipShape(RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous))
+        .padding(metrics.outerPadding)
+        .frame(width: metrics.panelSize.width, height: metrics.panelSize.height, alignment: .topLeading)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: layoutState.scaleLevel), style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: layoutState.scaleLevel), style: .continuous))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Codex 用量")
         .accessibilityValue(hudAccessibilityValue)
@@ -1244,18 +1332,22 @@ private struct CodexFloatingHUDView: View {
         }
     }
 
-    private var quotaStack: some View {
+    private func quotaStack(width: CGFloat, height: CGFloat, gap: CGFloat) -> some View {
         ZStack(alignment: .topTrailing) {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: gap) {
                 HUDQuotaRow(
                     kind: .fiveHour,
                     presentation: displayedPresentation?.fiveHour,
-                    isUpdating: isQuotaUpdating
+                    isUpdating: isQuotaUpdating,
+                    width: width,
+                    height: height
                 )
                 HUDQuotaRow(
                     kind: .sevenDay,
                     presentation: displayedPresentation?.sevenDay,
-                    isUpdating: isQuotaUpdating
+                    isUpdating: isQuotaUpdating,
+                    width: width,
+                    height: height
                 )
             }
             if let decreaseAmount {
@@ -1282,30 +1374,54 @@ private struct CodexFloatingHUDView: View {
             .lineLimit(1)
             .minimumScaleFactor(0.34)
             .allowsTightening(true)
-            .frame(width: 138, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .help(model.currentAccountEmail ?? "目前帳號尚未提供 Email")
     }
 
-    private var controlsColumn: some View {
-        VStack(alignment: .trailing, spacing: 1) {
-            HStack(spacing: 8) {
-                pasteShortcutButton
-                pasteAndSubmitShortcutButton
-            }
-            .frame(width: 152, height: 18, alignment: .trailing)
-
-            HStack(spacing: 8) {
-                detailsShortcutButton
-                updateShortcutButton
-            }
-            .frame(width: 152, height: 18, alignment: .trailing)
-
-            gitControlsRow
+    private func actionCardsRow(metrics: HUDMetrics) -> some View {
+        HStack(spacing: metrics.actionSpacing) {
+            pasteShortcutButton(metrics: metrics)
+            pasteAndSubmitShortcutButton(metrics: metrics)
+            detailsShortcutButton(metrics: metrics)
+            updateShortcutButton(metrics: metrics)
         }
-        .frame(width: 152, height: 55, alignment: .topTrailing)
+        .frame(width: metrics.contentWidth, height: metrics.actionHeight, alignment: .leading)
     }
 
-    private var detailsShortcutButton: some View {
+    private func footerRow(metrics: HUDMetrics) -> some View {
+        HStack(spacing: 0) {
+            HStack(spacing: metrics.footerSpacing * 0.55) {
+                Image(systemName: "envelope")
+                    .font(.system(size: 16 * metrics.factor, weight: .medium))
+                    .foregroundStyle(.primary.opacity(0.72))
+                accountEmailView
+            }
+            .frame(width: metrics.footerEmailWidth, alignment: .leading)
+
+            footerDivider(metrics: metrics)
+                .padding(.horizontal, metrics.footerDividerGap)
+            promptShortcutButton(.commit, metrics: metrics, width: metrics.footerCommitWidth, hovered: $isCommitHovered)
+            footerDivider(metrics: metrics)
+                .padding(.horizontal, metrics.footerDividerGap)
+            promptShortcutButton(.push, metrics: metrics, width: metrics.footerPushWidth, hovered: $isPushHovered)
+            footerDivider(metrics: metrics)
+                .padding(.horizontal, metrics.footerDividerGap)
+            promptShortcutButton(.commitPush, metrics: metrics, width: metrics.footerCommitPushWidth, hovered: $isCommitPushHovered)
+        }
+        .padding(.horizontal, metrics.footerSpacing * 0.7)
+        .frame(width: metrics.contentWidth, height: metrics.footerHeight, alignment: .leading)
+        .background(Color.primary.opacity(0.035), in: Capsule())
+        .overlay { Capsule().stroke(Color.primary.opacity(0.16), lineWidth: 0.8) }
+    }
+
+    private func footerDivider(metrics: HUDMetrics) -> some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.16))
+            .frame(width: 1, height: metrics.footerHeight * 0.55)
+            .allowsHitTesting(false)
+    }
+
+    private func detailsShortcutButton(metrics: HUDMetrics) -> some View {
         HUDActionCard(
             title: "詳細",
             systemImage: "rectangle.and.text.magnifyingglass",
@@ -1314,11 +1430,13 @@ private struct CodexFloatingHUDView: View {
             isDisabled: false,
             helpText: "開啟詳細面板",
             accessibilityLabel: "開啟詳細面板",
+            width: metrics.actionCardWidth,
+            height: metrics.actionHeight,
             isHovered: $isDetailsHovered
         )
     }
 
-    private var pasteShortcutButton: some View {
+    private func pasteShortcutButton(metrics: HUDMetrics) -> some View {
         HUDActionCard(
             title: "貼上",
             systemImage: "doc.on.clipboard",
@@ -1327,11 +1445,13 @@ private struct CodexFloatingHUDView: View {
             isDisabled: !layoutState.isCodexFocused,
             helpText: layoutState.isCodexFocused ? "貼上剪貼簿內容" : "切換回 Codex 後可貼上",
             accessibilityLabel: "貼上剪貼簿內容",
+            width: metrics.actionCardWidth,
+            height: metrics.actionHeight,
             isHovered: $isPasteHovered
         )
     }
 
-    private var pasteAndSubmitShortcutButton: some View {
+    private func pasteAndSubmitShortcutButton(metrics: HUDMetrics) -> some View {
         HUDActionCard(
             title: "貼上並送出",
             systemImage: "paperplane.fill",
@@ -1346,96 +1466,47 @@ private struct CodexFloatingHUDView: View {
             isDisabled: isPasteAndSubmitInFlight || !layoutState.isCodexFocused,
             helpText: layoutState.isCodexFocused ? "貼上並送出" : "切換回 Codex 後可貼上並送出",
             accessibilityLabel: "貼上並送出",
+            width: metrics.actionCardWidth,
+            height: metrics.actionHeight,
             isHovered: $isPasteAndSubmitHovered
         )
         .opacity(isPasteAndSubmitInFlight ? 0.45 : 1)
     }
 
-    private var gitControlsRow: some View {
-        HStack(spacing: 0) {
-            Button(action: showGitWorkspace) {
-                HStack(spacing: 2) {
-                    Text("<>")
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    Text("Git 工作區")
-                        .font(.system(size: 8.2, weight: .semibold, design: .rounded))
-                }
-                .foregroundStyle(.primary.opacity(gitCoordinator.isWorkspaceKnown ? 0.82 : 0.46))
-                .lineLimit(1)
-                .minimumScaleFactor(0.72)
-                .allowsTightening(true)
-                .frame(width: 72, height: 17)
-                .background(
-                    isGitHovered ? Color.primary.opacity(0.10) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 5, style: .continuous)
-                )
+    private func promptShortcutButton(
+        _ shortcut: CodexPromptShortcut,
+        metrics: HUDMetrics,
+        width: CGFloat,
+        hovered: Binding<Bool>
+    ) -> some View {
+        Button {
+            guard !isPromptShortcutInFlight,
+                  layoutState.isCodexFocused,
+                  !ClipboardPasteService.isTemporaryOperationInFlight else { return }
+            isPromptShortcutInFlight = true
+            promptShortcut(shortcut) { _ in
+                isPromptShortcutInFlight = false
             }
-            .buttonStyle(.plain)
-            .disabled(!gitCoordinator.isWorkspaceKnown)
-            .onHover { isGitHovered = $0 }
-            .help(gitCoordinator.isWorkspaceKnown ? "開啟 Git 工作區（\(gitCoordinator.compactStatusLabel)）" : "目前 Codex 工作區尚未解析")
-            .accessibilityLabel("Git 工作區")
-            .accessibilityValue(gitCoordinator.compactStatusLabel)
-
-            Button(action: commitShortcutAction) {
-                HStack(spacing: 2) {
-                    Image(systemName: "checkmark.seal")
-                        .font(.system(size: 10, weight: .semibold))
-                    Text("Commit")
-                        .font(.system(size: 8.2, weight: .semibold, design: .rounded))
-                }
-                .foregroundStyle(.primary.opacity(isCommitHovered ? 0.96 : 0.76))
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-                .allowsTightening(true)
-                .frame(width: 44, height: 17)
-                .background(isCommitHovered ? Color.primary.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+        } label: {
+            HStack(spacing: metrics.factor * 4) {
+                Image(systemName: shortcut == .commit ? "point.3.connected.trianglepath.dotted" : shortcut == .push ? "arrow.up" : "arrow.up.right.circle")
+                    .font(.system(size: metrics.factor * 17, weight: .semibold))
+                Text(shortcut.text)
+                    .font(.system(size: metrics.factor * 14, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.55)
+                    .allowsTightening(true)
             }
-            .buttonStyle(.plain)
-            .disabled(gitCoordinator.operationState.isBusy)
-            .onHover { isCommitHovered = $0 }
-            .help("Commit：開啟 Git 工作區並要求確認")
-            .accessibilityLabel("Commit")
-            .accessibilityValue(gitCoordinator.isWorkspaceKnown ? "開啟 Git 工作區並要求確認" : "工作區尚未解析")
-
-            Button(action: pushShortcutAction) {
-                HStack(spacing: 2) {
-                    Image(systemName: "arrow.up.circle")
-                        .font(.system(size: 10, weight: .semibold))
-                    Text("Push")
-                        .font(.system(size: 8.2, weight: .semibold, design: .rounded))
-                }
-                .foregroundStyle(.primary.opacity(isPushHovered ? 0.96 : 0.76))
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-                .allowsTightening(true)
-                .frame(width: 36, height: 17)
-                .background(isPushHovered ? Color.primary.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
-            }
-            .buttonStyle(.plain)
-            .disabled(gitCoordinator.operationState.isBusy)
-            .onHover { isPushHovered = $0 }
-            .help("Push：開啟 Git 工作區並要求確認")
-            .accessibilityLabel("Push")
-            .accessibilityValue(gitCoordinator.isWorkspaceKnown ? "開啟 Git 工作區並要求確認" : "工作區尚未解析")
+            .foregroundStyle(shortcut == .commit ? .orange : (shortcut == .push ? .blue : .green))
+            .frame(width: width, height: metrics.footerHeight)
         }
-        .frame(width: 152, height: 17, alignment: .trailing)
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .stroke(Color.primary.opacity(0.22), lineWidth: 0.8)
-        }
-        .overlay {
-            HStack(spacing: 0) {
-                Color.clear.frame(width: 72, height: 17)
-                Rectangle().fill(Color.primary.opacity(0.18)).frame(width: 1, height: 11)
-                Color.clear.frame(width: 43, height: 17)
-                Rectangle().fill(Color.primary.opacity(0.18)).frame(width: 1, height: 11)
-                Color.clear.frame(width: 35, height: 17)
-            }
-            .allowsHitTesting(false)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .buttonStyle(.plain)
+        .disabled(isPromptShortcutInFlight || !layoutState.isCodexFocused || ClipboardPasteService.isTemporaryOperationInFlight)
+        .opacity(isPromptShortcutInFlight ? 0.45 : 1)
+        .onHover { hovered.wrappedValue = $0 }
+        .help("將「\(shortcut.text)」貼入 Codex\(shortcut.submitAfterPaste ? "並送出" : "")")
+        .accessibilityLabel(shortcut.accessibilityLabel)
+        .accessibilityValue(shortcut.submitAfterPaste ? "貼上並送出一次" : "貼上但不送出")
     }
 
     @ViewBuilder
@@ -1462,7 +1533,7 @@ private struct CodexFloatingHUDView: View {
 
     private func hudPulseBorder(frameOpacity: Double, glowRadius: Double) -> some View {
         ZStack {
-            RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: layoutState.scaleLevel), style: .continuous)
                 .stroke(
                     model.menuBarColor.opacity(max(0.28, frameOpacity)),
                     lineWidth: frameOpacity > 0.48 ? 2.35 : 2.0
@@ -1471,7 +1542,7 @@ private struct CodexFloatingHUDView: View {
                     color: model.menuBarColor.opacity(min(0.9, frameOpacity * 1.18)),
                     radius: glowRadius
                 )
-            RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: layoutState.scaleLevel), style: .continuous)
                 .stroke(model.menuBarColor.opacity(min(0.62, frameOpacity * 0.74)), lineWidth: 1.4)
                 .blur(radius: max(2, glowRadius * 0.42))
         }
@@ -1513,7 +1584,7 @@ private struct CodexFloatingHUDView: View {
         }
     }
 
-    private var updateShortcutButton: some View {
+    private func updateShortcutButton(metrics: HUDMetrics) -> some View {
         HUDActionCard(
             title: "更新",
             systemImage: updateShortcutIcon,
@@ -1523,26 +1594,11 @@ private struct CodexFloatingHUDView: View {
             helpText: hasAvailableUpdate ? "有更新可用，開啟更新面板" : "檢查更新",
             accessibilityLabel: hasAvailableUpdate ? "有更新可用" : "檢查更新",
             iconColor: hasAvailableUpdate ? .orange : .primary,
+            width: metrics.actionCardWidth,
+            height: metrics.actionHeight,
             isHovered: $isUpdateHovered
         )
         .accessibilityValue(hasAvailableUpdate ? "開啟更新面板" : "檢查目前版本")
-    }
-
-    private func commitShortcutAction() {
-        // Opening the workspace is always safe. If the user has already
-        // selected files and entered a message, surface the existing
-        // confirmation in that panel; no Git mutation happens here.
-        if gitCoordinator.isWorkspaceKnown {
-            gitCoordinator.requestCommitConfirmation()
-        }
-        showGitWorkspace()
-    }
-
-    private func pushShortcutAction() {
-        if gitCoordinator.isWorkspaceKnown {
-            gitCoordinator.requestPushConfirmation()
-        }
-        showGitWorkspace()
     }
 
     @ViewBuilder
@@ -1575,6 +1631,18 @@ private struct CodexFloatingHUDView: View {
             }
             Button(action: resetPosition) {
                 Label("重設 HUD 位置", systemImage: "scope")
+            }
+            Menu("HUD 尺寸") {
+                ForEach(HUDScaleLevel.allCases, id: \.rawValue) { level in
+                    Button {
+                        setHUDScaleLevel(level)
+                    } label: {
+                        Label(
+                            "\(level.rawValue) · \(level.displayName)",
+                            systemImage: layoutState.scaleLevel == level ? "checkmark" : "circle"
+                        )
+                    }
+                }
             }
         }
 

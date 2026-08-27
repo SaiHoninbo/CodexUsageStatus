@@ -48,6 +48,10 @@ struct CodexUsageStatusTests {
             ("managed profile imports auth atomically", testManagedProfileImportsAuth),
             ("update version comparison", testUpdateVersionComparison),
             ("HUD context menu policy", testHUDContextMenuPolicy),
+            ("HUD scale levels", testHUDScaleLevels),
+            ("HUD C metrics", testHUDMetrics),
+            ("Codex prompt shortcuts", testCodexPromptShortcuts),
+            ("temporary clipboard guards", testClipboardTemporaryOperationPolicy),
             ("Git status parser and safety policies", testGitWorkspacePolicies),
             ("Git selected commit isolation", testGitSelectedCommitIsolation),
             ("Git untracked commit and sensitive boundaries", testGitUntrackedCommitAndSensitiveBoundaries),
@@ -1222,6 +1226,7 @@ struct CodexUsageStatusTests {
         let actions = HUDContextMenuPolicy.sections.flatMap { $0 }
         try expect(actions.contains(.refresh) && actions.contains(.showDetails), "status actions are present")
         try expect(actions.contains(.openCodex) && actions.contains(.resetPosition), "Codex actions are present")
+        try expect(actions.contains(.hudScale), "HUD scale action is present")
         try expect(actions.contains(.paste) && actions.contains(.pasteAndSubmit), "clipboard actions are distinct")
         try expect(actions.contains(.openGitWorkspace) && actions.contains(.refreshGitWorkspace), "git actions are present")
         try expect(actions.contains(.currentAccount) && actions.contains(.allAccounts) && actions.contains(.manageAccounts), "account actions are present")
@@ -1229,6 +1234,78 @@ struct CodexUsageStatusTests {
         try expect(HUDContextMenuPolicy.pasteActionsEnabled(isCodexFocused: true), "focused paste is enabled")
         try expect(!HUDContextMenuPolicy.pasteActionsEnabled(isCodexFocused: false), "unfocused paste is disabled")
         try expect(HUDContextMenuPolicy.sections.last == [.quit], "quit is isolated at the bottom")
+    }
+
+    private static func testHUDScaleLevels() throws {
+        try expect(HUDScaleLevel.allCases.count == 5, "five scale levels are available")
+        try expect(HUDScaleLevel.smaller2.scaleFactor == 0.8, "level 1 factor")
+        try expect(HUDScaleLevel.smaller1.scaleFactor == 0.9, "level 2 factor")
+        try expect(HUDScaleLevel.standard.scaleFactor == 1.0, "level 3 is standard")
+        try expect(HUDScaleLevel.larger1.scaleFactor == 1.15, "level 4 factor")
+        try expect(HUDScaleLevel.larger2.scaleFactor == 1.3, "level 5 factor")
+        try expect(HUDScaleLevel.standard.displayName == "標準", "level 3 label")
+        try expect(HUDScaleLevel.smaller2.displayName == "小 2 級", "level 1 label")
+        try expect(HUDScaleLevel.larger2.displayName == "大 2 級", "level 5 label")
+        let suiteName = "CodexUsageStatusTests.scale.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        HUDScaleLevel.larger2.persist(to: defaults)
+        try expect(HUDScaleLevel.load(from: defaults) == .larger2, "scale persists and reloads")
+        defaults.set(99, forKey: HUDScaleLevel.userDefaultsKey)
+        try expect(HUDScaleLevel.load(from: defaults) == .standard, "invalid scale falls back to standard")
+        defaults.set(3, forKey: HUDScaleLevel.userDefaultsKey)
+        defaults.removeObject(forKey: HUDScaleLevel.schemaVersionKey)
+        try expect(HUDScaleLevel.load(from: defaults) == .standard, "legacy standard remains level 3")
+        defaults.set(1, forKey: HUDScaleLevel.userDefaultsKey)
+        defaults.set(2, forKey: HUDScaleLevel.schemaVersionKey)
+        try expect(HUDScaleLevel.load(from: defaults) == .standard, "interim standard migrates to level 3")
+        defaults.set(3, forKey: HUDScaleLevel.userDefaultsKey)
+        defaults.set(2, forKey: HUDScaleLevel.schemaVersionKey)
+        try expect(HUDScaleLevel.load(from: defaults) == .larger2, "interim level 3 preserves 130 percent")
+        defaults.set(5, forKey: HUDScaleLevel.userDefaultsKey)
+        defaults.set(2, forKey: HUDScaleLevel.schemaVersionKey)
+        try expect(HUDScaleLevel.load(from: defaults) == .standard, "unknown interim level falls back")
+    }
+
+    private static func testHUDMetrics() throws {
+        let standard = HUDMetrics(scaleLevel: .standard)
+        try expect(standard.panelSize == CGSize(width: 520, height: 260), "level 3 panel size")
+        try expect(standard.contentWidth == 484, "content width follows outer padding")
+        try expect(standard.quotaColumnHeight == 108, "quota rows close to 108pt")
+        try expect(standard.verticalContentHeight == 224, "vertical content closes without hidden spacer")
+        try expect(standard.verticalContentHeight + standard.outerPadding * 2 == 260, "canonical height closes")
+        try expect(HUDMetrics(scaleLevel: .smaller2).panelSize == CGSize(width: 416, height: 208), "level 1 scales one layout")
+        try expect(HUDMetrics(scaleLevel: .larger2).panelSize == CGSize(width: 676, height: 338), "level 5 scales one layout")
+        try expect(standard.footerEmailWidth > 150, "footer leaves readable email width")
+    }
+
+    private static func testCodexPromptShortcuts() throws {
+        try expect(CodexPromptShortcut.commit.text == "Commit", "commit shortcut text")
+        try expect(CodexPromptShortcut.push.text == "Push", "push shortcut text")
+        try expect(CodexPromptShortcut.commitPush.text == "Commit Push", "combined shortcut text")
+        try expect(!CodexPromptShortcut.commit.submitAfterPaste, "commit does not submit")
+        try expect(!CodexPromptShortcut.push.submitAfterPaste, "push does not submit")
+        try expect(CodexPromptShortcut.commitPush.submitAfterPaste, "combined shortcut submits")
+    }
+
+    private static func testClipboardTemporaryOperationPolicy() throws {
+        try expect(ClipboardTemporaryOperationPolicy.canStart(isOperationInFlight: false), "idle operation can start")
+        try expect(!ClipboardTemporaryOperationPolicy.canStart(isOperationInFlight: true), "single-flight rejects overlap")
+        try expect(ClipboardTemporaryOperationPolicy.preparedTextWriteIsValid(
+            expectedText: "Commit", observedText: "Commit", beforeChangeCount: 326, afterChangeCount: 326
+        ), "setString may leave changeCount unchanged")
+        try expect(!ClipboardTemporaryOperationPolicy.preparedTextWriteIsValid(
+            expectedText: "Commit", observedText: "Push", beforeChangeCount: 326, afterChangeCount: 326
+        ), "wrong text fails closed")
+        try expect(!ClipboardTemporaryOperationPolicy.preparedTextWriteIsValid(
+            expectedText: "Commit", observedText: "Commit", beforeChangeCount: 326, afterChangeCount: 325
+        ), "counter regression fails closed")
+        try expect(ClipboardTemporaryOperationPolicy.canRestore(
+            expectedText: "Push", observedText: "Push", preparedChangeCount: 327, currentChangeCount: 327
+        ), "unchanged owned clipboard may restore")
+        try expect(!ClipboardTemporaryOperationPolicy.canRestore(
+            expectedText: "Push", observedText: "New user text", preparedChangeCount: 327, currentChangeCount: 328
+        ), "new user clipboard is never overwritten")
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {

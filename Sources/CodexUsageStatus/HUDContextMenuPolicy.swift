@@ -10,6 +10,7 @@ enum HUDContextMenuAction: String, CaseIterable {
     case showDetails
     case openCodex
     case resetPosition
+    case hudScale
     case paste
     case pasteAndSubmit
     case openGitWorkspace
@@ -32,6 +33,7 @@ enum HUDContextMenuAction: String, CaseIterable {
 enum HUDContextMenuSection: String, CaseIterable {
     case status
     case codex
+    case appearance
     case clipboard
     case git
     case accounts
@@ -42,7 +44,7 @@ enum HUDContextMenuSection: String, CaseIterable {
 enum HUDContextMenuPolicy {
     static let sections: [[HUDContextMenuAction]] = [
         [.refresh, .showDetails],
-        [.openCodex, .resetPosition],
+        [.openCodex, .resetPosition, .hudScale],
         [.paste, .pasteAndSubmit],
         [.openGitWorkspace, .refreshGitWorkspace],
         [.currentAccount, .allAccounts, .manageAccounts],
