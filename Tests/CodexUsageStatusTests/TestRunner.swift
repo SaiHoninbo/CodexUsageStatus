@@ -49,6 +49,7 @@ struct CodexUsageStatusTests {
             ("managed profile imports auth atomically", testManagedProfileImportsAuth),
             ("update version comparison", testUpdateVersionComparison),
             ("HUD context menu policy", testHUDContextMenuPolicy),
+            ("usage popover tabs and app version", testUsagePopoverTabsAndAppVersion),
             ("popover presentation appearance policy", testPopoverPresentationAppearancePolicy),
             ("HUD scale levels", testHUDScaleLevels),
             ("HUD C metrics", testHUDMetrics),
@@ -1238,6 +1239,16 @@ struct CodexUsageStatusTests {
         try expect(HUDContextMenuPolicy.sections.last == [.quit], "quit is isolated at the bottom")
     }
 
+    private static func testUsagePopoverTabsAndAppVersion() throws {
+        try expect(
+            UsagePopoverTab.allCases.map(\.rawValue) == ["overview", "usage", "history", "accountGit", "settings"],
+            "usage popover exposes stable content tabs"
+        )
+        try expect(UsagePopoverTab.settings.title == "設定", "settings has a dedicated tab")
+        try expect(UsagePopoverTab.accountGit.title == "帳號與 Git", "account and Git have a dedicated tab")
+        try expect(AppVersion.label == "v\(AppVersion.current)", "app version label is derived from bundle version")
+    }
+
     private static func testPopoverPresentationAppearancePolicy() throws {
         let appearance = PopoverPresentationPolicy.makeAppearance()
         try expect(
@@ -1247,6 +1258,12 @@ struct CodexUsageStatusTests {
         try expect(
             PopoverPresentationPolicy.reappliesAfterPopoverDidShow,
             "popover reapplies appearance after its window is created"
+        )
+        let popover = NSPopover()
+        PopoverPresentationPolicy.apply(to: popover)
+        try expect(
+            popover.appearance?.name == .darkAqua,
+            "popover appearance is pinned directly on the popover"
         )
     }
 

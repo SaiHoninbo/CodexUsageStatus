@@ -1586,6 +1586,7 @@ private struct CodexFloatingHUDView: View {
             }
             Label(model.menuBarTitle, systemImage: "gauge.with.dots.needle.33percent")
             Label(contextConnectionText, systemImage: contextConnectionIcon)
+            Label("版本 \(AppVersion.current)", systemImage: "number.circle")
             Divider()
             Button(action: refresh) {
                 Label("重新整理", systemImage: "arrow.clockwise")

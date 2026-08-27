@@ -10,91 +10,25 @@ struct UsagePopoverView: View {
     let resetHUDPosition: () -> Void
     let quit: () -> Void
 
-    @State private var showSettings = false
-    @State private var showSyncSettings = false
     @State private var showClearHistoryConfirmation = false
     @State private var showResetCreditConfirmation = false
     @State private var showRemoveProfileConfirmation = false
-    @State private var showAdvancedDetails = false
+    @State private var selectedTab: UsagePopoverTab = .overview
     @State private var profilePendingRemoval: AccountProfile?
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    header
-                    accountSelector
-                    quotaSummarySection
-                    updateSection
-                    quickActions
-                    Divider()
-
-                    DisclosureGroup(isExpanded: $showAdvancedDetails) {
-                        VStack(alignment: .leading, spacing: 16) {
-                            accountManagementSection
-                            gitWorkspaceSection.id("gitWorkspace")
-                            if model.accountScope == .current {
-                                accountHealthSection
-                                turnActivitySection
-                            } else {
-                                Text("全部帳號模式：帳號健康、Reset Credit 與即時 Turn 僅適用目前帳號。")
-                                    .font(.body)
-                                    .foregroundStyle(.secondary)
-                            }
-                            if model.accountScope == .all {
-                                aggregateQuotaSection
-                            } else {
-                                windowSection(title: "Primary window", window: model.snapshot?.primary)
-                                windowSection(title: "Secondary window", window: model.snapshot?.secondary)
-                                if let spend = model.snapshot?.individualLimit {
-                                    spendControlSection(spend)
-                                }
-                            }
-                            tokenActivitySection
-                            resetCreditSection
-                            historySection
-                            settingsSection
-                            syncSettingsSection
-                            metadataSection
-                            actions
-                        }
-                        .padding(.top, 10)
-                    } label: {
-                        HStack {
-                            Label("更多資訊", systemImage: "ellipsis.circle")
-                                .font(.headline)
-                            Spacer()
-                            Text(showAdvancedDetails ? "收起" : "帳號、Git、歷史與設定")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .padding(20)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                header
+                tabBar
+                tabContent
             }
-            .frame(width: 430, height: 700)
-            .onAppear {
-                guard detailsRouter.destination == .gitWorkspace else { return }
-                showAdvancedDetails = true
-                DispatchQueue.main.async {
-                    proxy.scrollTo("gitWorkspace", anchor: .top)
-                }
-            }
-            .onChange(of: detailsRouter.destination) { _, destination in
-                guard destination == .gitWorkspace else { return }
-                showAdvancedDetails = true
-                DispatchQueue.main.async {
-                    proxy.scrollTo("gitWorkspace", anchor: .top)
-                }
-            }
-            .onChange(of: detailsRouter.requestGeneration) { _, _ in
-                guard detailsRouter.destination == .gitWorkspace else { return }
-                showAdvancedDetails = true
-                DispatchQueue.main.async {
-                    proxy.scrollTo("gitWorkspace", anchor: .top)
-                }
-            }
+            .padding(20)
         }
+        .frame(width: 430, height: 700)
+        .onAppear { syncSelectedTabWithRoute() }
+        .onChange(of: detailsRouter.destination) { _, _ in syncSelectedTabWithRoute() }
+        .onChange(of: detailsRouter.requestGeneration) { _, _ in syncSelectedTabWithRoute() }
         .confirmationDialog("確認 Git 操作", isPresented: Binding(
             get: { gitCoordinator.confirmation != nil },
             set: { if !$0 { gitCoordinator.cancelConfirmation() } }
@@ -151,11 +85,118 @@ struct UsagePopoverView: View {
         }
     }
 
+    private var tabBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(UsagePopoverTab.allCases) { tab in
+                    Button {
+                        selectedTab = tab
+                    } label: {
+                        Label(tab.title, systemImage: tab.systemImage)
+                            .font(.caption.weight(.semibold))
+                            .lineLimit(1)
+                            .padding(.horizontal, 9)
+                            .frame(minHeight: 30)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(selectedTab == tab ? Color.white : Color.primary)
+                    .background(
+                        selectedTab == tab ? Color.accentColor : Color.secondary.opacity(0.12),
+                        in: Capsule()
+                    )
+                    .accessibilityAddTraits(selectedTab == tab ? .isSelected : [])
+                }
+            }
+            .padding(3)
+        }
+        .background(Color.secondary.opacity(0.08), in: Capsule())
+    }
+
+    @ViewBuilder
+    private var tabContent: some View {
+        switch selectedTab {
+        case .overview:
+            overviewTab
+        case .usage:
+            usageTab
+        case .history:
+            historyTab
+        case .accountGit:
+            accountGitTab
+        case .settings:
+            settingsTab
+        }
+    }
+
+    private var overviewTab: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            accountSelector
+            quotaSummarySection
+            updateSection
+            quickActions
+        }
+    }
+
+    private var usageTab: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if model.accountScope == .all {
+                aggregateQuotaSection
+            } else {
+                windowSection(title: "Primary window", window: model.snapshot?.primary)
+                windowSection(title: "Secondary window", window: model.snapshot?.secondary)
+                if let spend = model.snapshot?.individualLimit {
+                    spendControlSection(spend)
+                }
+            }
+            tokenActivitySection
+            resetCreditSection
+        }
+    }
+
+    private var historyTab: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            historySection
+        }
+    }
+
+    private var accountGitTab: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            accountManagementSection
+            gitWorkspaceSection
+            if model.accountScope == .current {
+                accountHealthSection
+                turnActivitySection
+            } else {
+                Text("全部帳號模式：帳號健康與即時 Turn 僅適用目前帳號。")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var settingsTab: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            settingsSection
+            syncSettingsSection
+            metadataSection
+            actions
+        }
+    }
+
+    private func syncSelectedTabWithRoute() {
+        selectedTab = detailsRouter.destination == .gitWorkspace ? .accountGit : .overview
+    }
+
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Codex 用量")
-                    .font(.title3.weight(.semibold))
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("Codex 用量")
+                        .font(.title3.weight(.semibold))
+                    Text(AppVersion.label)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
                 Text(model.accountDisplayName)
                     .font(.body)
                     .foregroundStyle(.secondary)
@@ -477,7 +518,9 @@ struct UsagePopoverView: View {
     }
 
     private var accountManagementSection: some View {
-        DisclosureGroup("帳號管理") {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("帳號管理", systemImage: "person.2")
+                .font(.subheadline.weight(.semibold))
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(model.accountProfiles) { profile in
                     HStack(spacing: 8) {
@@ -1071,7 +1114,9 @@ struct UsagePopoverView: View {
     }
 
     private var settingsSection: some View {
-        DisclosureGroup("通知設定", isExpanded: $showSettings) {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("通知設定", systemImage: "bell.badge")
+                .font(.subheadline.weight(.semibold))
             VStack(alignment: .leading, spacing: 8) {
                 Toggle("啟用用量通知", isOn: Binding(
                     get: { model.notificationsEnabled },
@@ -1153,11 +1198,12 @@ struct UsagePopoverView: View {
             }
             .padding(.top, 6)
         }
-        .font(.subheadline.weight(.semibold))
     }
 
     private var syncSettingsSection: some View {
-        DisclosureGroup("同步設定", isExpanded: $showSyncSettings) {
+        VStack(alignment: .leading, spacing: 9) {
+            Label("同步設定", systemImage: "arrow.triangle.2.circlepath")
+                .font(.subheadline.weight(.semibold))
             VStack(alignment: .leading, spacing: 9) {
                 syncIntervalPicker(
                     title: "Quota／Primary／Secondary",
@@ -1190,7 +1236,6 @@ struct UsagePopoverView: View {
             }
             .padding(.top, 6)
         }
-        .font(.subheadline.weight(.semibold))
     }
 
     private func syncIntervalPicker(

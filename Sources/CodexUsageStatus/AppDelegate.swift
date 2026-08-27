@@ -102,13 +102,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // click. Pin the content and popover window to the same dark
             // appearance before showing it so the surface does not change
             // after a second click inside the panel.
-            if let popoverView = popover.contentViewController?.view {
-                PopoverPresentationPolicy.apply(to: popoverView)
-            }
+            PopoverPresentationPolicy.apply(to: popover)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            if let popoverView = popover.contentViewController?.view {
-                PopoverPresentationPolicy.apply(to: popoverView)
-            }
+            PopoverPresentationPolicy.apply(to: popover)
             installOutsideClickMonitor()
             model.refresh()
         }
@@ -200,11 +196,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 extension AppDelegate: NSPopoverDelegate {
     func popoverDidShow(_ notification: Notification) {
         guard PopoverPresentationPolicy.reappliesAfterPopoverDidShow,
-              let popoverView = popover.contentViewController?.view else { return }
+              popover.contentViewController?.view != nil else { return }
         // NSPopover creates its backing window during show(). Reapply after
         // the delegate callback so the real window, rather than a pre-show
         // view with no window, receives the stable appearance on first open.
-        PopoverPresentationPolicy.apply(to: popoverView)
+        PopoverPresentationPolicy.apply(to: popover)
     }
 
     func popoverDidClose(_ notification: Notification) {

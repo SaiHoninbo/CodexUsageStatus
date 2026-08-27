@@ -18,4 +18,16 @@ enum PopoverPresentationPolicy {
         view.appearance = appearance
         view.window?.appearance = appearance
     }
+
+    static func apply(to popover: NSPopover) {
+        let appearance = makeAppearance()
+        // NSPopover owns the appearance used to create its backing window.
+        // Pin it directly; changing only the content view can be overridden
+        // by the popover's default vibrant-light effective appearance.
+        popover.appearance = appearance
+        if let popoverView = popover.contentViewController?.view {
+            popoverView.appearance = appearance
+            popoverView.window?.appearance = appearance
+        }
+    }
 }
