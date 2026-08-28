@@ -1343,12 +1343,11 @@ struct CodexUsageStatusTests {
         try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller1).panelSize, CGSize(width: 374.4, height: 187.2), "level 2 scales one layout")
         try expectSizeApproximately(HUDMetrics(scaleLevel: .larger1).panelSize, CGSize(width: 478.4, height: 239.2), "level 4 scales one layout")
         try expectSizeApproximately(HUDMetrics(scaleLevel: .larger2).panelSize, CGSize(width: 540.8, height: 270.4), "level 5 scales one layout")
-        try expect(standard.footerEmailWidth >= 150, "footer reserves a readable email width")
-        try expect(standard.footerControlsWidth <= 224, "footer controls stay within the compact action budget")
+        try expect(standard.footerButtonWidth > 118, "footer buttons retain readable widths")
+        try expect(standard.footerControlsWidth <= standard.contentWidth, "footer buttons fit content width")
         for level in HUDScaleLevel.allCases {
             let metrics = HUDMetrics(scaleLevel: level)
-            let occupiedFooterWidth = metrics.footerEmailWidth
-                + metrics.footerControlsWidth
+            let occupiedFooterWidth = metrics.footerControlsWidth
                 + (metrics.footerHorizontalPadding * 2)
             try expect(occupiedFooterWidth <= metrics.contentWidth + 0.01,
                        "footer closes without overlap at every scale level")

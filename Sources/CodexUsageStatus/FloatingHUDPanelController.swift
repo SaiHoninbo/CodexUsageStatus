@@ -1349,19 +1349,6 @@ private struct CodexFloatingHUDView: View {
         }
     }
 
-    private func accountEmailView(metrics: HUDMetrics) -> some View {
-        Text(verbatim: model.currentAccountEmail ?? "未提供 Email")
-            .font(.system(size: 12.5 * metrics.factor, weight: .medium, design: .rounded))
-            .foregroundStyle(.primary.opacity(model.currentAccountEmail == nil ? 0.52 : 0.9))
-            .lineLimit(1)
-            .minimumScaleFactor(0.62)
-            .allowsTightening(true)
-            .truncationMode(.middle)
-            .layoutPriority(1)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .help(model.currentAccountEmail ?? "目前帳號尚未提供 Email")
-    }
-
     private func actionCardsRow(metrics: HUDMetrics) -> some View {
         HStack(spacing: metrics.actionSpacing) {
             pasteShortcutButton(metrics: metrics)
@@ -1373,36 +1360,16 @@ private struct CodexFloatingHUDView: View {
     }
 
     private func footerRow(metrics: HUDMetrics) -> some View {
-        HStack(spacing: 0) {
-            HStack(spacing: metrics.footerSpacing * 0.55) {
-                Image(systemName: "envelope")
-                    .font(.system(size: 16 * metrics.factor, weight: .medium))
-                    .foregroundStyle(.primary.opacity(0.72))
-                accountEmailView(metrics: metrics)
-            }
-            .frame(width: metrics.footerEmailWidth, alignment: .leading)
-
-            footerDivider(metrics: metrics)
-                .padding(.horizontal, metrics.footerDividerGap)
-            promptShortcutButton(.commit, metrics: metrics, width: metrics.footerCommitWidth, hovered: $isCommitHovered)
-            footerDivider(metrics: metrics)
-                .padding(.horizontal, metrics.footerDividerGap)
-            promptShortcutButton(.push, metrics: metrics, width: metrics.footerPushWidth, hovered: $isPushHovered)
-            footerDivider(metrics: metrics)
-                .padding(.horizontal, metrics.footerDividerGap)
-            promptShortcutButton(.commitPush, metrics: metrics, width: metrics.footerCommitPushWidth, hovered: $isCommitPushHovered)
+        HStack(spacing: metrics.footerButtonSpacing) {
+            promptShortcutButton(.commit, metrics: metrics, width: metrics.footerButtonWidth, hovered: $isCommitHovered)
+            promptShortcutButton(.push, metrics: metrics, width: metrics.footerButtonWidth, hovered: $isPushHovered)
+            promptShortcutButton(.commitPush, metrics: metrics, width: metrics.footerButtonWidth, hovered: $isCommitPushHovered)
         }
+        .frame(width: metrics.footerControlsWidth, height: metrics.footerHeight, alignment: .leading)
         .padding(.horizontal, metrics.footerHorizontalPadding)
         .frame(width: metrics.contentWidth, height: metrics.footerHeight, alignment: .leading)
         .background(Color.primary.opacity(0.035), in: Capsule())
         .overlay { Capsule().stroke(Color.primary.opacity(0.16), lineWidth: 0.8) }
-    }
-
-    private func footerDivider(metrics: HUDMetrics) -> some View {
-        Rectangle()
-            .fill(Color.primary.opacity(0.16))
-            .frame(width: 1, height: metrics.footerHeight * 0.55)
-            .allowsHitTesting(false)
     }
 
     private func detailsShortcutButton(metrics: HUDMetrics) -> some View {

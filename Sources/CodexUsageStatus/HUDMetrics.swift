@@ -21,13 +21,7 @@ struct HUDMetrics: Equatable {
     static let canonicalActionSpacing: CGFloat = 8
     static let canonicalFooterSpacing: CGFloat = 9.6
     static let canonicalFooterHorizontalPaddingMultiplier: CGFloat = 0.65
-    // Keep the three prompt shortcuts at their established readable widths;
-    // recover email space by tightening only the decorative divider insets.
-    static let canonicalFooterCommitWidth: CGFloat = 64
-    static let canonicalFooterPushWidth: CGFloat = 54.4
-    static let canonicalFooterCommitPushWidth: CGFloat = 92.8
-    static let canonicalFooterDividerGap: CGFloat = 1.5
-    static let canonicalFooterEmailMinimumWidth: CGFloat = 150
+    static let canonicalFooterButtonSpacing: CGFloat = 4
     static let canonicalCornerRadius: CGFloat = 19.2
 
     init(scaleLevel: HUDScaleLevel = .standard) {
@@ -53,20 +47,14 @@ struct HUDMetrics: Equatable {
     var footerHorizontalPadding: CGFloat {
         footerSpacing * Self.canonicalFooterHorizontalPaddingMultiplier
     }
+    var footerButtonSpacing: CGFloat { Self.canonicalFooterButtonSpacing * factor }
     var cornerRadius: CGFloat { Self.canonicalCornerRadius * factor }
-    var footerCommitWidth: CGFloat { Self.canonicalFooterCommitWidth * factor }
-    var footerPushWidth: CGFloat { Self.canonicalFooterPushWidth * factor }
-    var footerCommitPushWidth: CGFloat { Self.canonicalFooterCommitPushWidth * factor }
-    var footerDividerGap: CGFloat { Self.canonicalFooterDividerGap * factor }
+    var footerButtonWidth: CGFloat {
+        max(0, (contentWidth - (footerHorizontalPadding * 2) - (footerButtonSpacing * 2)) / 3)
+    }
     var footerControlsWidth: CGFloat {
-        footerCommitWidth + footerPushWidth + footerCommitPushWidth
-            + (3 * 1) + (6 * footerDividerGap)
+        footerButtonWidth * 3 + (footerButtonSpacing * 2)
     }
-    var footerEmailWidth: CGFloat {
-        max(Self.canonicalFooterEmailMinimumWidth * factor,
-            contentWidth - footerControlsWidth - (footerHorizontalPadding * 2))
-    }
-
     var contentWidth: CGFloat {
         max(0, panelSize.width - (outerPadding * 2))
     }
