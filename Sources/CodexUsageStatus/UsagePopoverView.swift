@@ -163,8 +163,8 @@ struct UsagePopoverView: View {
             if model.accountScope == .all {
                 aggregateQuotaSection
             } else {
-                windowSection(title: "Primary window", window: model.snapshot?.primary)
-                windowSection(title: "Secondary window", window: model.snapshot?.secondary)
+                windowSection(title: "5 小時", window: quotaWindow(.fiveHour))
+                windowSection(title: "7 天", window: quotaWindow(.sevenDay))
                 if let spend = model.snapshot?.individualLimit {
                     spendControlSection(spend)
                 }
@@ -253,8 +253,8 @@ struct UsagePopoverView: View {
             }
 
             if model.accountScope == .current {
-                quotaSummaryRow(title: "5 小時", window: model.snapshot?.primary, accent: .orange)
-                quotaSummaryRow(title: "7 天", window: model.snapshot?.secondary, accent: .blue)
+                quotaSummaryRow(title: "5 小時", window: quotaWindow(.fiveHour), accent: .orange)
+                quotaSummaryRow(title: "7 天", window: quotaWindow(.sevenDay), accent: .blue)
             } else {
                 let summaries = model.profileQuotaSummaries()
                 if summaries.isEmpty {
@@ -290,6 +290,13 @@ struct UsagePopoverView: View {
         }
         .padding(14)
         .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func quotaWindow(_ kind: HUDQuotaWindowKind) -> RateLimitWindow? {
+        let windows = [model.snapshot?.primary, model.snapshot?.secondary].compactMap { $0 }
+        let matches = windows.filter { $0.windowDurationMins == kind.durationMins }
+        guard matches.count == 1 else { return nil }
+        return matches[0]
     }
 
     @ViewBuilder

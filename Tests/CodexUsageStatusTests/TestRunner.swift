@@ -510,6 +510,39 @@ struct CodexUsageStatusTests {
             HUDVisibilityPolicy.cachedPresentation(currentProfileID: nil, cached: cachedA) == nil,
             "an unknown profile identity must not reuse cached quota"
         )
+        let sparseLive = HUDDualQuotaPresentation(
+            profileID: profileA,
+            fiveHour: nil,
+            sevenDay: HUDQuotaWindowPresentation(
+                kind: .sevenDay,
+                durationMins: 10_080,
+                label: "7 天",
+                remainingPercent: 98,
+                resetsAt: 3_000,
+                resetDescription: "2天"
+            )
+        )
+        let mergedSparse = HUDVisibilityPolicy.mergedPresentation(
+            currentProfileID: profileA,
+            live: sparseLive,
+            cached: cachedA
+        )
+        try expect(
+            mergedSparse?.fiveHour == cachedA.fiveHour,
+            "a sparse live response must retain the cached 5-hour window"
+        )
+        try expect(
+            mergedSparse?.sevenDay == sparseLive.sevenDay,
+            "a sparse live response must replace the cached 7-day window"
+        )
+        try expect(
+            HUDVisibilityPolicy.mergedPresentation(
+                currentProfileID: profileB,
+                live: sparseLive,
+                cached: cachedA
+            ) == nil,
+            "a profile mismatch must reject both live and cached quota"
+        )
         let timestamp = Date(timeIntervalSince1970: 1_000)
         try expect(
             HUDVisibilityPolicy.presentationSnapshot(
@@ -649,6 +682,16 @@ struct CodexUsageStatusTests {
         let onlyFivePresentation = HUDQuotaPresentationPolicy.make(snapshot: onlyFive, profileID: profileID, now: now)
         try expect(onlyFivePresentation?.fiveHour != nil, "available 5-hour row remains present")
         try expect(onlyFivePresentation?.sevenDay == nil, "missing 7-day row is unavailable")
+
+        let onlySeven = UsageSnapshot(
+            limitId: nil, limitName: nil, planType: nil,
+            primary: RateLimitWindow(usedPercent: 2, resetsAt: sevenReset, windowDurationMins: 10_080),
+            secondary: nil, individualLimit: nil,
+            rateLimitReachedType: nil, spendControlReached: nil, receivedAt: now
+        )
+        let onlySevenPresentation = HUDQuotaPresentationPolicy.make(snapshot: onlySeven, profileID: profileID, now: now)
+        try expect(onlySevenPresentation?.fiveHour == nil, "a 7-day window must never populate the 5-hour row")
+        try expect(onlySevenPresentation?.sevenDay?.remainingPercent == 98, "available 7-day row remains present")
 
         let unknown = RateLimitWindow(usedPercent: 50, resetsAt: fiveReset, windowDurationMins: 60)
         let unknownSnapshot = UsageSnapshot(

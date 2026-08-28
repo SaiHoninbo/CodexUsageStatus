@@ -856,7 +856,7 @@ private struct HUDQuotaRow: View {
     }
 
     private var resetText: String {
-        presentation?.resetDescription ?? "更新中"
+        presentation?.resetDescription ?? (isUpdating ? "更新中" : "未提供")
     }
 
     private var cornerRadius: CGFloat {
@@ -915,7 +915,7 @@ private struct HUDQuotaRow: View {
                     ? $0.resetDescription
                     : "\($0.resetDescription)後重置"
                 return "剩餘 \($0.remainingPercent)%，\(reset)"
-            } ?? "資料更新中"
+            } ?? (isUpdating ? "資料更新中" : "此帳號未提供此窗口")
         )
     }
 }
@@ -1867,8 +1867,9 @@ private struct CodexFloatingHUDView: View {
     }
 
     private var displayedPresentation: HUDDualQuotaPresentation? {
-        livePresentation ?? HUDVisibilityPolicy.cachedPresentation(
+        HUDVisibilityPolicy.mergedPresentation(
             currentProfileID: model.currentProfileID,
+            live: livePresentation,
             cached: presentationCache
         )
     }
@@ -1880,7 +1881,7 @@ private struct CodexFloatingHUDView: View {
         ]
         let quotaText = rows.map { row in
             guard let presentation = row.presentation else {
-                return "\(row.label)窗口，資料更新中"
+                return "\(row.label)窗口，\(isQuotaUpdating ? "資料更新中" : "此帳號未提供")"
             }
             let reset = presentation.resetDescription == "更新中" || presentation.resetDescription == "已重置"
                 ? presentation.resetDescription
@@ -1895,11 +1896,15 @@ private struct CodexFloatingHUDView: View {
             snapshot: model.snapshot,
             profileID: model.currentProfileID,
             now: model.currentDate
+        ), let merged = HUDVisibilityPolicy.mergedPresentation(
+            currentProfileID: model.currentProfileID,
+            live: presentation,
+            cached: presentationCache
         ), let cached = HUDVisibilityPolicy.presentationSnapshot(
             currentProfileID: model.currentProfileID,
             trackedProfileID: trackedProfileID,
             lastUpdated: model.lastUpdated,
-            presentation: presentation
+            presentation: merged
         ) else { return }
         hasPresentedHUD = true
         presentationCache = cached

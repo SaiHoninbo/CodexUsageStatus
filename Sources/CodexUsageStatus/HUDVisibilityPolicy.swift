@@ -82,6 +82,29 @@ enum HUDVisibilityPolicy {
         return cached
     }
 
+    /// Combine a partial live response with the last presentation for the
+    /// same account. App Server responses can briefly omit one recognized
+    /// window while refreshing; the available live window must win, while a
+    /// missing window may retain its profile-bound value until it is refreshed.
+    /// A profile mismatch is never eligible for this merge.
+    static func mergedPresentation(
+        currentProfileID: UUID?,
+        live: HUDDualQuotaPresentation?,
+        cached: HUDDualQuotaPresentation?
+    ) -> HUDDualQuotaPresentation? {
+        guard let currentProfileID else { return nil }
+        let live = live?.profileID == currentProfileID ? live : nil
+        let cached = cached?.profileID == currentProfileID ? cached : nil
+
+        guard let live else { return cached }
+        guard let cached else { return live }
+        return HUDDualQuotaPresentation(
+            profileID: currentProfileID,
+            fiveHour: live.fiveHour ?? cached.fiveHour,
+            sevenDay: live.sevenDay ?? cached.sevenDay
+        )
+    }
+
     static func presentationSnapshot(
         currentProfileID: UUID?,
         trackedProfileID: UUID?,
