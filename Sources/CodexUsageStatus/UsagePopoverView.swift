@@ -2,6 +2,14 @@ import AppKit
 import Charts
 import SwiftUI
 
+private struct PopoverContentHeightPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 struct UsagePopoverView: View {
     @ObservedObject var model: UsageViewModel
     @ObservedObject var gitCoordinator: GitWorkspaceCoordinator
@@ -9,24 +17,37 @@ struct UsagePopoverView: View {
     let openCodex: () -> Void
     let resetHUDPosition: () -> Void
     let quit: () -> Void
+    let onContentHeightChange: ((CGFloat) -> Void)?
 
     @State private var showClearHistoryConfirmation = false
     @State private var showResetCreditConfirmation = false
     @State private var showRemoveProfileConfirmation = false
     @State private var selectedTab: UsagePopoverTab = .overview
     @State private var profilePendingRemoval: AccountProfile?
+    @State private var measuredContentHeight: CGFloat = 0
 
     var body: some View {
-        ScrollView {
+        ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 16) {
                 header
                 tabBar
                 tabContent
             }
             .padding(20)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear
+                        .preference(key: PopoverContentHeightPreferenceKey.self, value: proxy.size.height)
+                }
+            }
         }
-        .frame(width: 430, height: 700)
+        .frame(width: 430)
         .onAppear { syncSelectedTabWithRoute() }
+        .onPreferenceChange(PopoverContentHeightPreferenceKey.self) { height in
+            guard height > 0, abs(height - measuredContentHeight) > 0.5 else { return }
+            measuredContentHeight = height
+            onContentHeightChange?(height)
+        }
         .onChange(of: detailsRouter.destination) { _, _ in syncSelectedTabWithRoute() }
         .onChange(of: detailsRouter.requestGeneration) { _, _ in syncSelectedTabWithRoute() }
         .confirmationDialog("確認 Git 操作", isPresented: Binding(
@@ -426,8 +447,8 @@ struct UsagePopoverView: View {
             if !release.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Text(release.notes)
                     .font(.subheadline)
-                    .lineLimit(3)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if let downloadedURL {
                 Text("已驗證：\(downloadedURL.deletingLastPathComponent().lastPathComponent)")
@@ -737,7 +758,6 @@ struct UsagePopoverView: View {
                 if let content = model.activeTurn.content, !content.isEmpty {
                     Text(content)
                         .font(.caption)
-                        .lineLimit(6)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if let error = model.activeTurn.errorMessage {

@@ -57,7 +57,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 detailsRouter: detailsRouter,
                 openCodex: { [weak self] in self?.openCodex() },
                 resetHUDPosition: { [weak self] in self?.floatingHUD?.resetPosition() },
-                quit: { NSApp.terminate(nil) }
+                quit: { NSApp.terminate(nil) },
+                onContentHeightChange: { [weak self] height in
+                    self?.resizePopover(toFitContentHeight: height)
+                }
             )
         )
 
@@ -191,6 +194,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let appPath = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }) {
             NSWorkspace.shared.open(URL(fileURLWithPath: appPath))
         }
+    }
+
+    private func resizePopover(toFitContentHeight measuredHeight: CGFloat) {
+        guard let popover, measuredHeight.isFinite, measuredHeight > 0 else { return }
+
+        let minimumHeight: CGFloat = 280
+        let visibleFrame = popover.contentViewController?.view.window?.screen?.visibleFrame
+            ?? NSScreen.main?.visibleFrame
+        // Leave a small margin for the menu bar/dock.  If a tab is taller than
+        // the display, the hidden-indicator ScrollView remains the safe
+        // fallback rather than allowing the popover to extend off-screen.
+        let maximumHeight = max(minimumHeight, (visibleFrame?.height ?? 900) - 64)
+        let targetHeight = min(max(measuredHeight, minimumHeight), maximumHeight)
+        guard abs(popover.contentSize.height - targetHeight) > 1 else { return }
+        popover.contentSize = NSSize(width: 430, height: ceil(targetHeight))
     }
 }
 
