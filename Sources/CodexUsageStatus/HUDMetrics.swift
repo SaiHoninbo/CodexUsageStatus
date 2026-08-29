@@ -8,11 +8,13 @@ struct HUDMetrics: Equatable {
     let scaleLevel: HUDScaleLevel
 
     // The current smallest C-layout HUD is the user's 100% reference.
-    // Larger/smaller levels are derived from this 416x208 base as a single
+    // Larger/smaller levels are derived from this 416x240 base as a single
     // proportional layout, rather than treating the old 520x260 draft as
     // the standard.
-    static let canonicalPanelSize = CGSize(width: 416, height: 208)
+    static let canonicalPanelSize = CGSize(width: 416, height: 240)
     static let canonicalOuterPadding: CGFloat = 14.4
+    static let canonicalHeaderHeight: CGFloat = 24
+    static let canonicalHeaderGap: CGFloat = 8
     static let canonicalQuotaRowHeight: CGFloat = 40
     static let canonicalQuotaGap: CGFloat = 6.4
     static let canonicalSectionGap: CGFloat = 11.2
@@ -37,6 +39,8 @@ struct HUDMetrics: Equatable {
                height: Self.canonicalPanelSize.height * factor)
     }
     var outerPadding: CGFloat { Self.canonicalOuterPadding * factor }
+    var headerHeight: CGFloat { Self.canonicalHeaderHeight * factor }
+    var headerGap: CGFloat { Self.canonicalHeaderGap * factor }
     var quotaRowHeight: CGFloat { Self.canonicalQuotaRowHeight * factor }
     var quotaGap: CGFloat { Self.canonicalQuotaGap * factor }
     var sectionGap: CGFloat { Self.canonicalSectionGap * factor }
@@ -68,6 +72,6 @@ struct HUDMetrics: Equatable {
     }
 
     var verticalContentHeight: CGFloat {
-        quotaColumnHeight + sectionGap + actionHeight + sectionGap + footerHeight
+        headerHeight + headerGap + quotaColumnHeight + sectionGap + actionHeight + sectionGap + footerHeight
     }
 }

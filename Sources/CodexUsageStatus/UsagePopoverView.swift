@@ -42,6 +42,8 @@ struct UsagePopoverView: View {
             }
         }
         .frame(width: 430)
+        .foregroundStyle(HUDColorPalette.primaryText)
+        .preferredColorScheme(.light)
         .onAppear { syncSelectedTabWithRoute() }
         .onPreferenceChange(PopoverContentHeightPreferenceKey.self) { height in
             guard height > 0, abs(height - measuredContentHeight) > 0.5 else { return }
@@ -120,9 +122,9 @@ struct UsagePopoverView: View {
                             .frame(minHeight: 30)
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(selectedTab == tab ? Color.white : Color.primary)
+                    .foregroundStyle(selectedTab == tab ? Color.white : HUDColorPalette.primaryText)
                     .background(
-                        selectedTab == tab ? Color.accentColor : Color.secondary.opacity(0.12),
+                        selectedTab == tab ? Color.accentColor : Color.black.opacity(0.08),
                         in: Capsule()
                     )
                     .accessibilityAddTraits(selectedTab == tab ? .isSelected : [])

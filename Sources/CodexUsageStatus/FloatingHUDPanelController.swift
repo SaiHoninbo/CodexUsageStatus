@@ -6,8 +6,8 @@ import SwiftUI
 private enum FloatingHUDLayout {
     // C layout: both placements use one scalable panel geometry. Placement
     // changes the anchor only; it never creates a second size contract.
-    static let bottomRightSize = NSSize(width: 416, height: 208)
-    static let topRightSize = NSSize(width: 416, height: 208)
+    static let bottomRightSize = NSSize(width: 416, height: 240)
+    static let topRightSize = NSSize(width: 416, height: 240)
     // Sizes used by the previous shipped HUD builds. These are only used
     // while migrating persisted screen anchors; new anchors are size-agnostic.
     static let previousWideSize = NSSize(width: 360, height: 60)
@@ -836,8 +836,8 @@ private struct HUDQuotaRow: View {
 
     private var accent: Color {
         switch kind {
-        case .fiveHour: return .orange
-        case .sevenDay: return .blue
+        case .fiveHour: return HUDColorPalette.fiveHour
+        case .sevenDay: return HUDColorPalette.sevenDay
         }
     }
 
@@ -883,9 +883,9 @@ private struct HUDQuotaRow: View {
                     Text(resetText)
                 }
                 .font(.system(size: height * 0.38, weight: .medium, design: .rounded))
-                .foregroundStyle(.primary.opacity(0.86))
+                .foregroundStyle(HUDColorPalette.secondaryText)
             }
-            .foregroundStyle(.primary.opacity(0.96))
+            .foregroundStyle(HUDColorPalette.primaryText)
             .lineLimit(1)
             .minimumScaleFactor(0.52)
             .allowsTightening(true)
@@ -949,7 +949,7 @@ private struct HUDActionCard: View {
         isDisabled: Bool,
         helpText: String,
         accessibilityLabel: String,
-        iconColor: Color = .primary,
+        iconColor: Color = HUDColorPalette.primaryText,
         fillStyle: FillStyle = .neutral,
         width: CGFloat,
         height: CGFloat,
@@ -981,7 +981,7 @@ private struct HUDActionCard: View {
     private var textForegroundColor: Color {
         switch fillStyle {
         case .neutral:
-            return .primary.opacity(0.90)
+            return HUDColorPalette.primaryText
         case .filled(_, let foreground):
             return foreground.opacity(isHovered ? 0.98 : 0.96)
         }
@@ -990,7 +990,7 @@ private struct HUDActionCard: View {
     private var backgroundColor: Color {
         switch fillStyle {
         case .neutral:
-            return isHovered ? Color.primary.opacity(0.10) : Color.clear
+            return isHovered ? Color.black.opacity(0.10) : Color.clear
         case .filled(let background, _):
             return background.opacity(isHovered ? 0.94 : 0.84)
         }
@@ -1019,7 +1019,7 @@ private struct HUDActionCard: View {
         .background(backgroundColor, in: shape)
         .overlay {
             if case .neutral = fillStyle {
-                shape.stroke(Color.primary.opacity(0.22), lineWidth: 0.8 * scaleFactor)
+                shape.stroke(Color.black.opacity(0.22), lineWidth: 0.8 * scaleFactor)
             }
         }
         .contentShape(shape)
@@ -1027,6 +1027,105 @@ private struct HUDActionCard: View {
         .onHover { isHovered = $0 }
         .help(helpText)
         .accessibilityLabel(accessibilityLabel)
+    }
+}
+
+private struct HUDUpdateBadge: View {
+    let state: HUDUpdateBadgeState
+    let height: CGFloat
+    let action: () -> Void
+
+    private var isActionable: Bool { state.isActionable }
+
+    private var title: String {
+        switch state {
+        case .version(let version): return "v\(version)"
+        case .available: return "有新版本"
+        case .checking: return "檢查中…"
+        case .downloading: return "更新中…"
+        case .error(let version): return "v\(version)"
+        }
+    }
+
+    private var icon: String {
+        switch state {
+        case .version: return "number.circle"
+        case .available: return "circle.fill"
+        case .checking: return "arrow.triangle.2.circlepath"
+        case .downloading: return "arrow.down.circle"
+        case .error: return "exclamationmark.triangle"
+        }
+    }
+
+    private var iconColor: Color {
+        switch state {
+        case .available: return HUDColorPalette.update
+        case .error: return .red
+        default: return HUDColorPalette.secondaryText
+        }
+    }
+
+    private var accessibilityValue: String {
+        switch state {
+        case .version(let version): return "目前版本 \(version)"
+        case .available(let version): return "有新版本 \(version)，點擊開啟更新詳情"
+        case .checking: return "正在檢查更新"
+        case .downloading: return "正在下載更新"
+        case .error(let version): return "目前版本 \(version)，更新檢查失敗，點擊重新檢查"
+        }
+    }
+
+    private func badgeContent(spacing: CGFloat, iconSize: CGFloat, titleSize: CGFloat) -> AnyView {
+        AnyView(HStack(spacing: spacing) {
+            Image(systemName: icon)
+                .font(.system(size: iconSize, weight: .semibold))
+                .foregroundStyle(iconColor)
+            Text(title)
+                .font(.system(size: titleSize, weight: .semibold, design: .rounded))
+                .foregroundStyle(HUDColorPalette.primaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .allowsTightening(true)
+        })
+    }
+
+    private func badgeButtonLabel(
+        spacing: CGFloat,
+        iconSize: CGFloat,
+        titleSize: CGFloat,
+        minimumWidth: CGFloat,
+        horizontalPadding: CGFloat
+    ) -> AnyView {
+        let content = badgeContent(spacing: spacing, iconSize: iconSize, titleSize: titleSize)
+        return AnyView(
+            content
+                .frame(minWidth: minimumWidth, minHeight: self.height, maxHeight: self.height)
+                .padding(.horizontal, horizontalPadding)
+        )
+    }
+
+    var body: some View {
+        let spacing = max(CGFloat(3), height * 0.12)
+        let iconSize = max(CGFloat(9), height * 0.34)
+        let titleSize = max(CGFloat(9), height * 0.38)
+        let minimumWidth = max(CGFloat(76), height * 2.45)
+        let horizontalPadding = max(CGFloat(6), height * 0.2)
+        Button(action: action) {
+            badgeButtonLabel(
+                spacing: spacing,
+                iconSize: iconSize,
+                titleSize: titleSize,
+                minimumWidth: minimumWidth,
+                horizontalPadding: horizontalPadding
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(!isActionable)
+        .background(Color.white.opacity(0.44), in: Capsule())
+        .overlay { Capsule().stroke(Color.black.opacity(0.12), lineWidth: 0.6) }
+        .help(isActionable ? (state.isAvailable ? "開啟更新詳情" : "重新檢查更新") : accessibilityValue)
+        .accessibilityLabel(title)
+        .accessibilityValue(accessibilityValue)
     }
 }
 
@@ -1124,6 +1223,7 @@ private struct CodexFloatingHUDView: View {
         .contextMenu {
             contextMenuContent
         }
+        .preferredColorScheme(.light)
         .onChange(of: model.updateState) { _, newState in
             presentUpdateFeedback(for: newState)
         }
@@ -1256,7 +1356,7 @@ private struct CodexFloatingHUDView: View {
         }
         .padding(.horizontal, 8)
         .frame(width: layoutState.size.width, height: layoutState.size.height, alignment: .leading)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: layoutState.scaleLevel), style: .continuous))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: layoutState.scaleLevel), style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: layoutState.scaleLevel), style: .continuous)
                 .stroke(updateFeedbackColor(for: feedback.kind).opacity(0.72), lineWidth: 1.8)
@@ -1290,14 +1390,23 @@ private struct CodexFloatingHUDView: View {
     @ViewBuilder
     private func hudContainer() -> some View {
         let metrics = HUDMetrics(scaleLevel: layoutState.scaleLevel)
-        VStack(alignment: .leading, spacing: metrics.sectionGap) {
+        VStack(alignment: .leading, spacing: 0) {
+            hudHeader(metrics: metrics)
+            Color.clear.frame(height: metrics.headerGap)
             quotaStack(width: metrics.contentWidth, height: metrics.quotaRowHeight, gap: metrics.quotaGap)
+            Color.clear.frame(height: metrics.sectionGap)
             actionCardsRow(metrics: metrics)
+            Color.clear.frame(height: metrics.sectionGap)
             footerRow(metrics: metrics)
         }
         .padding(metrics.outerPadding)
         .frame(width: metrics.panelSize.width, height: metrics.panelSize.height, alignment: .topLeading)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: layoutState.scaleLevel), style: .continuous))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: layoutState.scaleLevel), style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: layoutState.scaleLevel), style: .continuous)
+                .fill(HUDColorPalette.panelTint)
+                .allowsHitTesting(false)
+        }
         .clipShape(RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: layoutState.scaleLevel), style: .continuous))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Codex 用量")
@@ -1350,6 +1459,31 @@ private struct CodexFloatingHUDView: View {
         }
     }
 
+    private func hudHeader(metrics: HUDMetrics) -> some View {
+        HStack {
+            Spacer(minLength: 0)
+            let badgeState = HUDUpdateBadgePolicy.state(
+                updateState: model.updateState,
+                currentVersion: AppVersion.current
+            )
+            HUDUpdateBadge(
+                state: badgeState,
+                height: metrics.headerHeight,
+                action: {
+                    switch badgeState {
+                    case .available:
+                        showDetails()
+                    case .error:
+                        requestUpdateCheck()
+                    case .version, .checking, .downloading:
+                        break
+                    }
+                }
+            )
+        }
+        .frame(width: metrics.contentWidth, height: metrics.headerHeight, alignment: .trailing)
+    }
+
     private func quotaStack(width: CGFloat, height: CGFloat, gap: CGFloat) -> some View {
         ZStack(alignment: .topTrailing) {
             VStack(alignment: .leading, spacing: gap) {
@@ -1396,8 +1530,8 @@ private struct CodexFloatingHUDView: View {
         .frame(width: metrics.footerControlsWidth, height: metrics.footerHeight, alignment: .leading)
         .padding(.horizontal, metrics.footerHorizontalPadding)
         .frame(width: metrics.contentWidth, height: metrics.footerHeight, alignment: .leading)
-        .background(Color.primary.opacity(0.035), in: Capsule())
-        .overlay { Capsule().stroke(Color.primary.opacity(0.16), lineWidth: 0.8) }
+        .background(Color.black.opacity(0.035), in: Capsule())
+        .overlay { Capsule().stroke(Color.black.opacity(0.16), lineWidth: 0.8) }
     }
 
     private func detailsShortcutButton(metrics: HUDMetrics) -> some View {
@@ -1445,7 +1579,7 @@ private struct CodexFloatingHUDView: View {
             isDisabled: isPasteAndSubmitInFlight || !layoutState.isCodexFocused,
             helpText: layoutState.isCodexFocused ? "貼上並送出" : "切換回 Codex 後可貼上並送出",
             accessibilityLabel: "貼上並送出",
-            fillStyle: .filled(background: .blue, foreground: .white),
+            fillStyle: .filled(background: HUDColorPalette.submitAction, foreground: .white),
             width: metrics.actionCardWidth,
             height: metrics.actionHeight,
             isHovered: $isPasteAndSubmitHovered
@@ -1470,7 +1604,7 @@ private struct CodexFloatingHUDView: View {
             isDisabled: isPromptShortcutInFlight || !layoutState.isCodexFocused || ClipboardPasteService.isTemporaryOperationInFlight,
             helpText: layoutState.isCodexFocused ? "執行" : "切換回 Codex 後可執行",
             accessibilityLabel: "執行",
-            fillStyle: .filled(background: .green, foreground: .white),
+            fillStyle: .filled(background: HUDColorPalette.executeAction, foreground: .white),
             width: metrics.actionCardWidth,
             height: metrics.actionHeight,
             isHovered: $isExecuteHovered
@@ -1485,10 +1619,10 @@ private struct CodexFloatingHUDView: View {
     ) -> some View {
         let isFilled = shortcut == .commitPush
         let backgroundColor = isFilled
-            ? (hovered.wrappedValue ? Color.green.opacity(0.94) : Color.green.opacity(0.84))
+            ? (hovered.wrappedValue ? HUDColorPalette.commitPush.opacity(0.94) : HUDColorPalette.commitPush.opacity(0.84))
             : Color.clear
-        let foregroundColor = isFilled ? Color.white : (shortcut == .commit ? .orange : .blue)
-        let textForegroundColor = isFilled ? Color.white.opacity(0.96) : .primary.opacity(0.90)
+        let foregroundColor = isFilled ? Color.white : (shortcut == .commit ? HUDColorPalette.commit : HUDColorPalette.push)
+        let textForegroundColor = isFilled ? Color.white.opacity(0.96) : HUDColorPalette.primaryText
         return Button {
             guard !isPromptShortcutInFlight,
                   layoutState.isCodexFocused,

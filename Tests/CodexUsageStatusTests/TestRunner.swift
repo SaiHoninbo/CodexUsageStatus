@@ -53,6 +53,7 @@ struct CodexUsageStatusTests {
             ("popover presentation appearance policy", testPopoverPresentationAppearancePolicy),
             ("HUD scale levels", testHUDScaleLevels),
             ("HUD C metrics", testHUDMetrics),
+            ("HUD update badge policy", testHUDUpdateBadgePolicy),
             ("Codex application identity", testCodexApplicationIdentity),
             ("Codex prompt shortcuts", testCodexPromptShortcuts),
             ("temporary clipboard guards", testClipboardTemporaryOperationPolicy),
@@ -1296,8 +1297,8 @@ struct CodexUsageStatusTests {
     private static func testPopoverPresentationAppearancePolicy() throws {
         let appearance = PopoverPresentationPolicy.makeAppearance()
         try expect(
-            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua,
-            "popover opens with the stable dark appearance"
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .aqua,
+            "popover opens with the stable light appearance"
         )
         try expect(
             PopoverPresentationPolicy.reappliesAfterPopoverDidShow,
@@ -1306,7 +1307,7 @@ struct CodexUsageStatusTests {
         let popover = NSPopover()
         PopoverPresentationPolicy.apply(to: popover)
         try expect(
-            popover.appearance?.name == .darkAqua,
+            popover.appearance?.name == .aqua,
             "popover appearance is pinned directly on the popover"
         )
         try expect(
@@ -1378,15 +1379,17 @@ struct CodexUsageStatusTests {
 
     private static func testHUDMetrics() throws {
         let standard = HUDMetrics(scaleLevel: .standard)
-        try expect(standard.panelSize == CGSize(width: 416, height: 208), "level 3 panel size")
+        try expect(standard.panelSize == CGSize(width: 416, height: 240), "level 3 panel size")
         try expectApproximately(standard.contentWidth, 387.2, "content width follows outer padding")
         try expectApproximately(standard.quotaColumnHeight, 86.4, "quota rows close to 86.4pt")
-        try expectApproximately(standard.verticalContentHeight, 179.2, "vertical content closes without hidden spacer")
-        try expectApproximately(standard.verticalContentHeight + standard.outerPadding * 2, 208, "canonical height closes")
-        try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller2).panelSize, CGSize(width: 332.8, height: 166.4), "level 1 scales one layout")
-        try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller1).panelSize, CGSize(width: 374.4, height: 187.2), "level 2 scales one layout")
-        try expectSizeApproximately(HUDMetrics(scaleLevel: .larger1).panelSize, CGSize(width: 478.4, height: 239.2), "level 4 scales one layout")
-        try expectSizeApproximately(HUDMetrics(scaleLevel: .larger2).panelSize, CGSize(width: 540.8, height: 270.4), "level 5 scales one layout")
+        try expectApproximately(standard.headerHeight, 24, "header height")
+        try expectApproximately(standard.headerGap, 8, "header gap")
+        try expectApproximately(standard.verticalContentHeight, 211.2, "vertical content closes with header")
+        try expectApproximately(standard.verticalContentHeight + standard.outerPadding * 2, 240, "canonical height closes")
+        try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller2).panelSize, CGSize(width: 332.8, height: 192), "level 1 scales one layout")
+        try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller1).panelSize, CGSize(width: 374.4, height: 216), "level 2 scales one layout")
+        try expectSizeApproximately(HUDMetrics(scaleLevel: .larger1).panelSize, CGSize(width: 478.4, height: 276), "level 4 scales one layout")
+        try expectSizeApproximately(HUDMetrics(scaleLevel: .larger2).panelSize, CGSize(width: 540.8, height: 312), "level 5 scales one layout")
         try expect(standard.footerButtonWidth > 118, "footer buttons retain readable widths")
         try expect(standard.footerControlsWidth <= standard.contentWidth, "footer buttons fit content width")
         try expect(
@@ -1395,6 +1398,11 @@ struct CodexUsageStatusTests {
         )
         for level in HUDScaleLevel.allCases {
             let metrics = HUDMetrics(scaleLevel: level)
+            try expectApproximately(
+                metrics.verticalContentHeight + metrics.outerPadding * 2,
+                metrics.panelSize.height,
+                "vertical layout closes at \(level.displayName)"
+            )
             let occupiedFooterWidth = metrics.footerControlsWidth
                 + (metrics.footerHorizontalPadding * 2)
             try expect(occupiedFooterWidth <= metrics.contentWidth + 0.01,
@@ -1404,6 +1412,51 @@ struct CodexUsageStatusTests {
                 "action cards fit three columns at every scale level"
             )
         }
+    }
+
+    private static func testHUDUpdateBadgePolicy() throws {
+        let release = AppUpdateRelease(
+            version: "2.5.0",
+            tagName: "v2.5.0",
+            name: "Codex Usage Status 2.5.0",
+            releaseURL: URL(string: "https://example.com/release")!,
+            downloadURL: nil,
+            expectedSHA256: nil,
+            notes: "",
+            publishedAt: nil
+        )
+        try expect(
+            HUDUpdateBadgePolicy.state(updateState: .idle, currentVersion: "2.4.51") == .version("2.4.51"),
+            "idle shows current version"
+        )
+        try expect(
+            HUDUpdateBadgePolicy.state(updateState: .upToDate, currentVersion: "2.4.51") == .version("2.4.51"),
+            "up-to-date shows current version"
+        )
+        try expect(
+            HUDUpdateBadgePolicy.state(updateState: .available(release), currentVersion: "2.4.51") == .available("2.5.0"),
+            "available shows update badge"
+        )
+        try expect(
+            HUDUpdateBadgePolicy.state(updateState: .downloaded(release, URL(fileURLWithPath: "/tmp/CodexUsageStatus.app")), currentVersion: "2.4.51") == .available("2.5.0"),
+            "downloaded remains actionable"
+        )
+        try expect(
+            HUDUpdateBadgePolicy.state(updateState: .downloading(release), currentVersion: "2.4.51") == .downloading,
+            "downloading shows progress"
+        )
+        try expect(
+            HUDUpdateBadgePolicy.state(updateState: .checking, currentVersion: "2.4.51") == .checking,
+            "checking shows progress"
+        )
+        try expect(
+            HUDUpdateBadgePolicy.state(updateState: .error("network"), currentVersion: "2.4.51") == .error("2.4.51"),
+            "error keeps current version"
+        )
+        try expect(HUDUpdateBadgeState.available("2.5.0").isActionable, "available badge opens details")
+        try expect(HUDUpdateBadgeState.error("2.4.51").isActionable, "error badge retries check")
+        try expect(!HUDUpdateBadgeState.version("2.4.51").isActionable, "version badge is informational")
+        try expect(!HUDUpdateBadgeState.checking.isActionable, "checking badge is disabled")
     }
 
     private static func testCodexPromptShortcuts() throws {
