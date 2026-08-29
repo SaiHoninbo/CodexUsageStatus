@@ -6,8 +6,9 @@ enum CodexPromptShortcut: String, CaseIterable, Equatable {
     case commit = "Commit"
     case push = "Push"
     case commitPush = "Commit Push"
+    case execute = "執行"
 
     var text: String { rawValue }
-    var submitAfterPaste: Bool { self == .commitPush }
+    var submitAfterPaste: Bool { self == .commitPush || self == .execute }
     var accessibilityLabel: String { text }
 }

@@ -921,6 +921,11 @@ private struct HUDQuotaRow: View {
 }
 
 private struct HUDActionCard: View {
+    fileprivate enum FillStyle {
+        case neutral
+        case filled(background: Color, foreground: Color)
+    }
+
     let title: String
     let systemImage: String
     let iconSize: CGFloat
@@ -929,6 +934,7 @@ private struct HUDActionCard: View {
     let helpText: String
     let accessibilityLabel: String
     let iconColor: Color
+    let fillStyle: FillStyle
     let width: CGFloat
     let height: CGFloat
     @Binding var isHovered: Bool
@@ -950,6 +956,7 @@ private struct HUDActionCard: View {
         helpText: String,
         accessibilityLabel: String,
         iconColor: Color = .primary,
+        fillStyle: FillStyle = .neutral,
         width: CGFloat,
         height: CGFloat,
         isHovered: Binding<Bool>
@@ -962,22 +969,51 @@ private struct HUDActionCard: View {
         self.helpText = helpText
         self.accessibilityLabel = accessibilityLabel
         self.iconColor = iconColor
+        self.fillStyle = fillStyle
         self.width = width
         self.height = height
         self._isHovered = isHovered
     }
 
+    private var imageForegroundColor: Color {
+        switch fillStyle {
+        case .neutral:
+            return iconColor.opacity(isHovered ? 0.96 : 0.78)
+        case .filled(_, let foreground):
+            return foreground.opacity(isHovered ? 0.98 : 0.96)
+        }
+    }
+
+    private var textForegroundColor: Color {
+        switch fillStyle {
+        case .neutral:
+            return .primary.opacity(0.90)
+        case .filled(_, let foreground):
+            return foreground.opacity(isHovered ? 0.98 : 0.96)
+        }
+    }
+
+    private var backgroundColor: Color {
+        switch fillStyle {
+        case .neutral:
+            return isHovered ? Color.primary.opacity(0.10) : Color.clear
+        case .filled(let background, _):
+            return background.opacity(isHovered ? 0.94 : 0.84)
+        }
+    }
+
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         Button(action: action) {
             HStack(spacing: 3 * scaleFactor) {
                 Image(systemName: systemImage)
                     .font(.system(size: iconSize * scaleFactor, weight: .semibold))
-                    .foregroundStyle(iconColor.opacity(isHovered ? 0.96 : 0.78))
+                    .foregroundStyle(imageForegroundColor)
                 Text(title)
                     // Match the footer Commit/Push labels at the shared 14pt
                     // baseline while retaining proportional HUD scaling.
                     .font(.system(size: 14 * scaleFactor, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.primary.opacity(0.90))
+                    .foregroundStyle(textForegroundColor)
                     .lineLimit(1)
                     .minimumScaleFactor(0.55)
                     .allowsTightening(true)
@@ -986,15 +1022,13 @@ private struct HUDActionCard: View {
         }
         .buttonStyle(.plain)
         .frame(width: width, height: height)
-        .background(
-            isHovered ? Color.primary.opacity(0.10) : Color.clear,
-            in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        )
+        .background(backgroundColor, in: shape)
         .overlay {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .stroke(Color.primary.opacity(0.22), lineWidth: 0.8 * scaleFactor)
+            if case .neutral = fillStyle {
+                shape.stroke(Color.primary.opacity(0.22), lineWidth: 0.8 * scaleFactor)
+            }
         }
-        .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .contentShape(shape)
         .disabled(isDisabled)
         .onHover { isHovered = $0 }
         .help(helpText)
@@ -1050,6 +1084,7 @@ private struct CodexFloatingHUDView: View {
     @State private var isDetailsHovered = false
     @State private var isPasteHovered = false
     @State private var isPasteAndSubmitHovered = false
+    @State private var isExecuteHovered = false
     @State private var isCommitHovered = false
     @State private var isPushHovered = false
     @State private var isCommitPushHovered = false
@@ -1353,8 +1388,7 @@ private struct CodexFloatingHUDView: View {
         HStack(spacing: metrics.actionSpacing) {
             pasteShortcutButton(metrics: metrics)
             pasteAndSubmitShortcutButton(metrics: metrics)
-            detailsShortcutButton(metrics: metrics)
-            updateShortcutButton(metrics: metrics)
+            executeShortcutButton(metrics: metrics)
         }
         .frame(width: metrics.contentWidth, height: metrics.actionHeight, alignment: .leading)
     }
@@ -1417,11 +1451,36 @@ private struct CodexFloatingHUDView: View {
             isDisabled: isPasteAndSubmitInFlight || !layoutState.isCodexFocused,
             helpText: layoutState.isCodexFocused ? "貼上並送出" : "切換回 Codex 後可貼上並送出",
             accessibilityLabel: "貼上並送出",
+            fillStyle: .filled(background: .blue, foreground: .white),
             width: metrics.actionCardWidth,
             height: metrics.actionHeight,
             isHovered: $isPasteAndSubmitHovered
         )
         .opacity(isPasteAndSubmitInFlight ? 0.45 : 1)
+    }
+
+    private func executeShortcutButton(metrics: HUDMetrics) -> some View {
+        HUDActionCard(
+            title: "執行",
+            systemImage: "play.fill",
+            iconSize: 12,
+            action: {
+                guard !isPromptShortcutInFlight,
+                      layoutState.isCodexFocused,
+                      !ClipboardPasteService.isTemporaryOperationInFlight else { return }
+                isPromptShortcutInFlight = true
+                promptShortcut(.execute) { _ in
+                    isPromptShortcutInFlight = false
+                }
+            },
+            isDisabled: isPromptShortcutInFlight || !layoutState.isCodexFocused || ClipboardPasteService.isTemporaryOperationInFlight,
+            helpText: layoutState.isCodexFocused ? "執行" : "切換回 Codex 後可執行",
+            accessibilityLabel: "執行",
+            fillStyle: .filled(background: .green, foreground: .white),
+            width: metrics.actionCardWidth,
+            height: metrics.actionHeight,
+            isHovered: $isExecuteHovered
+        )
     }
 
     private func promptShortcutButton(
@@ -1430,7 +1489,13 @@ private struct CodexFloatingHUDView: View {
         width: CGFloat,
         hovered: Binding<Bool>
     ) -> some View {
-        Button {
+        let isFilled = shortcut == .commitPush
+        let backgroundColor = isFilled
+            ? (hovered.wrappedValue ? Color.green.opacity(0.94) : Color.green.opacity(0.84))
+            : Color.clear
+        let foregroundColor = isFilled ? Color.white : (shortcut == .commit ? .orange : .blue)
+        let textForegroundColor = isFilled ? Color.white.opacity(0.96) : .primary.opacity(0.90)
+        return Button {
             guard !isPromptShortcutInFlight,
                   layoutState.isCodexFocused,
                   !ClipboardPasteService.isTemporaryOperationInFlight else { return }
@@ -1442,13 +1507,14 @@ private struct CodexFloatingHUDView: View {
             HStack(spacing: metrics.factor * 4) {
                 Image(systemName: shortcut == .commit ? "point.3.connected.trianglepath.dotted" : shortcut == .push ? "arrow.up" : "arrow.up.right.circle")
                     .font(.system(size: metrics.factor * 17, weight: .semibold))
+                    .foregroundStyle(foregroundColor)
                 Text(shortcut.text)
                     .font(.system(size: metrics.factor * 14, weight: .semibold, design: .rounded))
+                    .foregroundStyle(textForegroundColor)
                     .lineLimit(1)
                     .minimumScaleFactor(0.55)
                     .allowsTightening(true)
             }
-            .foregroundStyle(shortcut == .commit ? .orange : (shortcut == .push ? .blue : .green))
             .frame(width: width, height: metrics.footerHeight)
         }
         .buttonStyle(.plain)
@@ -1458,6 +1524,10 @@ private struct CodexFloatingHUDView: View {
         .help("將「\(shortcut.text)」貼入 Codex\(shortcut.submitAfterPaste ? "並送出" : "")")
         .accessibilityLabel(shortcut.accessibilityLabel)
         .accessibilityValue(shortcut.submitAfterPaste ? "貼上並送出一次" : "貼上但不送出")
+        .background(
+            backgroundColor,
+            in: RoundedRectangle(cornerRadius: metrics.footerHeight * 0.24, style: .continuous)
+        )
     }
 
     @ViewBuilder
@@ -1888,7 +1958,7 @@ private struct CodexFloatingHUDView: View {
                 : "\(presentation.resetDescription)後重置"
             return "\(row.label)窗口，剩餘 \(presentation.remainingPercent)%，\(reset)"
         }.joined(separator: "；")
-        return "Codex，\(quotaText)，\(model.dataAgeText)，帳號 \(model.currentAccountEmail ?? "未提供 Email")。提供更新通知、詳細面板、只貼上、貼上並送出、Commit 與 Push 快捷鈕"
+        return "Codex，\(quotaText)，\(model.dataAgeText)，帳號 \(model.currentAccountEmail ?? "未提供 Email")。提供更新通知、詳細面板、只貼上、貼上並送出、執行、Commit 與 Push 快捷鈕"
     }
 
     private func cacheCurrentPresentation() {

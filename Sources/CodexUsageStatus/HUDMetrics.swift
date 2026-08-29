@@ -60,7 +60,7 @@ struct HUDMetrics: Equatable {
     }
 
     var actionCardWidth: CGFloat {
-        (contentWidth - (actionSpacing * 3)) / 4
+        (contentWidth - (actionSpacing * 2)) / 3
     }
 
     var quotaColumnHeight: CGFloat {

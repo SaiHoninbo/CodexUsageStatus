@@ -1388,12 +1388,20 @@ struct CodexUsageStatusTests {
         try expectSizeApproximately(HUDMetrics(scaleLevel: .larger2).panelSize, CGSize(width: 540.8, height: 270.4), "level 5 scales one layout")
         try expect(standard.footerButtonWidth > 118, "footer buttons retain readable widths")
         try expect(standard.footerControlsWidth <= standard.contentWidth, "footer buttons fit content width")
+        try expect(
+            3 * standard.actionCardWidth + (standard.actionSpacing * 2) <= standard.contentWidth + 0.01,
+            "standard action cards fit three columns"
+        )
         for level in HUDScaleLevel.allCases {
             let metrics = HUDMetrics(scaleLevel: level)
             let occupiedFooterWidth = metrics.footerControlsWidth
                 + (metrics.footerHorizontalPadding * 2)
             try expect(occupiedFooterWidth <= metrics.contentWidth + 0.01,
                        "footer closes without overlap at every scale level")
+            try expect(
+                3 * metrics.actionCardWidth + (metrics.actionSpacing * 2) <= metrics.contentWidth + 0.01,
+                "action cards fit three columns at every scale level"
+            )
         }
     }
 
@@ -1404,6 +1412,8 @@ struct CodexUsageStatusTests {
         try expect(!CodexPromptShortcut.commit.submitAfterPaste, "commit does not submit")
         try expect(!CodexPromptShortcut.push.submitAfterPaste, "push does not submit")
         try expect(CodexPromptShortcut.commitPush.submitAfterPaste, "combined shortcut submits")
+        try expect(CodexPromptShortcut.execute.text == "執行", "execute shortcut text")
+        try expect(CodexPromptShortcut.execute.submitAfterPaste, "execute shortcut submits")
     }
 
     private static func testClipboardTemporaryOperationPolicy() throws {
