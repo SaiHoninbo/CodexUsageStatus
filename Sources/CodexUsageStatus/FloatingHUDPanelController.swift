@@ -382,17 +382,11 @@ final class FloatingHUDPanelController: NSObject {
     }
 
     private func isCodexApplication(_ application: NSRunningApplication) -> Bool {
-        let bundleID = application.bundleIdentifier?.lowercased() ?? ""
-        let name = application.localizedName?.lowercased() ?? ""
-        let path = application.bundleURL?.path.lowercased() ?? ""
-        // The native Codex desktop app identifies itself as `com.openai.codex`.
-        // Keep this exact so CodexUsageStatus itself is never treated as the
-        // host, while browsers and unrelated applications remain hidden.
-        let isNativeCodexBundle = bundleID == "com.openai.codex"
-        return isNativeCodexBundle
-            || bundleID.contains("chatgpt")
-            || name.contains("chatgpt")
-            || path.contains("/chatgpt.app")
+        CodexApplicationPolicy.isCodexApplication(
+            bundleIdentifier: application.bundleIdentifier,
+            localizedName: application.localizedName,
+            bundlePath: application.bundleURL?.path
+        )
     }
 
     private func position(_ panel: NSPanel, beside application: NSRunningApplication) -> HUDPositionResult {

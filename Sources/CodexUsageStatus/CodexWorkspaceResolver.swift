@@ -61,14 +61,11 @@ final class CodexWorkspaceResolver {
     }
 
     static func isCodexApplication(_ app: NSRunningApplication) -> Bool {
-        let bundleID = app.bundleIdentifier?.lowercased() ?? ""
-        let name = app.localizedName?.lowercased() ?? ""
-        let path = app.bundleURL?.path.lowercased() ?? ""
-        guard bundleID != "com.openai.codex-usage-status" else { return false }
-        return bundleID == "com.openai.codex"
-            || bundleID.contains("chatgpt")
-            || name.contains("chatgpt")
-            || path.hasSuffix("/chatgpt.app")
+        CodexApplicationPolicy.isCodexApplication(
+            bundleIdentifier: app.bundleIdentifier,
+            localizedName: app.localizedName,
+            bundlePath: app.bundleURL?.path
+        )
     }
 
     /// Returns the bounds of the focused Codex window in Quartz screen

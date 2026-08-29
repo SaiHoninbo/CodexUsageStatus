@@ -484,13 +484,11 @@ enum ClipboardPasteService {
     }
 
     private static func isCodexApplication(_ application: NSRunningApplication) -> Bool {
-        let bundleID = application.bundleIdentifier?.lowercased() ?? ""
-        let name = application.localizedName?.lowercased() ?? ""
-        let path = application.bundleURL?.path.lowercased() ?? ""
-        return bundleID == "com.openai.codex"
-            || bundleID.contains("chatgpt")
-            || name.contains("chatgpt")
-            || path.contains("/chatgpt.app")
+        CodexApplicationPolicy.isCodexApplication(
+            bundleIdentifier: application.bundleIdentifier,
+            localizedName: application.localizedName,
+            bundlePath: application.bundleURL?.path
+        )
     }
 
     private static func showAlert(title: String, message: String) {

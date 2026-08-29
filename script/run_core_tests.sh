@@ -18,6 +18,7 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDScale.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDMetrics.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/CodexPromptShortcut.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/CodexApplicationPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/ClipboardTemporaryOperationPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDQuotaPresentationPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDVisibilityPolicy.swift" \

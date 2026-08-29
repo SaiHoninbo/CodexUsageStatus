@@ -53,6 +53,7 @@ struct CodexUsageStatusTests {
             ("popover presentation appearance policy", testPopoverPresentationAppearancePolicy),
             ("HUD scale levels", testHUDScaleLevels),
             ("HUD C metrics", testHUDMetrics),
+            ("Codex application identity", testCodexApplicationIdentity),
             ("Codex prompt shortcuts", testCodexPromptShortcuts),
             ("temporary clipboard guards", testClipboardTemporaryOperationPolicy),
             ("Git status parser and safety policies", testGitWorkspacePolicies),
@@ -1414,6 +1415,37 @@ struct CodexUsageStatusTests {
         try expect(CodexPromptShortcut.commitPush.submitAfterPaste, "combined shortcut submits")
         try expect(CodexPromptShortcut.execute.text == "執行", "execute shortcut text")
         try expect(CodexPromptShortcut.execute.submitAfterPaste, "execute shortcut submits")
+    }
+
+    private static func testCodexApplicationIdentity() throws {
+        try expect(
+            CodexApplicationPolicy.isCodexApplication(bundleIdentifier: "com.openai.codex"),
+            "native Codex bundle should be accepted"
+        )
+        try expect(
+            CodexApplicationPolicy.isCodexApplication(bundleIdentifier: " COM.OPENAI.CODEX "),
+            "native Codex bundle matching should be case and whitespace tolerant"
+        )
+        try expect(
+            !CodexApplicationPolicy.isCodexApplication(bundleIdentifier: "com.openai.chatgpt"),
+            "ChatGPT must not be treated as Codex"
+        )
+        try expect(
+            !CodexApplicationPolicy.isCodexApplication(
+                bundleIdentifier: nil,
+                localizedName: "ChatGPT",
+                bundlePath: "/Applications/ChatGPT.app"
+            ),
+            "name and path alone must not identify Codex"
+        )
+        try expect(
+            !CodexApplicationPolicy.isCodexApplication(bundleIdentifier: "com.openai.codex-usage-status"),
+            "usage status app must not host its own HUD"
+        )
+        try expect(
+            !CodexApplicationPolicy.isCodexApplication(bundleIdentifier: nil),
+            "missing bundle identity must fail closed"
+        )
     }
 
     private static func testClipboardTemporaryOperationPolicy() throws {
