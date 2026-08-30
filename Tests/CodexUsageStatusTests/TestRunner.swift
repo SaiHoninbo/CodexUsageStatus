@@ -1431,9 +1431,9 @@ struct CodexUsageStatusTests {
                 "vertical layout closes at \(level.displayName)"
             )
             let occupiedFooterWidth = metrics.footerControlsWidth
-                + (metrics.footerHorizontalPadding * 2)
-            try expect(occupiedFooterWidth <= metrics.contentWidth + 0.01,
-                       "footer closes without overlap at every scale level")
+                + metrics.footerHorizontalPadding
+            try expectApproximately(occupiedFooterWidth, metrics.contentWidth,
+                                    "footer fills its content width at every scale level")
             try expect(
                 3 * metrics.actionCardWidth + (metrics.actionSpacing * 2) <= metrics.contentWidth + 0.01,
                 "action cards fit three columns at every scale level"

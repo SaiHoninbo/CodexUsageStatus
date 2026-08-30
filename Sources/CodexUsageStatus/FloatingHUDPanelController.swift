@@ -1673,7 +1673,9 @@ private struct CodexFloatingHUDView: View {
             promptShortcutButton(.commitPush, metrics: metrics, width: metrics.footerButtonWidth, hovered: $isCommitPushHovered)
         }
         .frame(width: metrics.footerControlsWidth, height: metrics.footerHeight, alignment: .leading)
-        .padding(.horizontal, metrics.footerHorizontalPadding)
+        // Keep the footer's leading inset, but let the final action fill to
+        // the capsule's trailing edge instead of leaving a second right gap.
+        .padding(.leading, metrics.footerHorizontalPadding)
         .frame(width: metrics.contentWidth, height: metrics.footerHeight, alignment: .leading)
         .background(Color.black.opacity(0.035), in: Capsule())
         .overlay { Capsule().stroke(Color.black.opacity(0.16), lineWidth: 0.8) }

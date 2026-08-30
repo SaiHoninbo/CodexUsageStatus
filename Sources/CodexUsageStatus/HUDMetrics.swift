@@ -60,7 +60,9 @@ struct HUDMetrics: Equatable {
     var footerButtonSpacing: CGFloat { Self.canonicalFooterButtonSpacing * factor }
     var cornerRadius: CGFloat { Self.canonicalCornerRadius * factor }
     var footerButtonWidth: CGFloat {
-        max(0, (contentWidth - (footerHorizontalPadding * 2) - (footerButtonSpacing * 2)) / 3)
+        // Keep the leading breathing room while allowing the trailing
+        // Commit Push button to reach the footer capsule's right edge.
+        max(0, (contentWidth - footerHorizontalPadding - (footerButtonSpacing * 2)) / 3)
     }
     var footerControlsWidth: CGFloat {
         footerButtonWidth * 3 + (footerButtonSpacing * 2)
