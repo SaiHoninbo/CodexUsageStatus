@@ -425,7 +425,6 @@ struct CodexUsageStatusTests {
                 enabled: false,
                 focus: .codex,
                 panelIsVisible: true,
-                hasValidQuota: true,
                 position: .positioned
             ) == .hideImmediately,
             "explicit HUD disable should hide immediately"
@@ -435,7 +434,6 @@ struct CodexUsageStatusTests {
                 enabled: true,
                 focus: .codex,
                 panelIsVisible: false,
-                hasValidQuota: true,
                 position: .positioned
             ) == .show,
             "Codex plus valid quota and position should show"
@@ -445,22 +443,21 @@ struct CodexUsageStatusTests {
                 enabled: true,
                 focus: .codex,
                 panelIsVisible: true,
-                hasValidQuota: false,
                 position: .unavailable
-            ) == .retainPanel,
-            "visible Codex HUD should retain through quota loss"
+            ) == .hideImmediately,
+            "an unavailable position must hide even when the panel is visible"
         )
         try expect(
-            HUDVisibilityPolicy.positionResult(hasValidFrame: true, panelIsVisible: false) == .positioned,
+            HUDVisibilityPolicy.positionResult(hasValidFrame: true, hasRetainableSafeFrame: false) == .positioned,
             "a valid frame should permit the first show"
         )
         try expect(
-            HUDVisibilityPolicy.positionResult(hasValidFrame: false, panelIsVisible: true) == .retainedExistingPosition,
-            "a visible panel should retain its current position during a frame gap"
+            HUDVisibilityPolicy.positionResult(hasValidFrame: false, hasRetainableSafeFrame: true) == .retainedExistingPosition,
+            "an authenticated safe frame should retain position during a frame gap"
         )
         try expect(
-            HUDVisibilityPolicy.positionResult(hasValidFrame: false, panelIsVisible: false) == .unavailable,
-            "a hidden panel must stay hidden without a verified frame"
+            HUDVisibilityPolicy.positionResult(hasValidFrame: false, hasRetainableSafeFrame: false) == .unavailable,
+            "a frame gap without a safe frame must remain unavailable"
         )
 
         try expect(
@@ -469,8 +466,8 @@ struct CodexUsageStatusTests {
                 panelIsVisible: true,
                 elapsedFocusLoss: 10,
                 grace: 0.5
-            ) == .retainPanel,
-            "unknown focus must not hide a visible panel"
+            ) == .hideImmediately,
+            "unknown focus must fail closed and hide a visible panel"
         )
         try expect(
             HUDVisibilityPolicy.focusDecision(
@@ -1331,13 +1328,21 @@ struct CodexUsageStatusTests {
     }
 
     private static func testHUDScaleLevels() throws {
-        try expect(HUDScaleLevel.allCases.count == 5, "five scale levels are available")
+        try expect(HUDScaleLevel.allCases.count == 7, "seven scale levels are available")
+        try expect(
+            HUDScaleLevel.allCases == [.smaller4, .smaller3, .smaller2, .smaller1, .standard, .larger1, .larger2],
+            "scale levels use compact-to-large UI order"
+        )
+        try expect(HUDScaleLevel.smaller4.scaleFactor == 0.64, "level 1 factor")
+        try expect(HUDScaleLevel.smaller3.scaleFactor == 0.72, "level 2 factor")
         try expect(HUDScaleLevel.smaller2.scaleFactor == 0.8, "level 1 factor")
         try expect(HUDScaleLevel.smaller1.scaleFactor == 0.9, "level 2 factor")
         try expect(HUDScaleLevel.standard.scaleFactor == 1.0, "level 3 is standard")
         try expect(HUDScaleLevel.larger1.scaleFactor == 1.15, "level 4 factor")
         try expect(HUDScaleLevel.larger2.scaleFactor == 1.3, "level 5 factor")
         try expect(HUDScaleLevel.standard.displayName == "標準", "level 3 label")
+        try expect(HUDScaleLevel.smaller4.displayName == "小 4 級", "level 1 label")
+        try expect(HUDScaleLevel.smaller3.displayName == "小 3 級", "level 2 label")
         try expect(HUDScaleLevel.smaller2.displayName == "小 2 級", "level 1 label")
         try expect(HUDScaleLevel.larger2.displayName == "大 2 級", "level 5 label")
         let suiteName = "CodexUsageStatusTests.scale.\(UUID().uuidString)"
@@ -1375,6 +1380,26 @@ struct CodexUsageStatusTests {
         defaults.set(3, forKey: HUDScaleLevel.userDefaultsKey)
         defaults.set(4, forKey: HUDScaleLevel.schemaVersionKey)
         try expect(HUDScaleLevel.load(from: defaults) == .larger2, "schema 4 old standard maps upward")
+
+        let schemaFiveExpectations: [(Int, HUDScaleLevel)] = [
+            (1, .smaller2),
+            (2, .smaller1),
+            (3, .standard),
+            (4, .larger1),
+            (5, .larger2)
+        ]
+        for (rawValue, expectedLevel) in schemaFiveExpectations {
+            defaults.set(rawValue, forKey: HUDScaleLevel.userDefaultsKey)
+            defaults.set(5, forKey: HUDScaleLevel.schemaVersionKey)
+            try expect(
+                HUDScaleLevel.load(from: defaults) == expectedLevel,
+                "schema 5 raw \(rawValue) preserves its physical level"
+            )
+            try expect(
+                defaults.integer(forKey: HUDScaleLevel.schemaVersionKey) == HUDScaleLevel.currentSchemaVersion,
+                "schema 5 raw \(rawValue) migrates the schema marker"
+            )
+        }
     }
 
     private static func testHUDMetrics() throws {
@@ -1387,6 +1412,8 @@ struct CodexUsageStatusTests {
         try expectApproximately(standard.verticalContentHeight, 211.2, "vertical content closes with header")
         try expectApproximately(standard.verticalContentHeight + standard.outerPadding * 2, 240, "canonical height closes")
         try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller2).panelSize, CGSize(width: 332.8, height: 192), "level 1 scales one layout")
+        try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller4).panelSize, CGSize(width: 266.24, height: 153.6), "level 1 scales one layout")
+        try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller3).panelSize, CGSize(width: 299.52, height: 172.8), "level 2 scales one layout")
         try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller1).panelSize, CGSize(width: 374.4, height: 216), "level 2 scales one layout")
         try expectSizeApproximately(HUDMetrics(scaleLevel: .larger1).panelSize, CGSize(width: 478.4, height: 276), "level 4 scales one layout")
         try expectSizeApproximately(HUDMetrics(scaleLevel: .larger2).panelSize, CGSize(width: 540.8, height: 312), "level 5 scales one layout")

@@ -1,9 +1,13 @@
 import Foundation
 
-/// Five proportional HUD sizes centered on the current smallest C layout:
-/// two below, standard, and two above. The standard level is the 416x208
-/// reference shown by the current smallest UI.
+/// Seven proportional HUD sizes centered on the current C layout: four
+/// compact levels, standard, and two larger levels. The standard level is
+/// the 416x240 reference used by the current HUD.
 enum HUDScaleLevel: Int, CaseIterable, Codable, Equatable {
+    // New compact levels use additive raw identities so existing persisted
+    // raw values 1...5 retain their historical physical meaning.
+    case smaller4 = 6
+    case smaller3 = 7
     case smaller2 = 1
     case smaller1 = 2
     case standard = 3
@@ -12,10 +16,12 @@ enum HUDScaleLevel: Int, CaseIterable, Codable, Equatable {
 
     static let userDefaultsKey = "ui.floatingHUD.scaleLevel"
     static let schemaVersionKey = "ui.floatingHUD.scaleLevel.schemaVersion"
-    static let currentSchemaVersion = 5
+    static let currentSchemaVersion = 6
 
     var scaleFactor: CGFloat {
         switch self {
+        case .smaller4: return 0.64
+        case .smaller3: return 0.72
         case .smaller2: return 0.80
         case .smaller1: return 0.90
         case .standard: return 1.00
@@ -26,6 +32,8 @@ enum HUDScaleLevel: Int, CaseIterable, Codable, Equatable {
 
     var displayName: String {
         switch self {
+        case .smaller4: return "小 4 級"
+        case .smaller3: return "小 3 級"
         case .smaller2: return "小 2 級"
         case .smaller1: return "小 1 級"
         case .standard: return "標準"
@@ -47,8 +55,9 @@ enum HUDScaleLevel: Int, CaseIterable, Codable, Equatable {
 
         if schemaVersion == 4 {
             // Schema 4 briefly treated the former 520x260 draft as the
-            // canonical 100% size. Its level 1 was the 416x208 UI now used
-            // as the standard reference, so preserve that visible size.
+            // canonical 100% size. Its level 1 was the historical 416x208
+            // UI; preserve that visible size when mapping into the current
+            // 416x240 reference.
             let migrated: HUDScaleLevel
             switch rawValue {
             case 1: migrated = .standard
@@ -63,8 +72,8 @@ enum HUDScaleLevel: Int, CaseIterable, Codable, Equatable {
         if schemaVersion == 3 {
             // Schema 3 used 520x260 as 100%. The user's currently visible
             // smallest HUD was schema-3 level 1 (416x208), so preserve that
-            // physical size as the new standard and map larger legacy levels
-            // to the nearest available level in the new 416x208 scale space.
+            // historical physical size while mapping into the current
+            // 416x240 scale space.
             let migrated: HUDScaleLevel
             switch rawValue {
             case 1: migrated = .standard
@@ -79,7 +88,7 @@ enum HUDScaleLevel: Int, CaseIterable, Codable, Equatable {
         if schemaVersion == 2 {
             // A short-lived build temporarily used level 1 as standard and
             // shifted every larger level upward. Map that representation to
-            // the final centered five-level contract by preserving size.
+            // the final centered seven-level contract by preserving size.
             let migrated: HUDScaleLevel
             switch rawValue {
             case 1: migrated = .standard

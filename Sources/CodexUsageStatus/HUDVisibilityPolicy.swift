@@ -25,34 +25,30 @@ enum HUDVisibilityPolicy {
         enabled: Bool,
         focus: HUDVisibilityFocus,
         panelIsVisible: Bool,
-        hasValidQuota: Bool,
         position: HUDPositionResult
     ) -> HUDVisibilityDecision {
         guard enabled else { return .hideImmediately }
 
         switch focus {
         case .unknown:
-            return panelIsVisible ? .retainPanel : .keepHidden
+            return panelIsVisible ? .hideImmediately : .keepHidden
         case .otherApplication:
             return panelIsVisible ? .pendingHide : .keepHidden
         case .codex:
-            guard hasValidQuota else {
-                return panelIsVisible ? .retainPanel : .keepHidden
-            }
             switch position {
             case .positioned:
                 return .show
             case .retainedExistingPosition:
                 return .retainPanel
             case .unavailable:
-                return panelIsVisible ? .retainPanel : .keepHidden
+                return panelIsVisible ? .hideImmediately : .keepHidden
             }
         }
     }
 
-    static func positionResult(hasValidFrame: Bool, panelIsVisible: Bool) -> HUDPositionResult {
+    static func positionResult(hasValidFrame: Bool, hasRetainableSafeFrame: Bool) -> HUDPositionResult {
         if hasValidFrame { return .positioned }
-        return panelIsVisible ? .retainedExistingPosition : .unavailable
+        return hasRetainableSafeFrame ? .retainedExistingPosition : .unavailable
     }
 
     static func focusDecision(
@@ -65,7 +61,7 @@ enum HUDVisibilityPolicy {
         case .codex:
             return panelIsVisible ? .retainPanel : .keepHidden
         case .unknown:
-            return panelIsVisible ? .retainPanel : .keepHidden
+            return panelIsVisible ? .hideImmediately : .keepHidden
         case .otherApplication:
             guard panelIsVisible else { return .keepHidden }
             return elapsedFocusLoss >= grace ? .hideImmediately : .pendingHide

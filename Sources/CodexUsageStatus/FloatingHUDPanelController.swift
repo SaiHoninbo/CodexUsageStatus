@@ -32,6 +32,7 @@ private final class FloatingHUDLayoutState: ObservableObject {
     /// The HUD is a Codex-only overlay. This state is also used by the view
     /// to keep actions disabled during a focus transition.
     @Published var isCodexFocused = true
+    @Published var hasEstablishedPosition = false
 
     var size: NSSize { FloatingHUDLayout.size(for: placement, scaleLevel: scaleLevel) }
 }
@@ -79,6 +80,7 @@ final class FloatingHUDPanelController: NSObject {
     private var panel: NSPanel?
     private var refreshTimer: Timer?
     private var workspaceObserver: NSObjectProtocol?
+    private var terminationObserver: NSObjectProtocol?
     private var modelObservation: AnyCancellable?
     private let defaults = UserDefaults.standard
     private let bottomRightPositionKey = "ui.floatingHUD.bottomRightOffset"
@@ -92,6 +94,9 @@ final class FloatingHUDPanelController: NSObject {
     private var lastPositionedVisibleFrame: NSRect?
     private var lastPositionedProcessID: pid_t?
     private var lastPositionedPanelSize: NSSize?
+    private var hasEstablishedPosition = false
+    private var lastKnownSafePanelFrame: NSRect?
+    private var positioningSessionGeneration: UInt64 = 0
     private var lastPlacement: HUDPlacement = .bottomRight
     private let layoutState = FloatingHUDLayoutState()
     /// Only a confirmed focus loss may hide the HUD. AX/Quartz and quota
@@ -188,22 +193,45 @@ final class FloatingHUDPanelController: NSObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
+            guard let self else { return }
+            let expectedGeneration = self.positioningSessionGeneration
             Task { @MainActor [weak self] in
-                self?.refreshVisibility()
+                guard let self,
+                      expectedGeneration == self.positioningSessionGeneration else { return }
+                self.refreshVisibility()
+            }
+        }
+
+        terminationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let application = notification.object as? NSRunningApplication else { return }
+            Task { @MainActor [weak self] in
+                self?.handleApplicationTermination(application)
             }
         }
 
         modelObservation = model.objectWillChange.sink { [weak self] _ in
             // @Published emits before the value is assigned. Hop to the next
             // main-actor turn so the HUD sees the new preference/state.
+            guard let self else { return }
+            let expectedGeneration = self.positioningSessionGeneration
             Task { @MainActor [weak self] in
-                self?.refreshVisibility()
+                guard let self,
+                      expectedGeneration == self.positioningSessionGeneration else { return }
+                self.refreshVisibility()
             }
         }
 
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let expectedGeneration = self.positioningSessionGeneration
             Task { @MainActor [weak self] in
-                self?.refreshVisibility()
+                guard let self,
+                      expectedGeneration == self.positioningSessionGeneration else { return }
+                self.refreshVisibility()
             }
         }
         refreshVisibility()
@@ -217,17 +245,15 @@ final class FloatingHUDPanelController: NSObject {
             NSWorkspace.shared.notificationCenter.removeObserver(workspaceObserver)
         }
         workspaceObserver = nil
+        if let terminationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(terminationObserver)
+        }
+        terminationObserver = nil
         modelObservation?.cancel()
         modelObservation = nil
         panel?.orderOut(nil)
         panel = nil
-        lastCodexWindowFrame = nil
-        lastCodexVisibleFrame = nil
-        lastCodexProcessID = nil
-        lastPositionedCodexWindowFrame = nil
-        lastPositionedVisibleFrame = nil
-        lastPositionedProcessID = nil
-        lastPositionedPanelSize = nil
+        invalidatePositioningSession(clearProcessID: true)
     }
 
     func resetPosition() {
@@ -289,6 +315,10 @@ final class FloatingHUDPanelController: NSObject {
             )
         }
         lastPositionedPanelSize = newSize
+        if hasEstablishedPosition, lastKnownSafePanelFrame != nil {
+            lastKnownSafePanelFrame = panel.frame
+            layoutState.hasEstablishedPosition = true
+        }
     }
 
     private func pasteClipboard() {
@@ -315,22 +345,17 @@ final class FloatingHUDPanelController: NSObject {
 
     private func refreshVisibility() {
         guard let panel else { return }
-        // A HUD without any effective quota percentage is only a partial
-        // transport state (for example while account switching, reconnecting,
-        // or before the first rate-limit read). Primary is preferred, but the
-        // model may legitimately expose a fallback window while primary is
-        // omitted; keep the HUD consistent with the menu-bar value then.
         guard model.floatingHUDEnabled else {
-            hideImmediately(panel)
+            hideAndInvalidatePositioningSession(panel)
             return
         }
 
         let frontmostApplication = NSWorkspace.shared.frontmostApplication
         guard let frontmostApplication else {
-            // A nil frontmost application is an unknown focus transition, not
-            // proof that Codex was left. Keep the current panel and wait for a
-            // concrete application identity before scheduling focus loss.
-            cancelFocusLoss()
+            // Unknown identity fails closed. Keep the same-process session and
+            // safe frame so a later authoritative Codex observation can
+            // restore it without treating an unknown app as Codex.
+            hideImmediately(panel)
             return
         }
         guard isCodexApplication(frontmostApplication) else {
@@ -341,25 +366,13 @@ final class FloatingHUDPanelController: NSObject {
         let codexApp = frontmostApplication
         layoutState.isCodexFocused = true
 
-        guard HUDQuotaPresentationPolicy.make(
-            snapshot: model.snapshot,
-            profileID: model.currentProfileID,
-            now: model.currentDate
-        )?.hasRecognizedWindow == true else {
-            // Keep a visible panel through account boundaries, reconnects,
-            // and sparse quota responses. The view owns profile-bound cached
-            // presentation and renders an updating state without blanking.
-            return
-        }
-
         if let previousProcessID = lastCodexProcessID,
            previousProcessID != codexApp.processIdentifier {
-            // Do not carry a prior app's display/frame into a new process.
-            lastCodexWindowFrame = nil
-            lastCodexVisibleFrame = nil
-            lastPositionedCodexWindowFrame = nil
-            lastPositionedVisibleFrame = nil
-            lastPositionedProcessID = nil
+            // A process transition is a session boundary even when the old
+            // Codex has not delivered its termination notification yet.
+            panel.orderOut(nil)
+            invalidatePendingVisibilityCallbacks()
+            resetEstablishedPositionForNewCodexProcess()
         }
         lastCodexProcessID = codexApp.processIdentifier
         gitCoordinator.refreshIfNeeded()
@@ -373,10 +386,20 @@ final class FloatingHUDPanelController: NSObject {
                 panel.orderFrontRegardless()
             }
         case .retainedExistingPosition:
+            guard restoreRetainedPositionIfPossible(panel) else {
+                hideImmediately(panel)
+                return
+            }
             panel.alphaValue = 1.0
+            if !panel.isVisible {
+                panel.orderFrontRegardless()
+            }
         case .unavailable:
-            // A hidden HUD must not be resurrected at an old or guessed
-            // position while the focused window metadata is unavailable.
+            // Without an authenticated safe frame, even a currently visible
+            // panel is not evidence of a trustworthy position.
+            if panel.isVisible {
+                hideImmediately(panel)
+            }
             return
         }
     }
@@ -389,17 +412,81 @@ final class FloatingHUDPanelController: NSObject {
         )
     }
 
+    private func invalidatePendingVisibilityCallbacks() {
+        cancelFocusLoss()
+        positioningSessionGeneration &+= 1
+    }
+
+    private func resetEstablishedPositionForNewCodexProcess() {
+        hasEstablishedPosition = false
+        layoutState.hasEstablishedPosition = false
+        lastKnownSafePanelFrame = nil
+        lastCodexWindowFrame = nil
+        lastCodexVisibleFrame = nil
+        lastPositionedCodexWindowFrame = nil
+        lastPositionedVisibleFrame = nil
+        lastPositionedProcessID = nil
+        lastPositionedPanelSize = nil
+        lastCodexProcessID = nil
+    }
+
+    private func invalidatePositioningSession(clearProcessID: Bool) {
+        positioningSessionGeneration &+= 1
+        cancelFocusLoss()
+        hasEstablishedPosition = false
+        layoutState.hasEstablishedPosition = false
+        lastKnownSafePanelFrame = nil
+        lastCodexWindowFrame = nil
+        lastCodexVisibleFrame = nil
+        lastPositionedCodexWindowFrame = nil
+        lastPositionedVisibleFrame = nil
+        lastPositionedProcessID = nil
+        lastPositionedPanelSize = nil
+        if clearProcessID {
+            lastCodexProcessID = nil
+        }
+    }
+
+    private func hideAndInvalidatePositioningSession(_ panel: NSPanel) {
+        panel.orderOut(nil)
+        invalidatePositioningSession(clearProcessID: true)
+        layoutState.isCodexFocused = false
+    }
+
+    private func restoreRetainedPositionIfPossible(_ panel: NSPanel) -> Bool {
+        guard hasEstablishedPosition,
+              let safeFrame = lastKnownSafePanelFrame else { return false }
+        panel.setFrame(safeFrame, display: false)
+        return true
+    }
+
+    private func handleApplicationTermination(_ application: NSRunningApplication) {
+        guard let trackedProcessID = lastCodexProcessID,
+              trackedProcessID == application.processIdentifier else { return }
+        panel?.orderOut(nil)
+        invalidatePositioningSession(clearProcessID: true)
+        layoutState.isCodexFocused = false
+    }
+
+    private func markPositionEstablished(_ panel: NSPanel) {
+        lastKnownSafePanelFrame = panel.frame
+        hasEstablishedPosition = true
+        layoutState.hasEstablishedPosition = true
+    }
+
     private func position(_ panel: NSPanel, beside application: NSRunningApplication) -> HUDPositionResult {
         guard let quartzTargetFrame = codexWindowFrame(for: application.processIdentifier),
               let displayMapping = quartzDisplayMapping(for: quartzTargetFrame) else {
             return HUDVisibilityPolicy.positionResult(
                 hasValidFrame: false,
-                panelIsVisible: panel.isVisible
+                hasRetainableSafeFrame: hasEstablishedPosition
+                    && lastKnownSafePanelFrame != nil
+                    && lastCodexProcessID == application.processIdentifier
             )
         }
         let targetFrame = appKitWindowFrame(from: quartzTargetFrame, mapping: displayMapping)
         // Focused-window metadata is authoritative. If it is temporarily
-        // unavailable, retain an already visible panel at its current origin.
+        // unavailable, only an authenticated safe frame may be restored.
         // A hidden panel remains hidden until a new frame is verifiable.
         // Use only the display selected by the validated Quartz geometry. If
         // the window list is momentarily unavailable while macOS changes
@@ -421,6 +508,7 @@ final class FloatingHUDPanelController: NSObject {
             visibleFrame: visibleFrame,
             panel: panel
         ) {
+            markPositionEstablished(panel)
             return .positioned
         }
         defer {
@@ -442,6 +530,7 @@ final class FloatingHUDPanelController: NSObject {
             )
             panel.setFrameOrigin(clampedOrigin(origin, panelSize: size, visibleFrame: visibleFrame))
             saveAnchor(origin: panel.frame.origin, targetFrame: targetFrame, panelSize: size, placement: anchor.placement)
+            markPositionEstablished(panel)
             return .positioned
         }
 
@@ -479,6 +568,7 @@ final class FloatingHUDPanelController: NSObject {
             )
             panel.setFrameOrigin(clampedOrigin(origin, panelSize: size, visibleFrame: visibleFrame))
             saveAnchor(origin: panel.frame.origin, targetFrame: targetFrame, panelSize: size, placement: placement)
+            markPositionEstablished(panel)
             return .positioned
         }
 
@@ -507,6 +597,7 @@ final class FloatingHUDPanelController: NSObject {
             )
             panel.setFrameOrigin(clampedOrigin(resizedOrigin, panelSize: size, visibleFrame: visibleFrame))
             saveAnchor(origin: panel.frame.origin, targetFrame: targetFrame, panelSize: size, placement: placement)
+            markPositionEstablished(panel)
             return .positioned
         }
 
@@ -534,6 +625,7 @@ final class FloatingHUDPanelController: NSObject {
             )
             panel.setFrameOrigin(clampedOrigin(resizedOrigin, panelSize: size, visibleFrame: visibleFrame))
             saveAnchor(origin: panel.frame.origin, targetFrame: targetFrame, panelSize: size, placement: placement)
+            markPositionEstablished(panel)
             return .positioned
         }
 
@@ -549,6 +641,7 @@ final class FloatingHUDPanelController: NSObject {
         y = max(y, visibleFrame.minY + 8)
         panel.setFrameOrigin(NSPoint(x: x, y: y))
         saveAnchor(origin: panel.frame.origin, targetFrame: targetFrame, panelSize: size, placement: .bottomRight)
+        markPositionEstablished(panel)
         return .positioned
     }
 
@@ -561,13 +654,18 @@ final class FloatingHUDPanelController: NSObject {
         guard panel.isVisible, focusLossTask == nil else { return }
         focusLossGeneration &+= 1
         let generation = focusLossGeneration
+        let expectedPositioningGeneration = positioningSessionGeneration
+        let expectedProcessID = lastCodexProcessID
+        let grace = focusLossGrace
         focusLossTask = Task { @MainActor [weak self, weak panel] in
             do {
-                try await Task.sleep(for: self?.focusLossGrace ?? .milliseconds(500))
+                try await Task.sleep(for: grace)
             } catch {
                 return
             }
             guard let self,
+                  expectedPositioningGeneration == self.positioningSessionGeneration,
+                  expectedProcessID == self.lastCodexProcessID,
                   HUDVisibilityPolicy.shouldApplyFocusLoss(
                       scheduledGeneration: generation,
                       currentGeneration: self.focusLossGeneration
@@ -675,6 +773,10 @@ final class FloatingHUDPanelController: NSObject {
         applySize(newSize, to: panel)
         panel.setFrameOrigin(resizedOrigin)
         saveAnchor(origin: resizedOrigin, targetFrame: codexWindowFrame, panelSize: newSize, placement: placement)
+        if hasEstablishedPosition, lastKnownSafePanelFrame != nil {
+            lastKnownSafePanelFrame = panel.frame
+            layoutState.hasEstablishedPosition = true
+        }
         lastPositionedProcessID = lastCodexProcessID
         lastPositionedCodexWindowFrame = codexWindowFrame
         lastPositionedVisibleFrame = lastCodexVisibleFrame
@@ -687,7 +789,10 @@ final class FloatingHUDPanelController: NSObject {
         visibleFrame: NSRect,
         panel: NSPanel
     ) -> Bool {
-        guard lastPositionedProcessID == processID,
+        guard hasEstablishedPosition,
+              lastKnownSafePanelFrame != nil,
+              lastCodexProcessID == processID,
+              lastPositionedProcessID == processID,
               approximatelyEqual(lastPositionedVisibleFrame, visibleFrame),
               approximatelyEqual(lastPositionedCodexWindowFrame, targetFrame),
               lastPositionedPanelSize == panel.frame.size,
@@ -1184,6 +1289,8 @@ private struct CodexFloatingHUDView: View {
     @State private var isPasteAndSubmitInFlight = false
     @State private var isPromptShortcutInFlight = false
     @State private var trackedProfileID: UUID?
+    @State private var displayedAccountEmail: String?
+    @State private var suppressedAccountEmail: String?
     @State private var lastLivePercent: Int?
     @State private var hasPresentedHUD = false
     @State private var presentationCache: HUDDualQuotaPresentation?
@@ -1198,7 +1305,10 @@ private struct CodexFloatingHUDView: View {
         // breathing border; attaching the menu inside it recreates the
         // AppKit anchor on every pulse and makes an open menu jitter.
         ZStack {
-            if hasPresentedHUD || livePresentation != nil || displayedPresentation != nil {
+            if layoutState.hasEstablishedPosition
+                || hasPresentedHUD
+                || livePresentation != nil
+                || displayedPresentation != nil {
                 // Keep the content tree mounted while quota transport is
                 // temporarily empty. The cached presentation is profile-bound
                 // and renders an updating state instead of blanking the panel.
@@ -1413,6 +1523,8 @@ private struct CodexFloatingHUDView: View {
         .accessibilityValue(hudAccessibilityValue)
         .onAppear {
             trackedProfileID = model.currentProfileID
+            displayedAccountEmail = AccountProfileDisplay.fullEmail(model.currentAccountEmail)
+            suppressedAccountEmail = nil
             cacheCurrentPresentation()
             syncLiveBaseline()
         }
@@ -1420,6 +1532,8 @@ private struct CodexFloatingHUDView: View {
             // Never carry quota from one account identity into another. The
             // panel remains mounted, but the new profile renders —/updating
             // until it receives its own valid snapshot.
+            suppressedAccountEmail = displayedAccountEmail
+            displayedAccountEmail = nil
             presentationCache = nil
             trackedProfileID = newProfileID
             resetTracking(for: newProfileID)
@@ -1445,6 +1559,22 @@ private struct CodexFloatingHUDView: View {
             guard newValue != nil else { return }
             cacheCurrentPresentation()
         }
+        .onChange(of: model.accountHealth) { _, newHealth in
+            // Account health is the authoritative publication for a profile's
+            // identity. A new health snapshot clears any stale suppression
+            // and is the only point at which a replacement account email is
+            // accepted after a profile transition.
+            guard trackedProfileID == model.currentProfileID,
+                  let newHealth else { return }
+            displayedAccountEmail = AccountProfileDisplay.fullEmail(newHealth.identity.email)
+            suppressedAccountEmail = nil
+        }
+        .onChange(of: model.currentAccountEmail) { _, newValue in
+            let normalized = AccountProfileDisplay.fullEmail(newValue)
+            guard normalized != suppressedAccountEmail else { return }
+            displayedAccountEmail = normalized
+            suppressedAccountEmail = nil
+        }
         .onChange(of: model.connectionState) { _, _ in
             syncLiveBaseline()
         }
@@ -1461,7 +1591,17 @@ private struct CodexFloatingHUDView: View {
 
     private func hudHeader(metrics: HUDMetrics) -> some View {
         HStack {
-            Spacer(minLength: 0)
+            Text(displayedAccountEmail ?? "未提供 Email")
+                .font(.system(size: max(8, metrics.headerHeight * 0.42), weight: .semibold, design: .rounded))
+                .foregroundStyle(HUDColorPalette.secondaryText)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .minimumScaleFactor(0.62)
+                .allowsTightening(true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityElement()
+                .accessibilityLabel("目前登入 Email")
+                .accessibilityValue(displayedAccountEmail ?? "未提供 Email")
             let badgeState = HUDUpdateBadgePolicy.state(
                 updateState: model.updateState,
                 currentVersion: AppVersion.current
@@ -1481,7 +1621,7 @@ private struct CodexFloatingHUDView: View {
                 }
             )
         }
-        .frame(width: metrics.contentWidth, height: metrics.headerHeight, alignment: .trailing)
+        .frame(width: metrics.contentWidth, height: metrics.headerHeight, alignment: .leading)
     }
 
     private func quotaStack(width: CGFloat, height: CGFloat, gap: CGFloat) -> some View {
@@ -1771,12 +1911,12 @@ private struct CodexFloatingHUDView: View {
                 Label("重設 HUD 位置", systemImage: "scope")
             }
             Menu("HUD 尺寸") {
-                ForEach(HUDScaleLevel.allCases, id: \.rawValue) { level in
+                ForEach(Array(HUDScaleLevel.allCases.enumerated()), id: \.offset) { index, level in
                     Button {
                         setHUDScaleLevel(level)
                     } label: {
                         Label(
-                            "\(level.rawValue) · \(level.displayName)",
+                            "\(index + 1) · \(level.displayName)",
                             systemImage: layoutState.scaleLevel == level ? "checkmark" : "circle"
                         )
                     }
@@ -2086,7 +2226,7 @@ private struct CodexFloatingHUDView: View {
                 : "\(presentation.resetDescription)後重置"
             return "\(row.label)窗口，剩餘 \(presentation.remainingPercent)%，\(reset)"
         }.joined(separator: "；")
-        return "Codex，\(quotaText)，\(model.dataAgeText)，帳號 \(model.currentAccountEmail ?? "未提供 Email")。提供更新通知、詳細面板、只貼上、貼上並送出、執行、Commit 與 Push 快捷鈕"
+        return "Codex，\(quotaText)，\(model.dataAgeText)，帳號 \(displayedAccountEmail ?? "未提供 Email")。提供更新通知、詳細面板、只貼上、貼上並送出、執行、Commit 與 Push 快捷鈕"
     }
 
     private func cacheCurrentPresentation() {
