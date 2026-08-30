@@ -18,10 +18,15 @@ private enum FloatingHUDLayout {
         HUDMetrics(scaleLevel: scaleLevel).cornerRadius
     }
 
-    static func size(for placement: HUDPlacement, scaleLevel: HUDScaleLevel = .standard) -> NSSize {
+    static func size(
+        for placement: HUDPlacement,
+        scaleLevel: HUDScaleLevel = .standard,
+        quotaRowCount: Int = HUDMetrics.canonicalQuotaRowCount
+    ) -> NSSize {
         _ = placement
         let metrics = HUDMetrics(scaleLevel: scaleLevel)
-        return NSSize(width: metrics.panelSize.width, height: metrics.panelSize.height)
+        let size = metrics.panelSize(quotaRowCount: quotaRowCount)
+        return NSSize(width: size.width, height: size.height)
     }
 }
 
@@ -33,8 +38,15 @@ private final class FloatingHUDLayoutState: ObservableObject {
     /// to keep actions disabled during a focus transition.
     @Published var isCodexFocused = true
     @Published var hasEstablishedPosition = false
+    @Published var quotaRowCount: Int = 1
 
-    var size: NSSize { FloatingHUDLayout.size(for: placement, scaleLevel: scaleLevel) }
+    var size: NSSize {
+        FloatingHUDLayout.size(
+            for: placement,
+            scaleLevel: scaleLevel,
+            quotaRowCount: quotaRowCount
+        )
+    }
 }
 
 private final class DraggableHUDPanel: NSPanel {
@@ -150,6 +162,7 @@ final class FloatingHUDPanelController: NSObject {
             setTokenActivityRefreshInterval: { [weak self] seconds in self?.model.setTokenActivityRefreshInterval(seconds) },
             setCredentialWatchInterval: { [weak self] seconds in self?.model.setCredentialWatchInterval(seconds) },
             setHUDScaleLevel: { [weak self] level in self?.setHUDScaleLevel(level) },
+            quotaRowCountChanged: { [weak self] count in self?.setQuotaRowCount(count) },
             checkForUpdates: { [weak self] in self?.model.checkForUpdates() },
             cancelUpdateCheck: { [weak self] in self?.model.cancelUpdateCheck() },
             downloadAvailableUpdate: { [weak self] in self?.model.downloadAvailableUpdate() },
@@ -269,7 +282,7 @@ final class FloatingHUDPanelController: NSObject {
         refreshVisibility()
     }
 
-    /// Resize transaction for the five persisted HUD levels.  The old panel
+    /// Resize transaction for the seven persisted HUD levels.  The old panel
     /// size and origin are captured before calculating the new size so
     /// `resizedOrigin` can preserve the user's selected edge anchor.
     func setHUDScaleLevel(_ newLevel: HUDScaleLevel) {
@@ -283,7 +296,11 @@ final class FloatingHUDPanelController: NSObject {
         let oldPanelSize = panel.frame.size
         let oldOrigin = panel.frame.origin
         let placement = layoutState.placement
-        let newSize = FloatingHUDLayout.size(for: placement, scaleLevel: newLevel)
+        let newSize = FloatingHUDLayout.size(
+            for: placement,
+            scaleLevel: newLevel,
+            quotaRowCount: layoutState.quotaRowCount
+        )
         let targetFrame = lastCodexWindowFrame
         let visibleFrame = lastCodexVisibleFrame
         let resizedOrigin: NSPoint
@@ -306,6 +323,77 @@ final class FloatingHUDPanelController: NSObject {
         panel.setFrameOrigin(correctedOrigin)
         layoutState.scaleLevel = newLevel
         newLevel.persist(to: defaults)
+        if let targetFrame {
+            saveAnchor(
+                origin: correctedOrigin,
+                targetFrame: targetFrame,
+                panelSize: newSize,
+                placement: placement
+            )
+        }
+        lastPositionedPanelSize = newSize
+        if hasEstablishedPosition, lastKnownSafePanelFrame != nil {
+            lastKnownSafePanelFrame = panel.frame
+            layoutState.hasEstablishedPosition = true
+        }
+    }
+
+    /// Keeps the AppKit frame in lockstep with the number of quota windows
+    /// actually published for the active account. A one-window Free account
+    /// therefore has no empty second row, while a plan exposing an individual
+    /// spend-control window grows to show the third row without changing the
+    /// action/footer geometry.
+    private func synchronizeQuotaRowCount(for panel: NSPanel) {
+        let presentation = HUDQuotaPresentationPolicy.make(
+            snapshot: model.snapshot,
+            profileID: model.currentProfileID,
+            now: model.currentDate
+        )
+        let newCount = max(1, presentation?.rowCount ?? 1)
+        setQuotaRowCount(newCount, on: panel)
+    }
+
+    private func setQuotaRowCount(_ count: Int) {
+        guard let panel else {
+            layoutState.quotaRowCount = max(1, count)
+            return
+        }
+        setQuotaRowCount(count, on: panel)
+    }
+
+    private func setQuotaRowCount(_ count: Int, on panel: NSPanel) {
+        let newCount = max(1, count)
+        guard newCount != layoutState.quotaRowCount else { return }
+
+        let oldPanelSize = panel.frame.size
+        let oldOrigin = panel.frame.origin
+        let placement = layoutState.placement
+        let newSize = FloatingHUDLayout.size(
+            for: placement,
+            scaleLevel: layoutState.scaleLevel,
+            quotaRowCount: newCount
+        )
+        let targetFrame = lastCodexWindowFrame
+        let visibleFrame = lastCodexVisibleFrame
+        let resizedOrigin: NSPoint
+        if let targetFrame {
+            resizedOrigin = HUDPlacementPolicy.resizedOrigin(
+                origin: oldOrigin,
+                targetFrame: targetFrame,
+                oldPanelSize: oldPanelSize,
+                newPanelSize: newSize,
+                placement: placement
+            )
+        } else {
+            resizedOrigin = oldOrigin
+        }
+
+        applySize(newSize, to: panel)
+        let correctedOrigin = visibleFrame.map {
+            clampedOrigin(resizedOrigin, panelSize: newSize, visibleFrame: $0)
+        } ?? resizedOrigin
+        panel.setFrameOrigin(correctedOrigin)
+        layoutState.quotaRowCount = newCount
         if let targetFrame {
             saveAnchor(
                 origin: correctedOrigin,
@@ -375,6 +463,7 @@ final class FloatingHUDPanelController: NSObject {
             resetEstablishedPositionForNewCodexProcess()
         }
         lastCodexProcessID = codexApp.processIdentifier
+        synchronizeQuotaRowCount(for: panel)
         gitCoordinator.refreshIfNeeded()
         switch position(panel, beside: codexApp) {
         case .positioned:
@@ -521,7 +610,11 @@ final class FloatingHUDPanelController: NSObject {
         if let anchor = savedAnchor() {
             lastPlacement = anchor.placement
             layoutState.placement = anchor.placement
-            let size = FloatingHUDLayout.size(for: anchor.placement, scaleLevel: layoutState.scaleLevel)
+            let size = FloatingHUDLayout.size(
+                for: anchor.placement,
+                scaleLevel: layoutState.scaleLevel,
+                quotaRowCount: layoutState.quotaRowCount
+            )
             applySize(size, to: panel)
             let origin = HUDPlacementPolicy.origin(
                 for: anchor,
@@ -557,7 +650,11 @@ final class FloatingHUDPanelController: NSObject {
             )
             lastPlacement = placement
             layoutState.placement = placement
-            let size = FloatingHUDLayout.size(for: placement, scaleLevel: layoutState.scaleLevel)
+            let size = FloatingHUDLayout.size(
+                for: placement,
+                scaleLevel: layoutState.scaleLevel,
+                quotaRowCount: layoutState.quotaRowCount
+            )
             applySize(size, to: panel)
             let origin = HUDPlacementPolicy.resizedOrigin(
                 origin: oldOrigin,
@@ -586,7 +683,11 @@ final class FloatingHUDPanelController: NSObject {
             )
             lastPlacement = placement
             layoutState.placement = placement
-            let size = FloatingHUDLayout.size(for: placement, scaleLevel: layoutState.scaleLevel)
+            let size = FloatingHUDLayout.size(
+                for: placement,
+                scaleLevel: layoutState.scaleLevel,
+                quotaRowCount: layoutState.quotaRowCount
+            )
             applySize(size, to: panel)
             let resizedOrigin = HUDPlacementPolicy.resizedOrigin(
                 origin: origin,
@@ -614,7 +715,11 @@ final class FloatingHUDPanelController: NSObject {
             )
             lastPlacement = placement
             layoutState.placement = placement
-            let size = FloatingHUDLayout.size(for: placement, scaleLevel: layoutState.scaleLevel)
+            let size = FloatingHUDLayout.size(
+                for: placement,
+                scaleLevel: layoutState.scaleLevel,
+                quotaRowCount: layoutState.quotaRowCount
+            )
             applySize(size, to: panel)
             let resizedOrigin = HUDPlacementPolicy.resizedOrigin(
                 origin: legacyOrigin,
@@ -762,7 +867,11 @@ final class FloatingHUDPanelController: NSObject {
         )
         lastPlacement = placement
         layoutState.placement = placement
-        let newSize = FloatingHUDLayout.size(for: placement, scaleLevel: layoutState.scaleLevel)
+        let newSize = FloatingHUDLayout.size(
+            for: placement,
+            scaleLevel: layoutState.scaleLevel,
+            quotaRowCount: layoutState.quotaRowCount
+        )
         let resizedOrigin = HUDPlacementPolicy.resizedOrigin(
             origin: origin,
             targetFrame: codexWindowFrame,
@@ -943,7 +1052,12 @@ private struct HUDQuotaRow: View {
         switch kind {
         case .fiveHour: return HUDColorPalette.fiveHour
         case .sevenDay: return HUDColorPalette.sevenDay
+        case .gptReserveWeekly: return HUDColorPalette.gptReserveWeekly
         }
+    }
+
+    private var systemImage: String {
+        kind == .gptReserveWeekly ? "cube" : "clock"
     }
 
     private var fillFraction: CGFloat {
@@ -975,7 +1089,7 @@ private struct HUDQuotaRow: View {
                 .frame(width: width * fillFraction)
 
             HStack(spacing: max(5, height * 0.18)) {
-                Image(systemName: "clock")
+                Image(systemName: systemImage)
                     .font(.system(size: height * 0.42, weight: .semibold))
                     .frame(width: height * 0.58)
                 Text(kind.label)
@@ -1238,6 +1352,44 @@ private struct HUDUpdateBadge: View {
     }
 }
 
+/// Compact account-plan badge shown beside the in-memory Email identity. The
+/// badge is informational only; plan data continues to come from the existing
+/// account-health/snapshot publication and is never persisted by the HUD.
+private struct HUDPlanBadge: View {
+    let plan: String
+    let height: CGFloat
+
+    private var normalizedPlan: String {
+        plan.lowercased().replacingOccurrences(of: "_", with: " ")
+    }
+
+    private var tint: Color {
+        if normalizedPlan.contains("pro") { return Color.purple }
+        if normalizedPlan.contains("plus") { return Color.blue }
+        if normalizedPlan.contains("business") { return Color.orange }
+        if normalizedPlan.contains("team") { return Color.teal }
+        if normalizedPlan.contains("enterprise") { return Color.indigo }
+        if normalizedPlan.contains("free") { return Color.gray }
+        return HUDColorPalette.secondaryText
+    }
+
+    var body: some View {
+        Text(plan)
+            .font(.system(size: max(9, height * HUDMetrics.canonicalQuotaPrimaryTextScale), weight: .bold, design: .rounded))
+            .foregroundStyle(tint)
+            .lineLimit(1)
+            .minimumScaleFactor(0.72)
+            .allowsTightening(true)
+            .padding(.horizontal, max(7, height * 0.28))
+            .frame(minWidth: max(46, height * 2.15), minHeight: height, maxHeight: height)
+            .background(tint.opacity(0.13), in: Capsule())
+            .overlay { Capsule().stroke(tint.opacity(0.35), lineWidth: max(0.6, height * 0.025)) }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("帳號方案")
+            .accessibilityValue(plan)
+    }
+}
+
 private struct CodexFloatingHUDView: View {
     private enum UpdateFeedbackKind {
         case checking
@@ -1275,6 +1427,7 @@ private struct CodexFloatingHUDView: View {
     let setTokenActivityRefreshInterval: (Int) -> Void
     let setCredentialWatchInterval: (Int) -> Void
     let setHUDScaleLevel: (HUDScaleLevel) -> Void
+    let quotaRowCountChanged: (Int) -> Void
     let checkForUpdates: () -> Void
     let cancelUpdateCheck: () -> Void
     let downloadAvailableUpdate: () -> Void
@@ -1295,6 +1448,7 @@ private struct CodexFloatingHUDView: View {
     @State private var trackedProfileID: UUID?
     @State private var displayedAccountEmail: String?
     @State private var suppressedAccountEmail: String?
+    @State private var displayedPlan: String?
     @State private var lastLivePercent: Int?
     @State private var hasPresentedHUD = false
     @State private var presentationCache: HUDDualQuotaPresentation?
@@ -1504,6 +1658,7 @@ private struct CodexFloatingHUDView: View {
     @ViewBuilder
     private func hudContainer() -> some View {
         let metrics = HUDMetrics(scaleLevel: layoutState.scaleLevel)
+        let panelSize = metrics.panelSize(quotaRowCount: max(1, layoutState.quotaRowCount))
         VStack(alignment: .leading, spacing: 0) {
             hudHeader(metrics: metrics)
             Color.clear.frame(height: metrics.headerGap)
@@ -1514,7 +1669,7 @@ private struct CodexFloatingHUDView: View {
             footerRow(metrics: metrics)
         }
         .padding(metrics.outerPadding)
-        .frame(width: metrics.panelSize.width, height: metrics.panelSize.height, alignment: .topLeading)
+        .frame(width: panelSize.width, height: panelSize.height, alignment: .topLeading)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: layoutState.scaleLevel), style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: layoutState.scaleLevel), style: .continuous)
@@ -1529,8 +1684,10 @@ private struct CodexFloatingHUDView: View {
             trackedProfileID = model.currentProfileID
             displayedAccountEmail = AccountProfileDisplay.fullEmail(model.currentAccountEmail)
             suppressedAccountEmail = nil
+            displayedPlan = normalizedPlanLabel(model.accountHealth?.identity.planType ?? model.snapshot?.planType)
             cacheCurrentPresentation()
             syncLiveBaseline()
+            quotaRowCountChanged(max(1, livePresentation?.rowCount ?? 1))
         }
         .onChange(of: model.currentProfileID) { _, newProfileID in
             // Never carry quota from one account identity into another. The
@@ -1538,7 +1695,9 @@ private struct CodexFloatingHUDView: View {
             // until it receives its own valid snapshot.
             suppressedAccountEmail = displayedAccountEmail
             displayedAccountEmail = nil
+            displayedPlan = nil
             presentationCache = nil
+            quotaRowCountChanged(1)
             trackedProfileID = newProfileID
             resetTracking(for: newProfileID)
             // UsageViewModel clears the old snapshot and lastUpdated before
@@ -1554,6 +1713,13 @@ private struct CodexFloatingHUDView: View {
         .onChange(of: model.snapshot) { _, _ in
             cacheCurrentPresentation()
             observePercentChange()
+            if trackedProfileID == model.currentProfileID,
+               let plan = normalizedPlanLabel(model.snapshot?.planType) {
+                displayedPlan = plan
+            }
+        }
+        .onChange(of: presentationCache) { _, _ in
+            quotaRowCountChanged(max(1, displayedPresentation?.rowCount ?? 1))
         }
         .onChange(of: model.lastUpdated) { _, newValue in
             // A managed profile can restore a cached snapshot with the same
@@ -1572,6 +1738,9 @@ private struct CodexFloatingHUDView: View {
                   let newHealth else { return }
             displayedAccountEmail = AccountProfileDisplay.fullEmail(newHealth.identity.email)
             suppressedAccountEmail = nil
+            if let plan = normalizedPlanLabel(newHealth.identity.planType) {
+                displayedPlan = plan
+            }
         }
         .onChange(of: model.currentAccountEmail) { _, newValue in
             let normalized = AccountProfileDisplay.fullEmail(newValue)
@@ -1607,6 +1776,9 @@ private struct CodexFloatingHUDView: View {
                 .accessibilityElement()
                 .accessibilityLabel("目前登入 Email")
                 .accessibilityValue(displayedAccountEmail ?? "未提供 Email")
+            if let displayedPlan {
+                HUDPlanBadge(plan: displayedPlan, height: metrics.headerHeight)
+            }
             let badgeState = HUDUpdateBadgePolicy.state(
                 updateState: model.updateState,
                 currentVersion: AppVersion.current
@@ -1629,23 +1801,35 @@ private struct CodexFloatingHUDView: View {
         .frame(width: metrics.contentWidth, height: metrics.headerHeight, alignment: .leading)
     }
 
+    private func normalizedPlanLabel(_ rawPlan: String?) -> String? {
+        guard let rawPlan else { return nil }
+        let trimmed = rawPlan.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let key = trimmed.lowercased()
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+        if key.contains("business") && key.contains("premium") { return "Business Premium" }
+        if key.contains("business") { return "Business" }
+        if key.contains("enterprise") { return "Enterprise" }
+        if key.contains("team") { return "Team" }
+        if key.contains("plus") { return "Plus" }
+        if key.contains("pro") { return "Pro" }
+        if key.contains("free") { return "Free" }
+        return trimmed
+    }
+
     private func quotaStack(width: CGFloat, height: CGFloat, gap: CGFloat) -> some View {
         ZStack(alignment: .topTrailing) {
             VStack(alignment: .leading, spacing: gap) {
-                HUDQuotaRow(
-                    kind: .fiveHour,
-                    presentation: displayedPresentation?.fiveHour,
-                    isUpdating: isQuotaUpdating,
-                    width: width,
-                    height: height
-                )
-                HUDQuotaRow(
-                    kind: .sevenDay,
-                    presentation: displayedPresentation?.sevenDay,
-                    isUpdating: isQuotaUpdating,
-                    width: width,
-                    height: height
-                )
+                ForEach(quotaRowKinds, id: \.self) { kind in
+                    HUDQuotaRow(
+                        kind: kind,
+                        presentation: quotaPresentation(for: kind),
+                        isUpdating: isQuotaUpdating,
+                        width: width,
+                        height: height
+                    )
+                }
             }
             if let decreaseAmount {
                 Text("−\(decreaseAmount)%")
@@ -1655,6 +1839,17 @@ private struct CodexFloatingHUDView: View {
                     .zIndex(1)
             }
         }
+    }
+
+    private var quotaRowKinds: [HUDQuotaWindowKind] {
+        if let rows = displayedPresentation?.rows, !rows.isEmpty {
+            return rows.map(\.kind)
+        }
+        return Array(HUDQuotaWindowKind.allCases.prefix(max(1, layoutState.quotaRowCount)))
+    }
+
+    private func quotaPresentation(for kind: HUDQuotaWindowKind) -> HUDQuotaWindowPresentation? {
+        displayedPresentation?.rows.first(where: { $0.kind == kind })
     }
 
     private func actionCardsRow(metrics: HUDMetrics) -> some View {
@@ -2220,20 +2415,17 @@ private struct CodexFloatingHUDView: View {
     }
 
     private var hudAccessibilityValue: String {
-        let rows = [
-            (label: HUDQuotaWindowKind.fiveHour.label, presentation: displayedPresentation?.fiveHour),
-            (label: HUDQuotaWindowKind.sevenDay.label, presentation: displayedPresentation?.sevenDay)
-        ]
-        let quotaText = rows.map { row in
-            guard let presentation = row.presentation else {
-                return "\(row.label)窗口，\(isQuotaUpdating ? "資料更新中" : "此帳號未提供")"
+        let quotaText = quotaRowKinds.map { kind in
+            guard let presentation = quotaPresentation(for: kind) else {
+                return "\(kind.label)窗口，\(isQuotaUpdating ? "資料更新中" : "此帳號未提供")"
             }
             let reset = presentation.resetDescription == "更新中" || presentation.resetDescription == "已重置"
                 ? presentation.resetDescription
                 : "\(presentation.resetDescription)後重置"
-            return "\(row.label)窗口，剩餘 \(presentation.remainingPercent)%，\(reset)"
+            return "\(kind.label)窗口，剩餘 \(presentation.remainingPercent)%，\(reset)"
         }.joined(separator: "；")
-        return "Codex，\(quotaText)，\(model.dataAgeText)，帳號 \(displayedAccountEmail ?? "未提供 Email")。提供更新通知、詳細面板、只貼上、貼上並送出、執行、Commit 與 Push 快捷鈕"
+        let planText = displayedPlan.map { "，方案 \($0)" } ?? ""
+        return "Codex，\(quotaText)\(planText)，\(model.dataAgeText)，帳號 \(displayedAccountEmail ?? "未提供 Email")。提供更新通知、詳細面板、只貼上、貼上並送出、執行、Commit 與 Push 快捷鈕"
     }
 
     private func cacheCurrentPresentation() {

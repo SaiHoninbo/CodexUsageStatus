@@ -1,13 +1,15 @@
 import Foundation
 
-enum HUDQuotaWindowKind: Equatable, CaseIterable {
+enum HUDQuotaWindowKind: Equatable, CaseIterable, Hashable {
     case fiveHour
     case sevenDay
+    case gptReserveWeekly
 
     var durationMins: Int64 {
         switch self {
         case .fiveHour: return 300
         case .sevenDay: return 10_080
+        case .gptReserveWeekly: return 10_080
         }
     }
 
@@ -15,6 +17,7 @@ enum HUDQuotaWindowKind: Equatable, CaseIterable {
         switch self {
         case .fiveHour: return "5 小時"
         case .sevenDay: return "7 天"
+        case .gptReserveWeekly: return "GPT reserve Weekly"
         }
     }
 }
@@ -35,9 +38,28 @@ struct HUDDualQuotaPresentation: Equatable {
     let profileID: UUID
     let fiveHour: HUDQuotaWindowPresentation?
     let sevenDay: HUDQuotaWindowPresentation?
+    let gptReserveWeekly: HUDQuotaWindowPresentation?
+
+    init(
+        profileID: UUID,
+        fiveHour: HUDQuotaWindowPresentation?,
+        sevenDay: HUDQuotaWindowPresentation?,
+        gptReserveWeekly: HUDQuotaWindowPresentation? = nil
+    ) {
+        self.profileID = profileID
+        self.fiveHour = fiveHour
+        self.sevenDay = sevenDay
+        self.gptReserveWeekly = gptReserveWeekly
+    }
+
+    var rows: [HUDQuotaWindowPresentation] {
+        [fiveHour, sevenDay, gptReserveWeekly].compactMap { $0 }
+    }
+
+    var rowCount: Int { rows.count }
 
     var hasRecognizedWindow: Bool {
-        fiveHour != nil || sevenDay != nil
+        !rows.isEmpty
     }
 }
 
@@ -51,11 +73,13 @@ enum HUDQuotaPresentationPolicy {
         let windows = [snapshot?.primary, snapshot?.secondary].compactMap { $0 }
         let fiveHour = makeWindow(.fiveHour, from: windows, now: now)
         let sevenDay = makeWindow(.sevenDay, from: windows, now: now)
-        guard fiveHour != nil || sevenDay != nil else { return nil }
+        let gptReserveWeekly = makeSpendControl(snapshot?.individualLimit, now: now)
+        guard fiveHour != nil || sevenDay != nil || gptReserveWeekly != nil else { return nil }
         return HUDDualQuotaPresentation(
             profileID: profileID,
             fiveHour: fiveHour,
-            sevenDay: sevenDay
+            sevenDay: sevenDay,
+            gptReserveWeekly: gptReserveWeekly
         )
     }
 
@@ -73,6 +97,21 @@ enum HUDQuotaPresentationPolicy {
             remainingPercent: window.remainingPercent,
             resetsAt: window.resetsAt,
             resetDescription: compactResetDescription(window.resetsAt, now: now)
+        )
+    }
+
+    static func makeSpendControl(
+        _ spend: SpendControlLimit?,
+        now: Date = Date()
+    ) -> HUDQuotaWindowPresentation? {
+        guard let spend else { return nil }
+        return HUDQuotaWindowPresentation(
+            kind: .gptReserveWeekly,
+            durationMins: HUDQuotaWindowKind.gptReserveWeekly.durationMins,
+            label: HUDQuotaWindowKind.gptReserveWeekly.label,
+            remainingPercent: max(0, min(100, spend.remainingPercent)),
+            resetsAt: spend.resetsAt,
+            resetDescription: compactResetDescription(spend.resetsAt, now: now)
         )
     }
 

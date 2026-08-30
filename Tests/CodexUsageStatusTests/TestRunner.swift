@@ -624,6 +624,7 @@ struct CodexUsageStatusTests {
         try expect(presentation.sevenDay?.resetDescription == "2天14小時", "7-day countdown")
         try expect(presentation.fiveHour?.fillFraction == 0.96, "5-hour fill fraction")
         try expect(presentation.sevenDay?.fillFraction == 0.62, "7-day fill fraction")
+        try expect(presentation.rowCount == 2, "two published windows produce two HUD rows")
         try expect(
             HUDQuotaWindowPresentation(
                 kind: .fiveHour,
@@ -681,6 +682,7 @@ struct CodexUsageStatusTests {
         let onlyFivePresentation = HUDQuotaPresentationPolicy.make(snapshot: onlyFive, profileID: profileID, now: now)
         try expect(onlyFivePresentation?.fiveHour != nil, "available 5-hour row remains present")
         try expect(onlyFivePresentation?.sevenDay == nil, "missing 7-day row is unavailable")
+        try expect(onlyFivePresentation?.rows.count == 1, "a Free-style single window has no placeholder row")
 
         let onlySeven = UsageSnapshot(
             limitId: nil, limitName: nil, planType: nil,
@@ -691,6 +693,20 @@ struct CodexUsageStatusTests {
         let onlySevenPresentation = HUDQuotaPresentationPolicy.make(snapshot: onlySeven, profileID: profileID, now: now)
         try expect(onlySevenPresentation?.fiveHour == nil, "a 7-day window must never populate the 5-hour row")
         try expect(onlySevenPresentation?.sevenDay?.remainingPercent == 98, "available 7-day row remains present")
+
+        let withSpendControl = UsageSnapshot(
+            limitId: nil, limitName: nil, planType: "pro",
+            primary: primary, secondary: secondary,
+            individualLimit: SpendControlLimit(
+                limit: "100", used: "20", remainingPercent: 80,
+                resetsAt: Int64(now.timeIntervalSince1970) + 3 * 86_400 + 4 * 3_600
+            ),
+            rateLimitReachedType: nil, spendControlReached: nil, receivedAt: now
+        )
+        let threeRows = HUDQuotaPresentationPolicy.make(snapshot: withSpendControl, profileID: profileID, now: now)
+        try expect(threeRows?.rows.count == 3, "a plan with spend control exposes three HUD rows")
+        try expect(threeRows?.rows.last?.kind == .gptReserveWeekly, "spend control uses GPT reserve Weekly row")
+        try expect(threeRows?.gptReserveWeekly?.remainingPercent == 80, "spend control percentage is preserved")
 
         let unknown = RateLimitWindow(usedPercent: 50, resetsAt: fiveReset, windowDurationMins: 60)
         let unknownSnapshot = UsageSnapshot(
@@ -1411,6 +1427,9 @@ struct CodexUsageStatusTests {
         try expectApproximately(standard.headerGap, 8, "header gap")
         try expectApproximately(standard.verticalContentHeight, 211.2, "vertical content closes with header")
         try expectApproximately(standard.verticalContentHeight + standard.outerPadding * 2, 240, "canonical height closes")
+        try expectSizeApproximately(standard.panelSize(quotaRowCount: 1), CGSize(width: 416, height: 193.6), "one quota row removes empty vertical space")
+        try expectSizeApproximately(standard.panelSize(quotaRowCount: 2), CGSize(width: 416, height: 240), "two quota rows retain canonical geometry")
+        try expectSizeApproximately(standard.panelSize(quotaRowCount: 3), CGSize(width: 416, height: 286.4), "three quota rows grow only by quota height")
         try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller2).panelSize, CGSize(width: 332.8, height: 192), "level 1 scales one layout")
         try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller4).panelSize, CGSize(width: 266.24, height: 153.6), "level 1 scales one layout")
         try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller3).panelSize, CGSize(width: 299.52, height: 172.8), "level 2 scales one layout")
@@ -1438,6 +1457,14 @@ struct CodexUsageStatusTests {
                 3 * metrics.actionCardWidth + (metrics.actionSpacing * 2) <= metrics.contentWidth + 0.01,
                 "action cards fit three columns at every scale level"
             )
+            for rowCount in 1...3 {
+                let dynamicHeight = metrics.verticalContentHeight(for: rowCount) + metrics.outerPadding * 2
+                try expectApproximately(
+                    dynamicHeight,
+                    metrics.panelSize(quotaRowCount: rowCount).height,
+                    "dynamic quota layout closes at \(level.displayName), \(rowCount) rows"
+                )
+            }
         }
     }
 

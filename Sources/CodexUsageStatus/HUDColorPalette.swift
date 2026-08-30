@@ -10,6 +10,7 @@ enum HUDColorPalette {
 
     static let fiveHour = Color.orange
     static let sevenDay = Color.blue
+    static let gptReserveWeekly = Color.teal
     static let submitAction = Color.blue
     static let executeAction = Color.green
     static let commit = Color.orange

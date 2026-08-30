@@ -97,7 +97,8 @@ enum HUDVisibilityPolicy {
         return HUDDualQuotaPresentation(
             profileID: currentProfileID,
             fiveHour: live.fiveHour ?? cached.fiveHour,
-            sevenDay: live.sevenDay ?? cached.sevenDay
+            sevenDay: live.sevenDay ?? cached.sevenDay,
+            gptReserveWeekly: live.gptReserveWeekly ?? cached.gptReserveWeekly
         )
     }
 

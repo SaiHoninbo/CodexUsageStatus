@@ -2,7 +2,7 @@ import CoreGraphics
 import Foundation
 
 /// Geometry and typography for the C vertical HUD.  Keeping these values in
-/// one pure type makes the five levels auditable and prevents independent
+/// one pure type makes every scale level auditable and prevents independent
 /// rows/cards from accidentally acquiring different scale factors.
 struct HUDMetrics: Equatable {
     let scaleLevel: HUDScaleLevel
@@ -16,6 +16,7 @@ struct HUDMetrics: Equatable {
     static let canonicalHeaderHeight: CGFloat = 24
     static let canonicalHeaderGap: CGFloat = 8
     static let canonicalQuotaRowHeight: CGFloat = 40
+    static let canonicalQuotaRowCount: Int = 2
     // Keep identity/header text visually aligned with the primary quota
     // label (for example, "5 小時") at every HUD scale.
     static let canonicalQuotaPrimaryTextScale: CGFloat = 0.46
@@ -40,6 +41,21 @@ struct HUDMetrics: Equatable {
         // the outer frame would make fractional levels clip at the bottom.
         CGSize(width: Self.canonicalPanelSize.width * factor,
                height: Self.canonicalPanelSize.height * factor)
+    }
+
+    /// Returns the panel geometry for the number of quota rows currently
+    /// available to the active account. The canonical two-row size remains
+    /// the compatibility default; accounts with one or three windows shrink or
+    /// grow only by the quota column delta, so no empty placeholder row is
+    /// reserved in the HUD.
+    func panelSize(quotaRowCount: Int) -> CGSize {
+        let count = max(1, quotaRowCount)
+        let canonicalHeight = Self.canonicalPanelSize.height
+        let quotaDelta = quotaColumnHeight(for: count) - quotaColumnHeight(for: Self.canonicalQuotaRowCount)
+        return CGSize(
+            width: Self.canonicalPanelSize.width * factor,
+            height: canonicalHeight * factor + quotaDelta
+        )
     }
     var outerPadding: CGFloat { Self.canonicalOuterPadding * factor }
     var headerHeight: CGFloat { Self.canonicalHeaderHeight * factor }
@@ -76,10 +92,19 @@ struct HUDMetrics: Equatable {
     }
 
     var quotaColumnHeight: CGFloat {
-        (quotaRowHeight * 2) + quotaGap
+        quotaColumnHeight(for: Self.canonicalQuotaRowCount)
+    }
+
+    func quotaColumnHeight(for rowCount: Int) -> CGFloat {
+        let count = max(1, rowCount)
+        return (quotaRowHeight * CGFloat(count)) + (quotaGap * CGFloat(max(0, count - 1)))
     }
 
     var verticalContentHeight: CGFloat {
-        headerHeight + headerGap + quotaColumnHeight + sectionGap + actionHeight + sectionGap + footerHeight
+        verticalContentHeight(for: Self.canonicalQuotaRowCount)
+    }
+
+    func verticalContentHeight(for rowCount: Int) -> CGFloat {
+        headerHeight + headerGap + quotaColumnHeight(for: rowCount) + sectionGap + actionHeight + sectionGap + footerHeight
     }
 }
