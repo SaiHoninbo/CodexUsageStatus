@@ -979,7 +979,11 @@ private struct HUDQuotaRow: View {
                     .font(.system(size: height * 0.42, weight: .semibold))
                     .frame(width: height * 0.58)
                 Text(kind.label)
-                    .font(.system(size: height * 0.46, weight: .semibold, design: .rounded))
+                    .font(.system(
+                        size: height * HUDMetrics.canonicalQuotaPrimaryTextScale,
+                        weight: .semibold,
+                        design: .rounded
+                    ))
                 Text(percentText)
                     .font(.system(size: height * 0.48, weight: .bold, design: .rounded))
                 Spacer(minLength: height * 0.12)
@@ -1211,9 +1215,9 @@ private struct HUDUpdateBadge: View {
 
     var body: some View {
         let spacing = max(CGFloat(3), height * 0.12)
-        let iconSize = max(CGFloat(9), height * 0.34)
-        let titleSize = max(CGFloat(9), height * 0.38)
-        let minimumWidth = max(CGFloat(76), height * 2.45)
+        let iconSize = max(CGFloat(9), height * 0.42)
+        let titleSize = max(CGFloat(9), height * HUDMetrics.canonicalQuotaPrimaryTextScale)
+        let minimumWidth = max(CGFloat(76), height * 4.4)
         let horizontalPadding = max(CGFloat(6), height * 0.2)
         Button(action: action) {
             badgeButtonLabel(
@@ -1590,15 +1594,16 @@ private struct CodexFloatingHUDView: View {
     }
 
     private func hudHeader(metrics: HUDMetrics) -> some View {
-        HStack {
+        HStack(alignment: .center, spacing: max(CGFloat(4), metrics.headerGap * 0.5)) {
             Text(displayedAccountEmail ?? "未提供 Email")
-                .font(.system(size: max(8, metrics.headerHeight * 0.42), weight: .semibold, design: .rounded))
+                .font(.system(size: metrics.quotaPrimaryTextSize, weight: .semibold, design: .rounded))
                 .foregroundStyle(HUDColorPalette.secondaryText)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .minimumScaleFactor(0.62)
                 .allowsTightening(true)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(1)
                 .accessibilityElement()
                 .accessibilityLabel("目前登入 Email")
                 .accessibilityValue(displayedAccountEmail ?? "未提供 Email")

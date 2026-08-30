@@ -16,6 +16,9 @@ struct HUDMetrics: Equatable {
     static let canonicalHeaderHeight: CGFloat = 24
     static let canonicalHeaderGap: CGFloat = 8
     static let canonicalQuotaRowHeight: CGFloat = 40
+    // Keep identity/header text visually aligned with the primary quota
+    // label (for example, "5 小時") at every HUD scale.
+    static let canonicalQuotaPrimaryTextScale: CGFloat = 0.46
     static let canonicalQuotaGap: CGFloat = 6.4
     static let canonicalSectionGap: CGFloat = 11.2
     static let canonicalActionHeight: CGFloat = 38.4
@@ -42,6 +45,9 @@ struct HUDMetrics: Equatable {
     var headerHeight: CGFloat { Self.canonicalHeaderHeight * factor }
     var headerGap: CGFloat { Self.canonicalHeaderGap * factor }
     var quotaRowHeight: CGFloat { Self.canonicalQuotaRowHeight * factor }
+    var quotaPrimaryTextSize: CGFloat {
+        quotaRowHeight * Self.canonicalQuotaPrimaryTextScale
+    }
     var quotaGap: CGFloat { Self.canonicalQuotaGap * factor }
     var sectionGap: CGFloat { Self.canonicalSectionGap * factor }
     var actionHeight: CGFloat { Self.canonicalActionHeight * factor }
