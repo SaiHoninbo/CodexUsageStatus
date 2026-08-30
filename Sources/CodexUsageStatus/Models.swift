@@ -130,6 +130,11 @@ struct UsageSnapshot: Equatable {
     var planType: String?
     var primary: RateLimitWindow?
     var secondary: RateLimitWindow?
+    /// The optional model-reserve bucket returned separately from the
+    /// canonical `codex` bucket (currently `base_model_inference`). It is
+    /// intentionally kept distinct from `individualLimit`, which represents
+    /// a spend-control/monthly credit limit rather than a rate-limit window.
+    var gptReserveWeekly: RateLimitWindow?
     var individualLimit: SpendControlLimit?
     var rateLimitReachedType: String?
     var spendControlReached: Bool?
@@ -146,13 +151,15 @@ struct UsageSnapshot: Equatable {
         rateLimitReachedType: String?,
         spendControlReached: Bool?,
         rateLimitResetCredits: RateLimitResetCredits? = nil,
-        receivedAt: Date
+        receivedAt: Date,
+        gptReserveWeekly: RateLimitWindow? = nil
     ) {
         self.limitId = limitId
         self.limitName = limitName
         self.planType = planType
         self.primary = primary
         self.secondary = secondary
+        self.gptReserveWeekly = gptReserveWeekly
         self.individualLimit = individualLimit
         self.rateLimitReachedType = rateLimitReachedType
         self.spendControlReached = spendControlReached
@@ -188,6 +195,7 @@ struct RateLimitPatch: Equatable {
     var planType: String?
     var primary: RateLimitWindowPatch?
     var secondary: RateLimitWindowPatch?
+    var gptReserveWeekly: RateLimitWindowPatch?
     var individualLimit: SpendControlPatch?
     var rateLimitReachedType: String?
     var spendControlReached: Bool?
@@ -208,6 +216,7 @@ struct RateLimitPatch: Equatable {
 
         let primaryWindow = Self.mergeWindow(existing: base.primary, patch: primary)
         let secondaryWindow = Self.mergeWindow(existing: base.secondary, patch: secondary)
+        let reserveWindow = Self.mergeWindow(existing: base.gptReserveWeekly, patch: gptReserveWeekly)
         let spendControl = Self.mergeSpendControl(existing: base.individualLimit, patch: individualLimit)
 
         return UsageSnapshot(
@@ -220,7 +229,8 @@ struct RateLimitPatch: Equatable {
             rateLimitReachedType: rateLimitReachedType ?? base.rateLimitReachedType,
             spendControlReached: spendControlReached ?? base.spendControlReached,
             rateLimitResetCredits: base.rateLimitResetCredits,
-            receivedAt: receivedAt
+            receivedAt: receivedAt,
+            gptReserveWeekly: reserveWindow
         )
     }
 
@@ -292,7 +302,8 @@ enum UsageDataCodec {
             rateLimitReachedType: string(source["rateLimitReachedType"]),
             spendControlReached: source["spendControlReached"] as? Bool,
             rateLimitResetCredits: decodeResetCredits(result["rateLimitResetCredits"]),
-            receivedAt: receivedAt
+            receivedAt: receivedAt,
+            gptReserveWeekly: decodeGPTReserveWindow(from: result)
         )
     }
 
@@ -308,6 +319,7 @@ enum UsageDataCodec {
             planType: string(source["planType"]),
             primary: decodeWindowPatch(source["primary"]),
             secondary: decodeWindowPatch(source["secondary"]),
+            gptReserveWeekly: decodeGPTReserveWindowPatch(from: params),
             individualLimit: decodeSpendControlPatch(source["individualLimit"]),
             rateLimitReachedType: string(source["rateLimitReachedType"]),
             spendControlReached: source["spendControlReached"] as? Bool
@@ -317,6 +329,47 @@ enum UsageDataCodec {
     private static func codexLimitObject(from result: [String: Any]) -> [String: Any]? {
         guard let buckets = result["rateLimitsByLimitId"] as? [String: Any] else { return nil }
         return buckets["codex"] as? [String: Any]
+    }
+
+    /// Decode the optional reserve/model bucket without treating arbitrary
+    /// multi-bucket rate limits as the user's shared Codex quota. The App
+    /// Server currently calls this bucket `base_model_inference` and exposes
+    /// the display name `gpt-reserve`; both identifiers are accepted to keep
+    /// the client tolerant of either wire representation.
+    private static func decodeGPTReserveWindow(from result: [String: Any]) -> RateLimitWindow? {
+        guard let buckets = result["rateLimitsByLimitId"] as? [String: Any],
+              let bucket = gptReserveBucket(from: buckets) else { return nil }
+        return decodeWindow(bucket["primary"]) ?? decodeWindow(bucket["secondary"])
+    }
+
+    private static func decodeGPTReserveWindowPatch(from params: [String: Any]) -> RateLimitWindowPatch? {
+        guard let buckets = params["rateLimitsByLimitId"] as? [String: Any],
+              let bucket = gptReserveBucket(from: buckets) else { return nil }
+        return decodeWindowPatch(bucket["primary"]) ?? decodeWindowPatch(bucket["secondary"])
+    }
+
+    private static func gptReserveBucket(from buckets: [String: Any]) -> [String: Any]? {
+        let preferredKeys = ["base_model_inference", "gpt-reserve", "gpt_reserve"]
+        for preferredKey in preferredKeys {
+            if let value = buckets[preferredKey] as? [String: Any] {
+                return value
+            }
+        }
+
+        return buckets.first { key, value in
+            guard let bucket = value as? [String: Any] else { return false }
+            let identifiers = [
+                key,
+                string(bucket["limitId"]),
+                string(bucket["limitName"])
+            ].compactMap { $0?.lowercased() }
+            return identifiers.contains { identifier in
+                let compact = identifier.replacingOccurrences(of: "-", with: "")
+                    .replacingOccurrences(of: "_", with: "")
+                    .replacingOccurrences(of: " ", with: "")
+                return compact.contains("gptreserve") || compact.contains("basemodelinference")
+            }
+        }?.value as? [String: Any]
     }
 
     private static func mergedLimitObject(legacy: [String: Any], codexBucket: [String: Any]?) -> [String: Any]? {

@@ -91,6 +91,11 @@ struct CodexUsageStatusTests {
                     "limitName": "Codex",
                     "primary": ["usedPercent": 25, "resetsAt": 200, "windowDurationMins": 15],
                     "secondary": ["usedPercent": 60, "resetsAt": 300, "windowDurationMins": 10080]
+                ],
+                "base_model_inference": [
+                    "limitId": "base_model_inference",
+                    "limitName": "gpt-reserve",
+                    "primary": ["usedPercent": 0, "resetsAt": 400, "windowDurationMins": 10080]
                 ]
             ]
         ]
@@ -101,6 +106,8 @@ struct CodexUsageStatusTests {
         try expect(snapshot.primary?.usedPercent == 25, "primary used percent")
         try expect(snapshot.primary?.remainingPercent == 75, "primary remaining percent")
         try expect(snapshot.secondary?.usedPercent == 60, "secondary used percent")
+        try expect(snapshot.gptReserveWeekly?.usedPercent == 0, "gpt-reserve bucket should be decoded")
+        try expect(snapshot.gptReserveWeekly?.remainingPercent == 100, "gpt-reserve remaining percent")
     }
 
     private static func testEmptyCodexBucketFallsBack() throws {
@@ -126,6 +133,13 @@ struct CodexUsageStatusTests {
                 "secondary": ["usedPercent": 40, "resetsAt": 200, "windowDurationMins": 10080],
                 "individualLimit": ["limit": "100", "used": "12", "remainingPercent": 88, "resetsAt": 300],
                 "spendControlReached": false
+            ],
+            "rateLimitsByLimitId": [
+                "base_model_inference": [
+                    "limitId": "base_model_inference",
+                    "limitName": "gpt-reserve",
+                    "primary": ["usedPercent": 4, "resetsAt": 400, "windowDurationMins": 10080]
+                ]
             ]
         ]
         let current = try UsageDataCodec.decodeFullSnapshot(from: full)
@@ -143,6 +157,7 @@ struct CodexUsageStatusTests {
         try expect(merged.secondary?.usedPercent == 40, "secondary should persist")
         try expect(merged.planType == "pro", "plan should persist")
         try expect(merged.individualLimit?.remainingPercent == 88, "spend control should persist")
+        try expect(merged.gptReserveWeekly?.remainingPercent == 96, "gpt-reserve should persist through sparse patch")
         try expect(merged.spendControlReached == false, "null sparse boolean should not clear")
     }
 
@@ -707,6 +722,24 @@ struct CodexUsageStatusTests {
         try expect(threeRows?.rows.count == 3, "a plan with spend control exposes three HUD rows")
         try expect(threeRows?.rows.last?.kind == .gptReserveWeekly, "spend control uses GPT reserve Weekly row")
         try expect(threeRows?.gptReserveWeekly?.remainingPercent == 80, "spend control percentage is preserved")
+
+        let withWireReserve = UsageSnapshot(
+            limitId: nil, limitName: nil, planType: "plus",
+            primary: primary, secondary: secondary,
+            individualLimit: SpendControlLimit(
+                limit: "100", used: "20", remainingPercent: 80,
+                resetsAt: Int64(now.timeIntervalSince1970) + 3 * 86_400
+            ),
+            rateLimitReachedType: nil, spendControlReached: nil, receivedAt: now,
+            gptReserveWeekly: RateLimitWindow(
+                usedPercent: 0,
+                resetsAt: Int64(now.timeIntervalSince1970) + 4 * 86_400,
+                windowDurationMins: 10_080
+            )
+        )
+        let wireReserveRows = HUDQuotaPresentationPolicy.make(snapshot: withWireReserve, profileID: profileID, now: now)
+        try expect(wireReserveRows?.rows.count == 3, "wire gpt-reserve bucket exposes three HUD rows")
+        try expect(wireReserveRows?.gptReserveWeekly?.remainingPercent == 100, "wire gpt-reserve wins over spend-control fallback")
 
         let unknown = RateLimitWindow(usedPercent: 50, resetsAt: fiveReset, windowDurationMins: 60)
         let unknownSnapshot = UsageSnapshot(

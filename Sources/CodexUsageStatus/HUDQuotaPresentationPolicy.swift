@@ -73,7 +73,16 @@ enum HUDQuotaPresentationPolicy {
         let windows = [snapshot?.primary, snapshot?.secondary].compactMap { $0 }
         let fiveHour = makeWindow(.fiveHour, from: windows, now: now)
         let sevenDay = makeWindow(.sevenDay, from: windows, now: now)
-        let gptReserveWeekly = makeSpendControl(snapshot?.individualLimit, now: now)
+        // `gpt-reserve` is a separate rate-limit bucket in
+        // `rateLimitsByLimitId`, not the optional spend-control/monthly
+        // credit object. Prefer the real window when present and retain the
+        // spend-control mapping as a compatibility fallback for older
+        // servers that exposed only `individualLimit`.
+        let gptReserveWeekly = makeWindow(
+            .gptReserveWeekly,
+            from: [snapshot?.gptReserveWeekly].compactMap { $0 },
+            now: now
+        ) ?? makeSpendControl(snapshot?.individualLimit, now: now)
         guard fiveHour != nil || sevenDay != nil || gptReserveWeekly != nil else { return nil }
         return HUDDualQuotaPresentation(
             profileID: profileID,
