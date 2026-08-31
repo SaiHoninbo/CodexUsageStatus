@@ -22,11 +22,12 @@ private enum FloatingHUDLayout {
         for placement: HUDPlacement,
         scaleLevel: HUDScaleLevel = .standard,
         quotaRowCount: Int = HUDMetrics.canonicalQuotaRowCount,
-        includesCredits: Bool = false
+        includesCredits: Bool = false,
+        hasAnnouncement: Bool = false
     ) -> NSSize {
         _ = placement
         let metrics = HUDMetrics(scaleLevel: scaleLevel)
-        let size = metrics.panelSize(quotaRowCount: quotaRowCount, includesCredits: includesCredits)
+        let size = metrics.panelSize(quotaRowCount: quotaRowCount, includesCredits: includesCredits, hasAnnouncement: hasAnnouncement)
         return NSSize(width: size.width, height: size.height)
     }
 }
@@ -41,13 +42,15 @@ private final class FloatingHUDLayoutState: ObservableObject {
     @Published var hasEstablishedPosition = false
     @Published var quotaRowCount: Int = 1
     @Published var hasCredits = false
+    @Published var hasAnnouncement = false
 
     var size: NSSize {
         FloatingHUDLayout.size(
             for: placement,
             scaleLevel: scaleLevel,
             quotaRowCount: quotaRowCount,
-            includesCredits: hasCredits
+            includesCredits: hasCredits,
+            hasAnnouncement: hasAnnouncement
         )
     }
 }
@@ -90,6 +93,7 @@ final class FloatingHUDPanelController: NSObject {
     private let gitCoordinator: GitWorkspaceCoordinator
     var onShowDetails: (() -> Void)?
     var onShowGitWorkspace: (() -> Void)?
+    var onShowAnnouncements: (() -> Void)?
     var onOpenCodex: (() -> Void)?
     var onQuit: (() -> Void)?
     private var panel: NSPanel?
@@ -153,6 +157,7 @@ final class FloatingHUDPanelController: NSObject {
             },
             showDetails: { [weak self] in self?.onShowDetails?() },
             showGitWorkspace: { [weak self] in self?.onShowGitWorkspace?() },
+            showAnnouncements: { [weak self] in self?.onShowAnnouncements?() },
             openCodex: { [weak self] in self?.onOpenCodex?() },
             quit: { [weak self] in self?.onQuit?() },
             resetPosition: { [weak self] in self?.resetPosition() },
@@ -167,6 +172,7 @@ final class FloatingHUDPanelController: NSObject {
             setHUDScaleLevel: { [weak self] level in self?.setHUDScaleLevel(level) },
             quotaRowCountChanged: { [weak self] count in self?.setQuotaRowCount(count) },
             creditsVisibilityChanged: { [weak self] visible in self?.setCreditsVisibility(visible) },
+            announcementChanged: { [weak self] present in self?.setAnnouncementPresent(present) },
             checkForUpdates: { [weak self] in self?.model.checkForUpdates() },
             cancelUpdateCheck: { [weak self] in self?.model.cancelUpdateCheck() },
             downloadAvailableUpdate: { [weak self] in self?.model.downloadAvailableUpdate() },
@@ -304,7 +310,8 @@ final class FloatingHUDPanelController: NSObject {
             for: placement,
             scaleLevel: newLevel,
             quotaRowCount: layoutState.quotaRowCount,
-            includesCredits: layoutState.hasCredits
+            includesCredits: layoutState.hasCredits,
+            hasAnnouncement: layoutState.hasAnnouncement
         )
         let targetFrame = lastCodexWindowFrame
         let visibleFrame = lastCodexVisibleFrame
@@ -377,7 +384,8 @@ final class FloatingHUDPanelController: NSObject {
             for: placement,
             scaleLevel: layoutState.scaleLevel,
             quotaRowCount: newCount,
-            includesCredits: layoutState.hasCredits
+            includesCredits: layoutState.hasCredits,
+            hasAnnouncement: layoutState.hasAnnouncement
         )
         let targetFrame = lastCodexWindowFrame
         let visibleFrame = lastCodexVisibleFrame
@@ -442,7 +450,8 @@ final class FloatingHUDPanelController: NSObject {
             for: placement,
             scaleLevel: layoutState.scaleLevel,
             quotaRowCount: layoutState.quotaRowCount,
-            includesCredits: visible
+            includesCredits: visible,
+            hasAnnouncement: layoutState.hasAnnouncement
         )
         let targetFrame = lastCodexWindowFrame
         let visibleFrame = lastCodexVisibleFrame
@@ -478,6 +487,44 @@ final class FloatingHUDPanelController: NSObject {
             lastKnownSafePanelFrame = panel.frame
             layoutState.hasEstablishedPosition = true
         }
+    }
+
+    private func setAnnouncementPresent(_ present: Bool) {
+        guard present != layoutState.hasAnnouncement else { return }
+        guard let panel else {
+            layoutState.hasAnnouncement = present
+            return
+        }
+        let oldSize = panel.frame.size
+        let oldOrigin = panel.frame.origin
+        let placement = layoutState.placement
+        let newSize = FloatingHUDLayout.size(
+            for: placement,
+            scaleLevel: layoutState.scaleLevel,
+            quotaRowCount: layoutState.quotaRowCount,
+            includesCredits: layoutState.hasCredits,
+            hasAnnouncement: present
+        )
+        let resizedOrigin = lastCodexWindowFrame.map {
+            HUDPlacementPolicy.resizedOrigin(
+                origin: oldOrigin,
+                targetFrame: $0,
+                oldPanelSize: oldSize,
+                newPanelSize: newSize,
+                placement: placement
+            )
+        } ?? oldOrigin
+        applySize(newSize, to: panel)
+        let correctedOrigin = lastCodexVisibleFrame.map {
+            clampedOrigin(resizedOrigin, panelSize: newSize, visibleFrame: $0)
+        } ?? resizedOrigin
+        panel.setFrameOrigin(correctedOrigin)
+        layoutState.hasAnnouncement = present
+        if let targetFrame = lastCodexWindowFrame {
+            saveAnchor(origin: correctedOrigin, targetFrame: targetFrame, panelSize: newSize, placement: placement)
+        }
+        lastPositionedPanelSize = newSize
+        if hasEstablishedPosition { lastKnownSafePanelFrame = panel.frame }
     }
 
     private func pasteClipboard() {
@@ -686,7 +733,8 @@ final class FloatingHUDPanelController: NSObject {
                 for: anchor.placement,
                 scaleLevel: layoutState.scaleLevel,
                 quotaRowCount: layoutState.quotaRowCount,
-                includesCredits: layoutState.hasCredits
+                includesCredits: layoutState.hasCredits,
+                hasAnnouncement: layoutState.hasAnnouncement
             )
             applySize(size, to: panel)
             let origin = HUDPlacementPolicy.origin(
@@ -727,7 +775,8 @@ final class FloatingHUDPanelController: NSObject {
                 for: placement,
                 scaleLevel: layoutState.scaleLevel,
                 quotaRowCount: layoutState.quotaRowCount,
-                includesCredits: layoutState.hasCredits
+                includesCredits: layoutState.hasCredits,
+                hasAnnouncement: layoutState.hasAnnouncement
             )
             applySize(size, to: panel)
             let origin = HUDPlacementPolicy.resizedOrigin(
@@ -761,7 +810,8 @@ final class FloatingHUDPanelController: NSObject {
                 for: placement,
                 scaleLevel: layoutState.scaleLevel,
                 quotaRowCount: layoutState.quotaRowCount,
-                includesCredits: layoutState.hasCredits
+                includesCredits: layoutState.hasCredits,
+                hasAnnouncement: layoutState.hasAnnouncement
             )
             applySize(size, to: panel)
             let resizedOrigin = HUDPlacementPolicy.resizedOrigin(
@@ -794,7 +844,8 @@ final class FloatingHUDPanelController: NSObject {
                 for: placement,
                 scaleLevel: layoutState.scaleLevel,
                 quotaRowCount: layoutState.quotaRowCount,
-                includesCredits: layoutState.hasCredits
+                includesCredits: layoutState.hasCredits,
+                hasAnnouncement: layoutState.hasAnnouncement
             )
             applySize(size, to: panel)
             let resizedOrigin = HUDPlacementPolicy.resizedOrigin(
@@ -947,7 +998,8 @@ final class FloatingHUDPanelController: NSObject {
             for: placement,
             scaleLevel: layoutState.scaleLevel,
             quotaRowCount: layoutState.quotaRowCount,
-            includesCredits: layoutState.hasCredits
+            includesCredits: layoutState.hasCredits,
+            hasAnnouncement: layoutState.hasAnnouncement
         )
         let resizedOrigin = HUDPlacementPolicy.resizedOrigin(
             origin: origin,
@@ -1558,6 +1610,7 @@ private struct CodexFloatingHUDView: View {
     let promptShortcut: (CodexPromptShortcut, @escaping (Bool) -> Void) -> Void
     let showDetails: () -> Void
     let showGitWorkspace: () -> Void
+    let showAnnouncements: () -> Void
     let openCodex: () -> Void
     let quit: () -> Void
     let resetPosition: () -> Void
@@ -1572,6 +1625,7 @@ private struct CodexFloatingHUDView: View {
     let setHUDScaleLevel: (HUDScaleLevel) -> Void
     let quotaRowCountChanged: (Int) -> Void
     let creditsVisibilityChanged: (Bool) -> Void
+    let announcementChanged: (Bool) -> Void
     let checkForUpdates: () -> Void
     let cancelUpdateCheck: () -> Void
     let downloadAvailableUpdate: () -> Void
@@ -1804,11 +1858,21 @@ private struct CodexFloatingHUDView: View {
         let metrics = HUDMetrics(scaleLevel: layoutState.scaleLevel)
         let panelSize = metrics.panelSize(
             quotaRowCount: max(1, layoutState.quotaRowCount),
-            includesCredits: layoutState.hasCredits
+            includesCredits: layoutState.hasCredits,
+            hasAnnouncement: layoutState.hasAnnouncement
         )
         let displayedCredits = displayedPresentation?.credits
         let shouldShowCredits = displayedCredits?.isDisplayable == true
         VStack(alignment: .leading, spacing: 0) {
+            if let latestEvent = model.announcementEvents.first {
+                FeedAnnouncementBanner(
+                    event: latestEvent,
+                    scaleLevel: layoutState.scaleLevel,
+                    showAll: showAnnouncements,
+                    olderCount: max(0, model.announcementEvents.count - 1)
+                )
+                Color.clear.frame(height: metrics.sectionGap)
+            }
             hudHeader(metrics: metrics)
             Color.clear.frame(height: metrics.headerGap)
             quotaStack(width: metrics.contentWidth, height: metrics.quotaRowHeight, gap: metrics.quotaGap)
@@ -1848,6 +1912,7 @@ private struct CodexFloatingHUDView: View {
             syncLiveBaseline()
             quotaRowCountChanged(max(1, livePresentation?.rowCount ?? 1))
             creditsVisibilityChanged(displayedPresentation?.credits?.isDisplayable == true)
+            announcementChanged(!model.announcementEvents.isEmpty)
         }
         .onChange(of: model.currentProfileID) { _, newProfileID in
             // Never carry quota from one account identity into another. The
@@ -1879,6 +1944,9 @@ private struct CodexFloatingHUDView: View {
                let plan = normalizedPlanLabel(model.snapshot?.planType) {
                 displayedPlan = plan
             }
+        }
+        .onChange(of: model.announcementEvents) { _, events in
+            announcementChanged(!events.isEmpty)
         }
         .onChange(of: presentationCache) { _, _ in
             quotaRowCountChanged(max(1, displayedPresentation?.rowCount ?? 1))

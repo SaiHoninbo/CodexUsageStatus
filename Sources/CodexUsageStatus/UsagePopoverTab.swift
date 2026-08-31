@@ -7,6 +7,7 @@ enum UsagePopoverTab: String, CaseIterable, Identifiable {
     case usage
     case history
     case accountGit
+    case announcements
     case settings
 
     var id: String { rawValue }
@@ -18,6 +19,7 @@ enum UsagePopoverTab: String, CaseIterable, Identifiable {
         case .history: return "歷史"
         case .accountGit: return "帳號與 Git"
         case .settings: return "設定"
+        case .announcements: return "公告"
         }
     }
 
@@ -28,6 +30,13 @@ enum UsagePopoverTab: String, CaseIterable, Identifiable {
         case .history: return "chart.xyaxis.line"
         case .accountGit: return "person.2"
         case .settings: return "gearshape"
+        case .announcements: return "megaphone"
         }
     }
+}
+
+enum DetailsDestination: Equatable {
+    case overview
+    case gitWorkspace
+    case announcements
 }

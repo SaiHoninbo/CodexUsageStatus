@@ -1,13 +1,6 @@
 import Foundation
 import CryptoKit
 
-/// Destination used by the existing detail popover router.  Git is kept out
-/// of UsageViewModel so the quota/account lifecycle remains independent.
-enum DetailsDestination: Equatable {
-    case overview
-    case gitWorkspace
-}
-
 enum GitWorkspaceChangeKind: String, Equatable {
     case modified
     case added

@@ -157,3 +157,17 @@ Use the right-click **Open** flow once, then use **System Settings → Privacy &
 This project is released under the MIT License. See [LICENSE](LICENSE).
 
 For security and privacy boundaries, see [SECURITY.md](SECURITY.md).
+## External reset announcements
+
+Codex Usage Status can optionally follow a user-supplied RSS or Atom feed and
+show reset-time clues as an advisory overlay. The App Server remains the only
+authoritative source for quota and reset timestamps; feed predictions never
+overwrite `UsageSnapshot` or quota history. Feed tracking is disabled by
+default, supports manual or scheduled polling, and keeps the newest event in
+the HUD with older events in the Announcements tab.
+
+The app does not use the X API, browser cookies, or X tokens. It does not
+create or manage a third-party credential store. The complete HTTPS Feed URL
+is saved in owner-only Application Support; if a provider embeds a credential
+in the URL query, that value is saved with the URL. Query URLs are never
+written to logs, notifications, errors, or analytics.

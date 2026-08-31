@@ -25,6 +25,7 @@ struct UsagePopoverView: View {
     @State private var selectedTab: UsagePopoverTab = .overview
     @State private var profilePendingRemoval: AccountProfile?
     @State private var measuredContentHeight: CGFloat = 0
+    @State private var feedURLDraft = ""
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
@@ -44,7 +45,7 @@ struct UsagePopoverView: View {
         .frame(width: 430)
         .foregroundStyle(HUDColorPalette.primaryText)
         .preferredColorScheme(.light)
-        .onAppear { syncSelectedTabWithRoute() }
+        .onAppear { syncSelectedTabWithRoute(); feedURLDraft = model.feedURL?.absoluteString ?? "" }
         .onPreferenceChange(PopoverContentHeightPreferenceKey.self) { height in
             guard height > 0, abs(height - measuredContentHeight) > 0.5 else { return }
             measuredContentHeight = height
@@ -148,6 +149,8 @@ struct UsagePopoverView: View {
             accountGitTab
         case .settings:
             settingsTab
+        case .announcements:
+            announcementsTab
         }
     }
 
@@ -182,6 +185,23 @@ struct UsagePopoverView: View {
         }
     }
 
+    private var announcementsTab: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("公告").font(.title3.weight(.bold))
+                Spacer()
+                Picker("範圍", selection: $model.announcementRange) {
+                    Text("24 小時").tag(HistoryRange.day)
+                    Text("7 天").tag(HistoryRange.week)
+                    Text("30 天").tag(HistoryRange.month)
+                }.pickerStyle(.segmented).frame(width: 210)
+            }
+            let filtered = FeedAnnouncementPolicy.filter(events: model.announcementEvents, range: model.announcementRange, now: model.currentDate)
+            if filtered.isEmpty { Text("目前沒有外部重置公告。").foregroundStyle(.secondary).padding(.vertical, 20) }
+            else { FeedAnnouncementListView(events: filtered, predictionsByPostID: model.feedPredictionsByPostID) }
+        }
+    }
+
     private var accountGitTab: some View {
         VStack(alignment: .leading, spacing: 16) {
             accountManagementSection
@@ -201,13 +221,31 @@ struct UsagePopoverView: View {
         VStack(alignment: .leading, spacing: 16) {
             settingsSection
             syncSettingsSection
+            feedSettingsSection
             metadataSection
             actions
         }
     }
 
     private func syncSelectedTabWithRoute() {
-        selectedTab = detailsRouter.destination == .gitWorkspace ? .accountGit : .overview
+        switch detailsRouter.destination {
+        case .overview: selectedTab = .overview
+        case .gitWorkspace: selectedTab = .accountGit
+        case .announcements: selectedTab = .announcements
+        }
+    }
+
+    private var feedSettingsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("外部重置公告", systemImage: "megaphone").font(.headline)
+            Text("可用第三方 Feed 追蹤 @thsottiaux；請貼上供應商提供的 HTTPS RSS／Atom URL。").font(.caption).foregroundStyle(.secondary)
+            Toggle("啟用 Feed 追蹤", isOn: Binding(get: { model.feedEnabled }, set: model.setFeedEnabled))
+            TextField("Feed URL（HTTPS）", text: $feedURLDraft)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { model.setFeedURL(URL(string: feedURLDraft.trimmingCharacters(in: .whitespacesAndNewlines))) }
+            Picker("更新頻率", selection: Binding(get: { model.feedCadence }, set: model.setFeedCadence)) { ForEach(FeedPollingCadence.allCases, id: \.self) { Text($0.displayName).tag($0) } }
+            HStack { Text(model.feedTrackingState == .loaded ? "已更新" : (model.feedErrorMessage ?? "僅供參考" )).font(.caption).foregroundStyle(.secondary); Spacer(); Button("立即更新") { model.refreshFeed() } }
+        }
     }
 
     private var header: some View {

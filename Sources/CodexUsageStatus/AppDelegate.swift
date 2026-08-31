@@ -67,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         floatingHUD = FloatingHUDPanelController(model: model, gitCoordinator: gitCoordinator)
         floatingHUD.onShowDetails = { [weak self] in self?.showPopover(destination: .overview) }
         floatingHUD.onShowGitWorkspace = { [weak self] in self?.showPopover(destination: .gitWorkspace) }
+        floatingHUD.onShowAnnouncements = { [weak self] in self?.showPopover(destination: .announcements) }
         floatingHUD.onOpenCodex = { [weak self] in self?.openCodex() }
         floatingHUD.onQuit = { NSApp.terminate(nil) }
         floatingHUD.start()

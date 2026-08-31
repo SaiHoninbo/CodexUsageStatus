@@ -159,3 +159,12 @@ outputs/CodexUsageStatus.app.zip
 本專案採用 MIT License，詳見 [LICENSE](LICENSE)。
 
 安全與隱私邊界請參考 [SECURITY.md](SECURITY.md)。
+## 外部重置公告
+
+App 可選擇追蹤使用者提供的 RSS／Atom Feed，將可能的重置時間以「僅供參考」
+公告顯示在 HUD 與「公告」分頁。用量與正式重置時間仍完全以 App Server 為準，
+Feed 推測不會覆寫 `UsageSnapshot` 或用量歷史；功能預設關閉，可手動或定期更新。
+
+本 App 不使用 X API、不讀取瀏覽器 Cookie，也不建立或管理 X token。完整 HTTPS
+Feed URL 會保存在 owner-only Application Support；若供應商將 credential 放在 URL
+query 中，該值會隨 URL 保存，但不會寫入 log、通知、錯誤訊息或 analytics。

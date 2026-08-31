@@ -53,15 +53,21 @@ struct HUDMetrics: Equatable {
     /// grow only by the quota column delta, so no empty placeholder row is
     /// reserved in the HUD.
     func panelSize(quotaRowCount: Int, includesCredits: Bool = false) -> CGSize {
+        panelSize(quotaRowCount: quotaRowCount, includesCredits: includesCredits, hasAnnouncement: false)
+    }
+
+    func panelSize(quotaRowCount: Int, includesCredits: Bool, hasAnnouncement: Bool) -> CGSize {
         let count = max(1, quotaRowCount)
         let canonicalHeight = Self.canonicalPanelSize.height
         let quotaDelta = quotaColumnHeight(for: count) - quotaColumnHeight(for: Self.canonicalQuotaRowCount)
         let creditsDelta = includesCredits ? creditsSectionHeight + sectionGap : 0
+        let announcementDelta = hasAnnouncement ? announcementHeight : 0
         return CGSize(
             width: Self.canonicalPanelSize.width * factor,
-            height: canonicalHeight * factor + quotaDelta + creditsDelta
+            height: canonicalHeight * factor + quotaDelta + creditsDelta + announcementDelta
         )
     }
+    var announcementHeight: CGFloat { 84 * factor }
     var outerPadding: CGFloat { Self.canonicalOuterPadding * factor }
     var headerHeight: CGFloat { Self.canonicalHeaderHeight * factor }
     var headerGap: CGFloat { Self.canonicalHeaderGap * factor }
