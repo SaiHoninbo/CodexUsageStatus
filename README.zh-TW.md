@@ -79,29 +79,20 @@ App 透過 stdio 介面連接本機 Codex App Server，不使用私有網路端�
 App 啟動時以及執行期間會定期檢查 GitHub 的 `latest release`。發現新版本時：
 
 1. Popover 顯示更新狀態，並可能對該版本顯示一次通知。
-2. 由使用者按下「下載更新」。
-3. ZIP 下載到使用者的 Application Support updates 目錄。
-4. 如果 GitHub 提供 digest，App 會驗證 ZIP checksum；解壓後也會執行 strict code-signature verification。
-5. 使用者按下「安裝並重新啟動」後，背景安裝器會等待目前 process 結束，再重新驗證、替換目前 App 路徑並重新啟動。
+2. 由使用者按下「開啟 Release」，在官方 GitHub Release 頁面檢視並手動下載。
 
-Updater 不會把認證資料或使用者資料送到 GitHub，也不會碰 Codex auth/history 目錄。如果替換失敗，會嘗試還原原本的 App bundle。
+App 不會自行下載、解壓、替換或重新啟動自己；安裝由使用者透過 Finder 手動完成。只有版本格式安全且連結是本 repository GitHub Releases 的 HTTPS 網址時，才會接受更新 metadata。
 
 ### 維護者發布規則
 
-Updater 預期 GitHub Release 具備：
+維護者發布 GitHub Release 時應具備：
 
 - Semantic-version tag，例如 `v2.4.27`
 - 名稱完全一致的 asset：`CodexUsageStatus.app.zip`
 - ZIP 內包含已簽章的 App bundle
 - 不包含 `._*`、`__MACOSX`、source、tests、auth、token 或 history 檔案
 
-目前 `2.4.27 / build 47` 安裝包的已驗證 SHA-256：
-
-```text
-7c4df8003615c7116d218cce635f417d755e632942eb56b789a28e356e20b6fb
-```
-
-如果 GitHub 尚未建立正式 Release，Updater 會正確顯示目前沒有可用的正式版本；只把 ZIP 提交到 `main` 並不會自動建立 Release 更新。
+每個正式 artifact 的 checksum 與正式簽章 identity 應記錄在 Release notes 或維護 evidence。只把 ZIP 提交到 `main` 並不會自動建立 App 內的 Release 更新。
 
 ## 從原始碼建置
 
@@ -148,7 +139,7 @@ outputs/CodexUsageStatus.app.zip
 
 ### 更新檢查顯示沒有正式版本
 
-維護者必須先建立 GitHub Release，而且 Release 必須包含名稱完全一致的 `CodexUsageStatus.app.zip`。Commit 或 source ZIP 都不算正式 Release。
+維護者必須先建立 GitHub Release，建議包含名稱完全一致的 `CodexUsageStatus.app.zip`；App 只會開啟官方 Release 頁面，不會自行下載 asset。Commit 或 source ZIP 都不算正式 Release。
 
 ### macOS 顯示無法打開 App
 

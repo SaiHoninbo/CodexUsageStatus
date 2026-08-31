@@ -4,14 +4,13 @@ enum HUDUpdateBadgeState: Equatable {
     case version(String)
     case available(String)
     case checking
-    case downloading
     case error(String)
 
     var isActionable: Bool {
         switch self {
         case .available, .error:
             return true
-        case .version, .checking, .downloading:
+        case .version, .checking:
             return false
         }
     }
@@ -25,10 +24,8 @@ enum HUDUpdateBadgeState: Equatable {
 enum HUDUpdateBadgePolicy {
     static func state(updateState: AppUpdateState, currentVersion: String) -> HUDUpdateBadgeState {
         switch updateState {
-        case .available(let release), .downloaded(let release, _):
+        case .available(let release):
             return .available(release.version)
-        case .downloading:
-            return .downloading
         case .checking:
             return .checking
         case .error:

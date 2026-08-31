@@ -175,9 +175,6 @@ final class FloatingHUDPanelController: NSObject {
             announcementChanged: { [weak self] present in self?.setAnnouncementPresent(present) },
             checkForUpdates: { [weak self] in self?.model.checkForUpdates() },
             cancelUpdateCheck: { [weak self] in self?.model.cancelUpdateCheck() },
-            downloadAvailableUpdate: { [weak self] in self?.model.downloadAvailableUpdate() },
-            revealDownloadedUpdate: { [weak self] in self?.model.revealDownloadedUpdate() },
-            installDownloadedUpdate: { [weak self] in self?.model.installDownloadedUpdate() },
             openReleasePage: { [weak self] in self?.model.openUpdateReleasePage() }
         )
         let hostingView = NSHostingView(rootView: rootView)
@@ -613,11 +610,7 @@ final class FloatingHUDPanelController: NSObject {
     }
 
     private func isCodexApplication(_ application: NSRunningApplication) -> Bool {
-        CodexApplicationPolicy.isCodexApplication(
-            bundleIdentifier: application.bundleIdentifier,
-            localizedName: application.localizedName,
-            bundlePath: application.bundleURL?.path
-        )
+        CodexApplicationPolicy.isCodexApplication(application)
     }
 
     private func invalidatePendingVisibilityCallbacks() {
@@ -1460,7 +1453,6 @@ private struct HUDUpdateBadge: View {
         case .version(let version): return "v\(version)"
         case .available: return "有新版本"
         case .checking: return "檢查中…"
-        case .downloading: return "更新中…"
         case .error(let version): return "v\(version)"
         }
     }
@@ -1470,7 +1462,6 @@ private struct HUDUpdateBadge: View {
         case .version: return "number.circle"
         case .available: return "circle.fill"
         case .checking: return "arrow.triangle.2.circlepath"
-        case .downloading: return "arrow.down.circle"
         case .error: return "exclamationmark.triangle"
         }
     }
@@ -1488,7 +1479,6 @@ private struct HUDUpdateBadge: View {
         case .version(let version): return "目前版本 \(version)"
         case .available(let version): return "有新版本 \(version)，點擊開啟更新詳情"
         case .checking: return "正在檢查更新"
-        case .downloading: return "正在下載更新"
         case .error(let version): return "目前版本 \(version)，更新檢查失敗，點擊重新檢查"
         }
     }
@@ -1590,8 +1580,6 @@ private struct CodexFloatingHUDView: View {
         case checking
         case upToDate
         case available
-        case downloading
-        case downloaded
         case error
     }
 
@@ -1628,9 +1616,6 @@ private struct CodexFloatingHUDView: View {
     let announcementChanged: (Bool) -> Void
     let checkForUpdates: () -> Void
     let cancelUpdateCheck: () -> Void
-    let downloadAvailableUpdate: () -> Void
-    let revealDownloadedUpdate: () -> Void
-    let installDownloadedUpdate: () -> Void
     let openReleasePage: () -> Void
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var isUpdateHovered = false
@@ -1695,8 +1680,7 @@ private struct CodexFloatingHUDView: View {
         }
         .task(id: updateFeedback?.id) {
             guard let feedback = updateFeedback,
-                  feedback.kind != .checking,
-                  feedback.kind != .downloading else { return }
+                  feedback.kind != .checking else { return }
             try? await Task.sleep(nanoseconds: 4_500_000_000)
             guard !Task.isCancelled else { return }
             updateFeedback = nil
@@ -1728,10 +1712,7 @@ private struct CodexFloatingHUDView: View {
     }
 
     private func presentUpdateFeedback(for state: AppUpdateState) {
-        // A download started from the result banner is a second, explicit
-        // phase. It must continue to update the same visible banner even
-        // though the original check request has already completed.
-        guard updateCheckRequested || updateFeedback?.kind == .downloading else { return }
+        guard updateCheckRequested else { return }
 
         switch state {
         case .upToDate:
@@ -1755,14 +1736,7 @@ private struct CodexFloatingHUDView: View {
                 title: "更新檢查失敗",
                 message: message
             )
-        case .downloaded(let release, _):
-            guard updateFeedback?.kind == .downloading else { return }
-            updateFeedback = UpdateFeedback(
-                kind: .downloaded,
-                title: "更新已下載並驗證",
-                message: "\(release.version) 已準備完成"
-            )
-        case .idle, .checking, .downloading:
+        case .idle, .checking:
             break
         }
     }
@@ -1792,24 +1766,10 @@ private struct CodexFloatingHUDView: View {
                 Button("取消") { cancelUpdateCheckAction() }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-            case .downloading:
-                ProgressView()
-                    .controlSize(.small)
             case .available:
-                Button("立即更新") {
-                    updateFeedback = UpdateFeedback(
-                        kind: .downloading,
-                        title: "正在下載並安裝…",
-                        message: "驗證後會自動重新啟動"
-                    )
-                    downloadAvailableUpdate()
-                }
+                Button("開啟 Release") { openReleasePage() }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-            case .downloaded:
-                Text("已驗證，正在啟動安裝器…")
-                    .font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.green)
             case .error:
                 Button("重試") { requestUpdateCheck() }
                     .buttonStyle(.bordered)
@@ -1838,16 +1798,14 @@ private struct CodexFloatingHUDView: View {
         case .checking: return "arrow.down.circle"
         case .upToDate: return "checkmark.circle.fill"
         case .available: return "sparkles"
-        case .downloading: return "arrow.down.circle.dotted"
-        case .downloaded: return "checkmark.seal.fill"
         case .error: return "exclamationmark.triangle.fill"
         }
     }
 
     private func updateFeedbackColor(for kind: UpdateFeedbackKind) -> Color {
         switch kind {
-        case .checking, .downloading: return .accentColor
-        case .upToDate, .downloaded: return .green
+        case .checking: return .accentColor
+        case .upToDate: return .green
         case .available: return .orange
         case .error: return .red
         }
@@ -2023,7 +1981,7 @@ private struct CodexFloatingHUDView: View {
                         showDetails()
                     case .error:
                         requestUpdateCheck()
-                    case .version, .checking, .downloading:
+                    case .version, .checking:
                         break
                     }
                 }
@@ -2262,7 +2220,7 @@ private struct CodexFloatingHUDView: View {
 
     private var hasAvailableUpdate: Bool {
         switch model.updateState {
-        case .available, .downloaded:
+        case .available:
             return true
         default:
             return false
@@ -2271,9 +2229,9 @@ private struct CodexFloatingHUDView: View {
 
     private var updateShortcutIcon: String {
         switch model.updateState {
-        case .available, .downloaded:
+        case .available:
             return "bell.badge.fill"
-        case .checking, .downloading:
+        case .checking:
             return "arrow.down.circle"
         default:
             return "arrow.down.circle"
@@ -2282,9 +2240,9 @@ private struct CodexFloatingHUDView: View {
 
     private func updateShortcutAction() {
         switch model.updateState {
-        case .available, .downloaded, .checking, .downloading:
-            // The detail panel already owns download/install actions and the
-            // shared AppUpdateState, so the HUD never starts a second request.
+        case .available, .checking:
+            // The detail panel owns the release-page action and the shared
+            // AppUpdateState, so the HUD never starts a second request.
             showDetails()
         case .idle, .upToDate, .error:
             // Route manual HUD checks through the same feedback path as the
@@ -2400,27 +2358,12 @@ private struct CodexFloatingHUDView: View {
 
             switch model.updateState {
             case .available(let release):
-                Button {
-                    downloadAvailableUpdate()
-                } label: {
-                    Label("立即更新並重新啟動 \(release.version)", systemImage: "arrow.down.app")
-                }
                 Button(action: openReleasePage) {
-                    Label("開啟 Release 頁面", systemImage: "safari")
+                    Label("開啟 Release 頁面 \(release.version)", systemImage: "safari")
                 }
             case .checking:
                 Button(action: cancelUpdateCheckAction) {
                     Label("取消更新檢查", systemImage: "xmark.circle")
-                }
-            case .downloading(let release):
-                Label("正在下載並驗證 \(release.version)…", systemImage: "arrow.down.circle.dotted")
-            case .downloaded(let release, _):
-                Label("更新 \(release.version) 已驗證", systemImage: "checkmark.seal")
-                Button(action: installDownloadedUpdate) {
-                    Label("安裝並重新啟動", systemImage: "arrow.down.app")
-                }
-                Button(action: showDetails) {
-                    Label("查看更新資訊", systemImage: "info.circle")
                 }
             case .upToDate:
                 Label("目前已是最新版本", systemImage: "checkmark.circle")

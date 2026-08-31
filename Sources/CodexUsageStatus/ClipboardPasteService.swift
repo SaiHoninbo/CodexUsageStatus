@@ -53,7 +53,8 @@ enum ClipboardPasteService {
         }
 
         guard let target = processID.flatMap(NSRunningApplication.init)
-                ?? NSWorkspace.shared.runningApplications.first(where: isCodexApplication) else {
+                ?? NSWorkspace.shared.runningApplications.first(where: isCodexApplication),
+              isCodexApplication(target) else {
             completion(false)
             return
         }
@@ -331,7 +332,8 @@ enum ClipboardPasteService {
         }
 
         guard let target = processID.flatMap(NSRunningApplication.init)
-                ?? NSWorkspace.shared.runningApplications.first(where: isCodexApplication) else {
+                ?? NSWorkspace.shared.runningApplications.first(where: isCodexApplication),
+              isCodexApplication(target) else {
             showAlert(
                 title: "找不到 Codex",
                 message: "請先開啟 Codex，再使用剪貼簿貼上。"
@@ -383,6 +385,17 @@ enum ClipboardPasteService {
         submitAfterPaste: Bool,
         completion: ((Bool) -> Void)?
     ) {
+        // Focus can change between the delayed activation check and this
+        // event post. Revalidate both process liveness and signed publisher
+        // immediately before Cmd-V so another app cannot receive the paste.
+        guard isTargetFrontmost(target) else {
+            showAlert(
+                title: "無法貼上剪貼簿內容",
+                message: "Codex 沒有保持在前景，為安全起見沒有貼上或送出。"
+            )
+            completion?(false)
+            return
+        }
         guard postKey(keyCode: 9, flags: .maskCommand) else {
             showAlert(
                 title: "無法貼上剪貼簿內容",
@@ -484,11 +497,7 @@ enum ClipboardPasteService {
     }
 
     private static func isCodexApplication(_ application: NSRunningApplication) -> Bool {
-        CodexApplicationPolicy.isCodexApplication(
-            bundleIdentifier: application.bundleIdentifier,
-            localizedName: application.localizedName,
-            bundlePath: application.bundleURL?.path
-        )
+        CodexApplicationPolicy.isCodexApplication(application)
     }
 
     private static func showAlert(title: String, message: String) {

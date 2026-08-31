@@ -83,13 +83,13 @@ final class GitProcessRunner {
         func timeout() { stopAndFinish(.timedOut) }
     }
 
-    func run(arguments: [String], workingDirectory: URL, timeout: TimeInterval = 15, environmentOverrides: [String: String] = [:]) async throws -> GitCommandResult {
+    func run(arguments: [String], workingDirectory: URL, timeout: TimeInterval = 15) async throws -> GitCommandResult {
         let lifecycle = ProcessLifecycle()
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<GitCommandResult, Error>) in
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-                process.arguments = arguments
+                process.arguments = GitExecutionPolicy.invocationArguments(arguments)
                 process.currentDirectoryURL = workingDirectory
                 let stdoutPipe = Pipe()
                 let stderrPipe = Pipe()
@@ -98,7 +98,7 @@ final class GitProcessRunner {
 
                 var environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "GIT_TERMINAL_PROMPT": "0"]
                 if let home = ProcessInfo.processInfo.environment["HOME"] { environment["HOME"] = home }
-                environment.merge(environmentOverrides) { _, new in new }
+                environment.merge(GitExecutionPolicy.environment) { _, new in new }
                 process.environment = environment
 
                 let gate = CompletionGate(continuation)
@@ -183,7 +183,7 @@ final class GitWorkspaceService {
         let remote = parsed.upstream?.split(separator: "/", maxSplits: 1).first.map(String.init)
         let remoteURL: String?
         if let remote {
-            remoteURL = try? await value(arguments: ["remote", "get-url", remote], root: root)
+            remoteURL = try? await value(arguments: ["remote", "get-url", "--push", "--", remote], root: root)
         } else {
             remoteURL = nil
         }
@@ -194,8 +194,15 @@ final class GitWorkspaceService {
 
     func readDiff(at root: URL, path: String) async throws -> String? {
         guard GitCommitPolicy.isSafeRelativePath(path), !GitWorkspaceSensitivity.isSensitive(path: path) else { return nil }
-        let unstaged = try await runner.run(arguments: ["diff", "--no-ext-diff", "--unified=3", "--", path], workingDirectory: root)
-        let staged = try await runner.run(arguments: ["diff", "--cached", "--no-ext-diff", "--unified=3", "--", path], workingDirectory: root)
+        let gitDirectory = try await value(arguments: ["rev-parse", "--git-dir"], root: root)
+        let absoluteGitDirectory = gitDirectory.hasPrefix("/")
+            ? gitDirectory
+            : root.appendingPathComponent(gitDirectory).standardizedFileURL.path
+        guard try await mutationConfigurationIsSafe(at: root, gitDirectory: absoluteGitDirectory) else {
+            return nil
+        }
+        let unstaged = try await runner.run(arguments: ["diff", "--unified=3", "--", path], workingDirectory: root)
+        let staged = try await runner.run(arguments: ["diff", "--cached", "--unified=3", "--", path], workingDirectory: root)
         var sections: [String] = []
         let unstagedText = String(decoding: unstaged.stdout, as: UTF8.self)
         let stagedText = String(decoding: staged.stdout, as: UTF8.self)
@@ -206,6 +213,9 @@ final class GitWorkspaceService {
     }
 
     func commit(at root: URL, snapshot: GitWorkspaceSnapshot, paths: [String], message: String) async throws -> GitWorkspaceSnapshot {
+        guard try await mutationConfigurationIsSafe(at: root, gitDirectory: snapshot.identity.gitDirectory) else {
+            throw GitCommandError.failed("此 Git 工作區含有未允許的可執行設定，已拒絕 commit")
+        }
         let selected = Set(paths)
         let untracked = snapshot.changes.filter { change in selected.contains(change.path) && change.kind == .untracked }.map { change in change.path }
         guard let arguments = GitCommitPolicy.arguments(message: message, paths: paths) else { throw GitCommandError.failed("請輸入提交訊息並選擇檔案") }
@@ -266,7 +276,15 @@ final class GitWorkspaceService {
     }
 
     func push(at root: URL, identity: GitWorkspaceIdentity) async throws -> GitWorkspaceSnapshot {
-        guard let arguments = GitPushPolicy.arguments(identity: identity) else { throw GitCommandError.failed("目前工作區沒有可安全推送的 upstream") }
+        guard try await mutationConfigurationIsSafe(at: root, gitDirectory: identity.gitDirectory) else {
+            throw GitCommandError.failed("此 Git 工作區含有未允許的可執行設定，已拒絕 push")
+        }
+        guard let remote = identity.remote,
+              let remoteURL = try? await value(arguments: ["remote", "get-url", "--push", "--", remote], root: root),
+              let arguments = GitPushPolicy.arguments(identity: identity, remoteURL: remoteURL),
+              GitWorkspaceIdentity.fingerprint(forRemoteURL: remoteURL) == identity.remoteFingerprint else {
+            throw GitCommandError.failed("目前工作區沒有可安全推送的 upstream")
+        }
         _ = try await runner.run(arguments: arguments, workingDirectory: root, timeout: 30)
         return try await readStatus(at: root)
     }
@@ -274,5 +292,71 @@ final class GitWorkspaceService {
     private func value(arguments: [String], root: URL) async throws -> String {
         let result = try await runner.run(arguments: arguments, workingDirectory: root)
         return result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func mutationConfigurationIsSafe(at root: URL, gitDirectory: String) async throws -> Bool {
+        // Read the local config as data only.  The runner has already disabled
+        // system/global config; this audit rejects local executable features
+        // rather than bypassing hooks or signing policy with --no-verify.
+        func entries(from data: Data) -> [(key: String, value: String)] {
+            String(decoding: data, as: UTF8.self)
+                .split(separator: "\0", omittingEmptySubsequences: true)
+                .map(String.init)
+                .map { raw in
+                    let parts = raw.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+                    let key = parts.first.map(String.init)?.lowercased() ?? ""
+                    let value = parts.dropFirst().first.map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? ""
+                    return (key: key, value: value)
+                }
+        }
+
+        let configResult = try await runner.run(arguments: ["config", "--local", "--includes", "--null", "--list"], workingDirectory: root)
+        var configEntries = entries(from: configResult.stdout)
+        let forbiddenKeys = [
+            "core.hookspath", "core.fsmonitor", "core.sshcommand", "core.gitproxy", "core.askpass",
+            "credential.helper", "gpg.program", "diff.external", "filter.", "url."
+        ]
+        func containsForbidden(_ entries: [(key: String, value: String)]) -> Bool {
+            entries.contains(where: { entry in
+                let key = entry.key
+                if key == "commit.gpgsign" {
+                    return ["true", "yes", "on", "1"].contains(entry.value)
+                }
+                // Includes are executable configuration by proxy: they let a
+                // repository select arbitrary files whose effective settings
+                // must be audited, and the include directive itself is not a
+                // stable trust boundary for mutation.
+                if key == "include.path" || (key.hasPrefix("includeif.") && key.hasSuffix(".path")) {
+                    return true
+                }
+                if forbiddenKeys.contains(where: { key.hasPrefix($0) }) { return true }
+                if key.hasPrefix("diff.") && key.hasSuffix(".textconv") { return true }
+                guard key.hasPrefix("remote.") else { return false }
+                return key.hasSuffix(".uploadpack") || key.hasSuffix(".receivepack") || key.hasSuffix(".proxy") || key.hasSuffix(".vcs") || key.hasSuffix(".helper")
+            })
+        }
+
+        if containsForbidden(configEntries) { return false }
+
+        // With extensions.worktreeConfig enabled, Git also reads the
+        // repository's `.git/config.worktree`. Audit that effective source
+        // explicitly; `--local` alone does not include its executable keys.
+        let worktreeConfigEnabled = configEntries.contains {
+            $0.key == "extensions.worktreeconfig" && ["true", "yes", "on", "1"].contains($0.value)
+        }
+        if worktreeConfigEnabled {
+            let worktreeResult = try await runner.run(arguments: ["config", "--worktree", "--includes", "--null", "--list"], workingDirectory: root)
+            configEntries.append(contentsOf: entries(from: worktreeResult.stdout))
+            if containsForbidden(configEntries) { return false }
+        }
+
+        let gitURL = URL(fileURLWithPath: gitDirectory).standardizedFileURL
+        let hookRoot = gitURL.appendingPathComponent("hooks", isDirectory: true)
+        let hookNames = ["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit", "pre-push"]
+        for name in hookNames {
+            let hook = hookRoot.appendingPathComponent(name)
+            if FileManager.default.isExecutableFile(atPath: hook.path) { return false }
+        }
+        return true
     }
 }

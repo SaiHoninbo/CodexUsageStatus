@@ -24,8 +24,6 @@ enum HUDContextMenuAction: String, CaseIterable {
     case tokenActivityRefreshInterval
     case credentialWatchInterval
     case checkForUpdates
-    case downloadUpdate
-    case revealDownloadedUpdate
     case openReleasePage
     case quit
 }
@@ -55,8 +53,6 @@ enum HUDContextMenuPolicy {
             .tokenActivityRefreshInterval,
             .credentialWatchInterval,
             .checkForUpdates,
-            .downloadUpdate,
-            .revealDownloadedUpdate,
             .openReleasePage
         ],
         [.quit]

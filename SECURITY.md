@@ -43,9 +43,10 @@ account identifiers and local paths before submitting.
 
 ## Maintainer release boundary
 
-The app's updater downloads a user-approved GitHub Release asset, verifies the
-provided digest when available, extracts it, and performs strict code-signature
-verification. It does not silently replace a running app. Release assets must
+The app's update checker reads latest-release metadata and opens the official
+GitHub Release page. It never downloads, extracts, executes, replaces, or
+relaunches an app bundle. Maintainers must publish release assets with a formal
+signing identity and inspect the ZIP inventory before distribution; assets must
 not include source archives, tests, credentials, token activity, history, or
 AppleDouble files.
 ## User-configured Feed boundary

@@ -1,5 +1,4 @@
 import AppKit
-import CryptoKit
 import Foundation
 
 struct AppUpdateRelease: Equatable, Identifiable {
@@ -7,8 +6,6 @@ struct AppUpdateRelease: Equatable, Identifiable {
     let tagName: String
     let name: String
     let releaseURL: URL
-    let downloadURL: URL?
-    let expectedSHA256: String?
     let notes: String
     let publishedAt: Date?
 
@@ -20,13 +17,11 @@ enum AppUpdateState: Equatable {
     case checking
     case upToDate
     case available(AppUpdateRelease)
-    case downloading(AppUpdateRelease)
-    case downloaded(AppUpdateRelease, URL)
     case error(String)
 
     var release: AppUpdateRelease? {
         switch self {
-        case .available(let release), .downloading(let release), .downloaded(let release, _):
+        case .available(let release):
             return release
         default:
             return nil
@@ -40,13 +35,6 @@ enum AppUpdateError: LocalizedError {
     case checkTimedOut
     case checkCancelled
     case httpStatus(Int)
-    case missingDownload
-    case downloadFailed
-    case invalidArchive
-    case checksumMismatch
-    case signatureInvalid
-    case installFailed
-    case fileSystem(String)
 
     var errorDescription: String? {
         switch self {
@@ -55,13 +43,6 @@ enum AppUpdateError: LocalizedError {
         case .checkTimedOut: return "更新檢查逾時，請確認網路後重試。"
         case .checkCancelled: return "更新檢查已取消。"
         case .httpStatus(let status): return "GitHub 更新服務回應錯誤（HTTP \(status)）。"
-        case .missingDownload: return "此 Release 沒有 CodexUsageStatus.app.zip。"
-        case .downloadFailed: return "更新檔下載失敗。"
-        case .invalidArchive: return "下載的更新檔不是有效的 App bundle。"
-        case .checksumMismatch: return "更新檔 SHA-256 驗證失敗，已停止套用。"
-        case .signatureInvalid: return "更新 App 的 strict code signature 驗證失敗。"
-        case .installFailed: return "無法啟動更新安裝程序，原有 App 尚未變更。"
-        case .fileSystem(let message): return message
         }
     }
 }
@@ -91,6 +72,33 @@ enum AppVersionComparator {
     }
 }
 
+enum AppUpdateReleasePolicy {
+    static func isSafeVersion(_ value: String) -> Bool {
+        value.range(of: #"^[0-9]+(\.[0-9]+){1,3}$"#, options: .regularExpression) != nil
+    }
+
+    static func isOfficialReleaseURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), scheme == "https",
+              let host = url.host?.lowercased(), host == "github.com" || host == "www.github.com",
+              url.user == nil,
+              url.password == nil,
+              url.port == nil || url.port == 443 else { return false }
+        guard let decodedPath = url.path.removingPercentEncoding else { return false }
+        let components = decodedPath
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+        // Reject dot-segments before comparing the repository prefix. URL
+        // consumers may canonicalize `releases/../evil` outside the trusted
+        // release area even though its raw path starts with that prefix.
+        guard !components.contains(where: { $0 == "." || $0 == ".." }),
+              components.count >= 3,
+              components[0].lowercased() == "saihoninbo",
+              components[1].lowercased() == "codexusagestatus",
+              components[2].lowercased() == "releases" else { return false }
+        return true
+    }
+}
+
 @MainActor
 final class AppUpdateService: NSObject {
     private struct ReleaseResponse: Decodable {
@@ -99,7 +107,6 @@ final class AppUpdateService: NSObject {
         let htmlURL: URL
         let body: String?
         let publishedAt: Date?
-        let assets: [Asset]
 
         enum CodingKeys: String, CodingKey {
             case tagName = "tag_name"
@@ -107,43 +114,22 @@ final class AppUpdateService: NSObject {
             case htmlURL = "html_url"
             case body
             case publishedAt = "published_at"
-            case assets
-        }
-    }
-
-    private struct Asset: Decodable {
-        let name: String
-        let browserDownloadURL: URL
-        let digest: String?
-
-        enum CodingKeys: String, CodingKey {
-            case name
-            case browserDownloadURL = "browser_download_url"
-            case digest
         }
     }
 
     private let endpoint = URL(string: "https://api.github.com/repos/SaiHoninbo/CodexUsageStatus/releases/latest")!
     private let repositoryURL = URL(string: "https://github.com/SaiHoninbo/CodexUsageStatus/releases")!
     private let session: URLSession
-    private let fileManager = FileManager.default
-    private let updatesDirectory: URL
     private let checkTimeout: TimeInterval
     private(set) var state: AppUpdateState = .idle
     private var checkTask: URLSessionDataTask?
     private var checkTimeoutTimer: Timer?
     private var checkGeneration: UInt64 = 0
     private var checkCompletion: ((AppUpdateState) -> Void)?
-    private var downloadTask: URLSessionDownloadTask?
 
     init(session: URLSession = .shared, checkTimeout: TimeInterval = 20) {
         self.session = session
         self.checkTimeout = max(0.1, checkTimeout)
-        let applicationSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-        updatesDirectory = applicationSupport
-            .appendingPathComponent("com.openai.codex-usage-status", isDirectory: true)
-            .appendingPathComponent("updates", isDirectory: true)
         super.init()
     }
 
@@ -194,14 +180,17 @@ final class AppUpdateService: NSObject {
                     let decoder = JSONDecoder()
                     decoder.dateDecodingStrategy = .iso8601
                     let payload = try decoder.decode(ReleaseResponse.self, from: data)
-                    let zip = payload.assets.first { $0.name == "CodexUsageStatus.app.zip" }
+                    let version = payload.tagName.replacingOccurrences(of: "^v", with: "", options: .regularExpression)
+                    guard AppUpdateReleasePolicy.isSafeVersion(version),
+                          AppUpdateReleasePolicy.isOfficialReleaseURL(payload.htmlURL) else {
+                        self.finishCheck(.error(AppUpdateError.invalidResponse.localizedDescription))
+                        return
+                    }
                     let release = AppUpdateRelease(
-                        version: payload.tagName.replacingOccurrences(of: "^v", with: "", options: .regularExpression),
+                        version: version,
                         tagName: payload.tagName,
                         name: payload.name?.isEmpty == false ? payload.name! : payload.tagName,
                         releaseURL: payload.htmlURL,
-                        downloadURL: zip?.browserDownloadURL,
-                        expectedSHA256: Self.sha256(from: zip?.digest),
                         notes: payload.body ?? "",
                         publishedAt: payload.publishedAt
                     )
@@ -251,227 +240,8 @@ final class AppUpdateService: NSObject {
         finishCheck(.error(AppUpdateError.checkCancelled.localizedDescription), completion: completion)
     }
 
-    func download(completion: ((AppUpdateState) -> Void)? = nil) {
-        guard case .available(let release) = state, let downloadURL = release.downloadURL else {
-            finish(.error(AppUpdateError.missingDownload.localizedDescription), completion: completion)
-            return
-        }
-        guard downloadTask == nil else { return }
-        do {
-            try fileManager.createDirectory(at: updatesDirectory, withIntermediateDirectories: true,
-                                            attributes: [.posixPermissions: 0o700])
-        } catch {
-            finish(.error("無法建立更新暫存目錄：\(error.localizedDescription)"), completion: completion)
-            return
-        }
-
-        state = .downloading(release)
-        var request = URLRequest(url: downloadURL)
-        request.timeoutInterval = 120
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("CodexUsageStatus/\(currentVersion)", forHTTPHeaderField: "User-Agent")
-        let task = session.downloadTask(with: request) { [weak self] temporaryURL, response, error in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.downloadTask = nil
-                if let error {
-                    self.finish(.error("更新檔下載失敗：\(error.localizedDescription)"), completion: completion)
-                    return
-                }
-                guard let temporaryURL,
-                      let http = response as? HTTPURLResponse,
-                      (200..<300).contains(http.statusCode) else {
-                    self.finish(.error(AppUpdateError.downloadFailed.localizedDescription), completion: completion)
-                    return
-                }
-                do {
-                    let archive = self.updatesDirectory.appendingPathComponent("CodexUsageStatus-\(release.version).app.zip")
-                    try? self.fileManager.removeItem(at: archive)
-                    try self.fileManager.moveItem(at: temporaryURL, to: archive)
-                    if let expected = release.expectedSHA256 {
-                        guard Self.sha256(of: archive) == expected.lowercased() else {
-                            throw AppUpdateError.checksumMismatch
-                        }
-                    }
-                    let app = try self.extractAndVerify(archive: archive, version: release.version)
-                    self.finish(.downloaded(release, app), completion: completion)
-                } catch {
-                    self.finish(.error((error as? LocalizedError)?.errorDescription ?? error.localizedDescription), completion: completion)
-                }
-            }
-        }
-        downloadTask = task
-        task.resume()
-    }
-
-    func cancelDownload() {
-        downloadTask?.cancel()
-        downloadTask = nil
-        if case .downloading(let release) = state { state = .available(release) }
-    }
-
-    func revealDownloadedApp() {
-        guard case .downloaded(_, let appURL) = state else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([appURL])
-    }
-
-    /// Installs the verified bundle in place and relaunches the same app path.
-    /// The detached helper waits for this process to exit, validates the staged
-    /// copy again, then swaps it atomically enough to restore the old bundle on
-    /// any failure. If the app lives in a protected directory such as
-    /// /Applications, macOS asks once for administrator authorization.
-    /// It never touches the user's Codex auth or data directories.
-    func installDownloadedUpdate() {
-        guard case .downloaded(_, let appURL) = state else { return }
-
-        let source = appURL.standardizedFileURL
-        let destination = Bundle.main.bundleURL.standardizedFileURL
-        guard destination.pathExtension == "app",
-              fileManager.fileExists(atPath: source.appendingPathComponent("Contents/Info.plist").path),
-              fileManager.fileExists(atPath: destination.appendingPathComponent("Contents/Info.plist").path),
-              source != destination else {
-            state = .error(AppUpdateError.installFailed.localizedDescription)
-            return
-        }
-
-        do {
-            try fileManager.createDirectory(at: updatesDirectory, withIntermediateDirectories: true,
-                                             attributes: [.posixPermissions: 0o700])
-            let token = UUID().uuidString
-            let scriptURL = updatesDirectory.appendingPathComponent(".install-\(token).sh")
-            let destinationParent = destination.deletingLastPathComponent()
-            let staged = destinationParent.appendingPathComponent(".CodexUsageStatus.app.staged-\(token)")
-            let backup = destinationParent.appendingPathComponent(".CodexUsageStatus.app.previous-\(token)")
-            guard let scriptData = Self.installScript.data(using: .utf8) else {
-                throw AppUpdateError.installFailed
-            }
-            try scriptData.write(to: scriptURL, options: [.atomic])
-            try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
-
-            let installerArguments = [
-                scriptURL.path,
-                String(ProcessInfo.processInfo.processIdentifier),
-                source.path,
-                destination.path,
-                staged.path,
-                backup.path
-            ]
-            let helper = Process()
-            if fileManager.isWritableFile(atPath: destinationParent.path) {
-                helper.executableURL = URL(fileURLWithPath: "/bin/sh")
-                helper.arguments = installerArguments
-            } else {
-                helper.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-                helper.arguments = ["-e", Self.privilegedInstallScript, "--"] + installerArguments
-            }
-            helper.standardInput = FileHandle.nullDevice
-            helper.standardOutput = FileHandle.nullDevice
-            helper.standardError = FileHandle.nullDevice
-            try helper.run()
-            NSApp.terminate(nil)
-        } catch {
-            state = .error("\(AppUpdateError.installFailed.localizedDescription)（\(error.localizedDescription)）")
-        }
-    }
-
     func openReleasePage() {
         NSWorkspace.shared.open(state.release?.releaseURL ?? repositoryURL)
-    }
-
-    private func extractAndVerify(archive: URL, version: String) throws -> URL {
-        let directory = updatesDirectory.appendingPathComponent("CodexUsageStatus-\(version)", isDirectory: true)
-        try? fileManager.removeItem(at: directory)
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true,
-                                        attributes: [.posixPermissions: 0o700])
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        process.arguments = ["-q", "-o", archive.path, "-d", directory.path]
-        let errorPipe = Pipe()
-        process.standardError = errorPipe
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { throw AppUpdateError.invalidArchive }
-
-        let appURL = directory.appendingPathComponent("CodexUsageStatus.app", isDirectory: true)
-        guard fileManager.fileExists(atPath: appURL.appendingPathComponent("Contents/Info.plist").path) else {
-            throw AppUpdateError.invalidArchive
-        }
-        let signature = Process()
-        signature.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-        signature.arguments = ["--verify", "--deep", "--strict", appURL.path]
-        signature.standardOutput = Pipe()
-        signature.standardError = Pipe()
-        try signature.run()
-        signature.waitUntilExit()
-        guard signature.terminationStatus == 0 else { throw AppUpdateError.signatureInvalid }
-        try (directory as NSURL).setResourceValue(true, forKey: .isExcludedFromBackupKey)
-        return appURL
-    }
-
-    private static let installScript = """
-    #!/bin/sh
-    set -u
-    script="$0"
-    pid="$1"
-    source="$2"
-    destination="$3"
-    staged="$4"
-    backup="$5"
-
-    cleanup() {
-        /bin/rm -rf "$staged" 2>/dev/null || true
-        /bin/rm -f "$script" 2>/dev/null || true
-    }
-
-    failed() {
-        if [ -e "$backup" ] && [ ! -e "$destination" ]; then
-            /bin/mv "$backup" "$destination" 2>/dev/null || true
-        fi
-        cleanup
-        /usr/bin/open -n "$destination" >/dev/null 2>&1 || true
-        exit 1
-    }
-
-    i=0
-    while /bin/kill -0 "$pid" 2>/dev/null; do
-        i=$((i + 1))
-        if [ "$i" -ge 150 ]; then
-            failed
-        fi
-        /bin/sleep 0.2
-    done
-
-    /bin/rm -rf "$staged" 2>/dev/null || true
-    /usr/bin/ditto "$source" "$staged" || failed
-    /usr/bin/codesign --verify --deep --strict "$staged" >/dev/null 2>&1 || failed
-
-    if [ -e "$destination" ]; then
-        /bin/mv "$destination" "$backup" || failed
-    fi
-    /bin/mv "$staged" "$destination" || failed
-    /bin/rm -rf "$backup" 2>/dev/null || true
-    /usr/bin/open -n "$destination" >/dev/null 2>&1 || exit 1
-    /bin/rm -f "$script" 2>/dev/null || true
-    exit 0
-    """
-
-    private static let privilegedInstallScript = """
-    on run argv
-        if (count of argv) < 6 then error "missing installer arguments"
-        set scriptPath to quoted form of item 1 of argv
-        set pidValue to quoted form of item 2 of argv
-        set sourcePath to quoted form of item 3 of argv
-        set destinationPath to quoted form of item 4 of argv
-        set stagedPath to quoted form of item 5 of argv
-        set backupPath to quoted form of item 6 of argv
-        do shell script "/bin/sh " & scriptPath & " " & pidValue & " " & sourcePath & " " & destinationPath & " " & stagedPath & " " & backupPath with administrator privileges
-    end run
-    """
-
-    private func finish(_ newState: AppUpdateState, completion: ((AppUpdateState) -> Void)?) {
-        state = newState
-        completion?(newState)
     }
 
     private func finishCheck(_ newState: AppUpdateState, completion: ((AppUpdateState) -> Void)? = nil) {
@@ -506,24 +276,4 @@ final class AppUpdateService: NSObject {
         }
     }
 
-    private static func sha256(from digest: String?) -> String? {
-        guard let digest else { return nil }
-        let value = digest.lowercased().replacingOccurrences(of: "^sha256:", with: "", options: .regularExpression)
-        return value.count == 64 ? value : nil
-    }
-
-    private static func sha256(of url: URL) -> String {
-        guard let stream = InputStream(url: url) else { return "" }
-        stream.open()
-        defer { stream.close() }
-        var hasher = SHA256()
-        let bufferSize = 64 * 1024
-        var buffer = [UInt8](repeating: 0, count: bufferSize)
-        while stream.hasBytesAvailable {
-            let read = stream.read(&buffer, maxLength: bufferSize)
-            if read <= 0 { break }
-            hasher.update(data: Data(buffer[0..<read]))
-        }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
-    }
 }

@@ -75,29 +75,20 @@ The app talks to the local Codex App Server over its stdio interface. It does no
 The app checks the GitHub `latest release` endpoint at startup and periodically while running. When a newer version is available:
 
 1. The app shows an update state in the popover and may display one notification for that release.
-2. You choose **Update and Relaunch**.
-3. The ZIP is downloaded to the user's Application Support updates directory.
-4. The app verifies the archive checksum when GitHub provides one and performs strict code-signature verification after extraction.
-5. Verification immediately starts the detached installer. It waits for the current process to exit, re-validates the staged app, swaps it into the current app path, and relaunches it. No Finder window or manual app replacement is required.
+2. You choose **Open Release** to review the official GitHub Release and download it manually.
 
-The updater does not send credentials or user data to GitHub, and it does not touch Codex auth/history directories. If the replacement cannot be completed, it attempts to restore the previous app bundle.
+The app never downloads, extracts, replaces, or relaunches itself. Manual installation is performed by the user through Finder. Release metadata is accepted only when the version is path-safe and the link is an HTTPS URL on this repository's GitHub Releases page.
 
 ### Release requirements for maintainers
 
-The updater expects a GitHub Release with:
+Maintainers should publish a GitHub Release with:
 
 - A semantic-version tag such as `v2.4.28`
 - An asset named exactly `CodexUsageStatus.app.zip`
 - The signed app bundle inside the ZIP
 - No `._*`, `__MACOSX`, source, test, auth, token, or history files
 
-For the current `2.4.28 / build 48` package, the verified ZIP SHA-256 is:
-
-```text
-b23112853f54ea47c2950f4c6fa685a22dd7d6fd6e24b8007ef5342309b2cc6f
-```
-
-If there is no GitHub Release yet, the updater correctly reports that no formal release is available; committing a ZIP to `main` alone does not create a release update.
+Record the checksum and formal signing identity for each published artifact in the release notes or maintainer evidence. A commit or ZIP pushed to `main` alone does not create an in-app release update.
 
 ## Building from source
 
@@ -146,7 +137,7 @@ Confirm that the currently running copy of `CodexUsageStatus.app` is enabled und
 
 ### The update checker says no release is available
 
-A maintainer must publish a GitHub Release first. The release must contain the exact asset name `CodexUsageStatus.app.zip`; a commit or a source ZIP is not enough.
+A maintainer must publish a GitHub Release first. The release should contain the exact asset name `CodexUsageStatus.app.zip`; the app only opens the official release page and does not fetch the asset itself.
 
 ### macOS says the app cannot be opened
 

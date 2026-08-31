@@ -61,11 +61,7 @@ final class CodexWorkspaceResolver {
     }
 
     static func isCodexApplication(_ app: NSRunningApplication) -> Bool {
-        CodexApplicationPolicy.isCodexApplication(
-            bundleIdentifier: app.bundleIdentifier,
-            localizedName: app.localizedName,
-            bundlePath: app.bundleURL?.path
-        )
+        CodexApplicationPolicy.isCodexApplication(app)
     }
 
     /// Returns the bounds of the focused Codex window in Quartz screen

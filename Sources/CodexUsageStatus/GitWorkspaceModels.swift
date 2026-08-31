@@ -188,14 +188,61 @@ extension GitWorkspaceIdentity {
 enum GitCommitPolicy {
     static func arguments(message: String, paths: [String]) -> [String]? {
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
-        let safePaths = paths.filter { isSafeRelativePath($0) }
-        guard !trimmed.isEmpty, !safePaths.isEmpty else { return nil }
-        return ["commit", "--only", "-m", trimmed, "--"] + safePaths
+        guard !trimmed.isEmpty, !paths.isEmpty, paths.allSatisfy(isSafeRelativePath) else { return nil }
+        return ["commit", "--only", "-m", trimmed, "--"] + paths
     }
 
     static func isSafeRelativePath(_ path: String) -> Bool {
-        guard !path.isEmpty, !path.hasPrefix("/"), path != "." else { return false }
+        guard !path.isEmpty, !path.hasPrefix("/"), path != ".",
+              !path.contains("\0"), !path.contains("\n"), !path.contains("\r"),
+              !path.hasPrefix(":("),
+              !path.hasPrefix(":/"), !path.hasPrefix("!"), !path.hasPrefix("^"),
+              !path.contains("*"), !path.contains("?"), !path.contains("[") else { return false }
         return !path.split(separator: "/").contains("..")
+    }
+}
+
+/// Central execution policy for every Git invocation made by the app.
+/// Repository-local configuration is untrusted input: fsmonitor, diff
+/// drivers, external diff, SSH commands, credential helpers, and protocol
+/// helpers can otherwise turn status or diff refreshes into process launches.
+enum GitExecutionPolicy {
+    private static let globalOptions: [String] = [
+        "-c", "core.fsmonitor=false",
+        "-c", "core.hooksPath=/dev/null",
+        "-c", "diff.external=",
+        "-c", "core.sshCommand=",
+        "-c", "core.gitProxy=",
+        "-c", "credential.helper=",
+        "-c", "protocol.ext.allow=never",
+        "-c", "protocol.file.allow=never",
+        "-c", "protocol.fd.allow=never",
+        "-c", "protocol.http.allow=never",
+        "-c", "protocol.git.allow=always",
+        "-c", "protocol.https.allow=always",
+        "-c", "protocol.ssh.allow=always"
+    ]
+
+    static let environment: [String: String] = [
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+        // Ignore user/system SSH configuration, including ProxyCommand and
+        // Match exec directives. The direct transport remains available, but
+        // all child-process behavior is fixed to the system ssh binary.
+        "GIT_SSH_COMMAND": "/usr/bin/ssh -F /dev/null -o BatchMode=yes",
+        "GIT_SSH_VARIANT": "ssh"
+    ]
+
+    static func invocationArguments(_ arguments: [String]) -> [String] {
+        guard let command = arguments.first else { return globalOptions }
+        let commandOptions: [String]
+        switch command {
+        case "diff": commandOptions = ["--no-ext-diff", "--no-textconv"]
+        default: commandOptions = []
+        }
+        return globalOptions + [command] + commandOptions + Array(arguments.dropFirst())
     }
 }
 
@@ -210,6 +257,36 @@ enum GitPushPolicy {
         let upstreamBranch = String(upstream[upstream.index(after: separator)...])
         guard !upstreamBranch.isEmpty else { return nil }
         return ["push", remote, "HEAD:refs/heads/\(upstreamBranch)"]
+    }
+
+    /// Only explicit HTTPS or SSH transports are accepted for a push. Git's
+    /// `ext::`, `file://`, helper, and local transports can execute arbitrary
+    /// programs or write outside the intended remote boundary.
+    static func isSafeRemoteURL(_ value: String) -> Bool {
+        let candidate = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidate.isEmpty,
+              candidate == value,
+              !candidate.contains("\0"),
+              !candidate.contains("\n"),
+              !candidate.hasPrefix("-") else { return false }
+        let lowered = candidate.lowercased()
+        if lowered.hasPrefix("ext::") || lowered.hasPrefix("file:") || lowered.hasPrefix("fd:") || lowered.hasPrefix("rsync:") || lowered.hasPrefix("ftp:") {
+            return false
+        }
+        if candidate.range(of: #"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+:[^\s]+$"#, options: .regularExpression) != nil {
+            return true
+        }
+        guard let url = URL(string: candidate),
+              let scheme = url.scheme?.lowercased(),
+              ["https", "ssh"].contains(scheme),
+              let host = url.host, !host.isEmpty,
+              url.user == nil else { return false }
+        return true
+    }
+
+    static func arguments(identity: GitWorkspaceIdentity, remoteURL: String) -> [String]? {
+        guard let base = arguments(identity: identity), isSafeRemoteURL(remoteURL) else { return nil }
+        return [base[0], remoteURL] + base.dropFirst(2)
     }
 }
 

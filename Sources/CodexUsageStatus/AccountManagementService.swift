@@ -20,18 +20,29 @@ enum AccountManagementError: LocalizedError {
 @MainActor
 final class AccountManagementService {
     private var loginProcesses: [UUID: Process] = [:]
+    private var loginSessionTokens: [UUID: UUID] = [:]
+    private let executableResolver: () -> String?
     var onLoginOutput: ((UUID, String) -> Void)?
+
+    var loginProcessIDs: [Int32] {
+        loginProcesses.values.filter(\.isRunning).map(\.processIdentifier)
+    }
+
+    init(executableResolver: @escaping () -> String? = { CodexCLIResolver.resolve() }) {
+        self.executableResolver = executableResolver
+    }
 
     func startOfficialLogin(profile: AccountProfile, codexHomeURL: URL, completion: @escaping (Result<Void, Error>) -> Void) {
         guard loginProcesses[profile.id] == nil else {
             completion(.failure(AccountManagementError.loginAlreadyRunning))
             return
         }
-        guard let executable = CodexCLIResolver.resolve() else {
+        guard let executable = executableResolver() else {
             completion(.failure(AccountManagementError.cliNotFound))
             return
         }
         let process = Process()
+        let sessionToken = UUID()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = ["login", "--device-auth"]
         var environment = ProcessInfo.processInfo.environment
@@ -44,19 +55,28 @@ final class AccountManagementService {
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            Task { @MainActor in self?.onLoginOutput?(profile.id, String(text.trimmingCharacters(in: .whitespacesAndNewlines).suffix(2000))) }
+            Task { @MainActor in
+                guard self?.loginSessionTokens[profile.id] == sessionToken else { return }
+                self?.onLoginOutput?(profile.id, String(text.trimmingCharacters(in: .whitespacesAndNewlines).suffix(2000)))
+            }
         }
         stderr.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            Task { @MainActor in self?.onLoginOutput?(profile.id, String(text.trimmingCharacters(in: .whitespacesAndNewlines).suffix(2000))) }
+            Task { @MainActor in
+                guard self?.loginSessionTokens[profile.id] == sessionToken else { return }
+                self?.onLoginOutput?(profile.id, String(text.trimmingCharacters(in: .whitespacesAndNewlines).suffix(2000)))
+            }
         }
         loginProcesses[profile.id] = process
+        loginSessionTokens[profile.id] = sessionToken
         process.terminationHandler = { [weak self] process in
             Task { @MainActor in
                 guard let self else { return }
                 stdout.fileHandleForReading.readabilityHandler = nil
                 stderr.fileHandleForReading.readabilityHandler = nil
+                guard self.loginSessionTokens[profile.id] == sessionToken else { return }
+                self.loginSessionTokens[profile.id] = nil
                 self.loginProcesses[profile.id] = nil
                 if process.terminationStatus == 0 {
                     completion(.success(()))
@@ -69,13 +89,34 @@ final class AccountManagementService {
             try process.run()
         } catch {
             loginProcesses[profile.id] = nil
+            loginSessionTokens[profile.id] = nil
+            stdout.fileHandleForReading.readabilityHandler = nil
+            stderr.fileHandleForReading.readabilityHandler = nil
             completion(.failure(error))
         }
     }
 
     func stopLogin(profileID: UUID) {
+        loginSessionTokens[profileID] = nil
         guard let process = loginProcesses.removeValue(forKey: profileID) else { return }
+        (process.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        (process.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
         if process.isRunning { process.terminate() }
+    }
+
+    /// Stops every outstanding login child and releases its pipe handlers.
+    /// App shutdown and profile removal both call this method; it is safe to
+    /// invoke repeatedly and prevents orphaned CLI processes retaining a
+    /// deleted profile's CODEX_HOME.
+    func stopAllLogins() {
+        let processes = Array(loginProcesses.values)
+        loginProcesses.removeAll(keepingCapacity: false)
+        loginSessionTokens.removeAll(keepingCapacity: false)
+        for process in processes {
+            (process.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+            (process.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+            if process.isRunning { process.terminate() }
+        }
     }
 
     func chooseCodexHome() -> URL? {

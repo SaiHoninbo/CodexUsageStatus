@@ -7,7 +7,14 @@ BUNDLE_ID="com.openai.codex-usage-status"
 MIN_SYSTEM_VERSION="14.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STAGE_DIR="/private/tmp/codex-usage-status-stage"
+STAGE_DIR="$(mktemp -d -t codex-usage-status-stage.XXXXXX)"
+# `run` and `--verify` launch the bundle asynchronously.  Do not delete the
+# temporary bundle when those modes return, or macOS may still be loading its
+# executable/resources.  Package mode is the only path whose consumer is the
+# finished ZIP, so it can safely clean its staging directory on exit.
+if [[ "$MODE" == "package" ]]; then
+  trap 'rm -rf "$STAGE_DIR"' EXIT
+fi
 APP_BUNDLE="$STAGE_DIR/$APP_NAME.app"
 OUTPUT_DIR="$ROOT_DIR/outputs"
 OUTPUT_ZIP="$OUTPUT_DIR/$APP_NAME.app.zip"
@@ -28,7 +35,6 @@ pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 swift build --disable-sandbox -c release "${SWIFT_RELEASE_ARGS[@]}"
 BUILD_BINARY="$(swift build --disable-sandbox --show-bin-path -c release "${SWIFT_RELEASE_ARGS[@]}")/$APP_NAME"
 
-rm -rf "$STAGE_DIR"
 mkdir -p "$APP_MACOS" "$APP_RESOURCES"
 cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
@@ -88,7 +94,16 @@ cat > "$INFO_PLIST" <<PLIST
 PLIST
 
 xattr -cr "$APP_BUNDLE"
-codesign --force --deep --sign - "$APP_BUNDLE"
+if [[ "${CODEX_RELEASE_MODE:-0}" == "1" ]]; then
+  RELEASE_SIGNING_IDENTITY="${CODEX_RELEASE_SIGNING_IDENTITY:-}"
+  if [[ -z "$RELEASE_SIGNING_IDENTITY" || "$RELEASE_SIGNING_IDENTITY" == "-" ]]; then
+    echo "release mode requires CODEX_RELEASE_SIGNING_IDENTITY; refusing ad-hoc signing" >&2
+    exit 3
+  fi
+  codesign --force --deep --options runtime --sign "$RELEASE_SIGNING_IDENTITY" "$APP_BUNDLE"
+else
+  codesign --force --deep --sign - "$APP_BUNDLE"
+fi
 codesign --verify --deep --strict --verbose=4 "$APP_BUNDLE"
 mkdir -p "$OUTPUT_DIR"
 COPYFILE_DISABLE=1 ditto --norsrc -c -k --keepParent "$APP_BUNDLE" "$OUTPUT_ZIP"

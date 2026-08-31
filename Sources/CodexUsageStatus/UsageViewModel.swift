@@ -324,6 +324,7 @@ final class UsageViewModel: ObservableObject {
         updateCheckTimer = nil
         feedTrackingService.stop()
         client.stop()
+        accountManagementService.stopAllLogins()
         for worker in managedWorkers.values { worker.stop() }
         managedWorkers.removeAll()
     }
@@ -365,37 +366,6 @@ final class UsageViewModel: ObservableObject {
         updateService.cancelCheck { [weak self] state in
             self?.updateState = state
         }
-        updateState = updateService.state
-    }
-
-    func downloadAvailableUpdate() {
-        updateService.download { [weak self] state in
-            guard let self else { return }
-            self.updateState = state
-
-            // An update is an explicit user action: once the archive has
-            // passed checksum/signature verification, immediately hand it to
-            // the detached installer.  The installer waits for this process
-            // to exit, swaps the verified bundle at the same path, and
-            // relaunches it.  This keeps the normal flow to one click instead
-            // of leaving a verified archive that the user must copy by hand.
-            guard case .downloaded = state else { return }
-            self.updateService.installDownloadedUpdate()
-            self.updateState = self.updateService.state
-        }
-    }
-
-    func cancelUpdateDownload() {
-        updateService.cancelDownload()
-        updateState = updateService.state
-    }
-
-    func revealDownloadedUpdate() {
-        updateService.revealDownloadedApp()
-    }
-
-    func installDownloadedUpdate() {
-        updateService.installDownloadedUpdate()
         updateState = updateService.state
     }
 
@@ -530,6 +500,7 @@ final class UsageViewModel: ObservableObject {
     }
 
     func removeProfile(id: UUID) {
+        accountManagementService.stopLogin(profileID: id)
         managedWorkers[id]?.stop()
         managedWorkers[id] = nil
         workerGenerations[id] = nil

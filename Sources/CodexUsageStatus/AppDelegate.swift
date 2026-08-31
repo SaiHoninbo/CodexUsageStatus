@@ -192,7 +192,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let candidates = ["/Applications/Codex.app", "/Applications/ChatGPT.app"]
-        if let appPath = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }) {
+        if let appPath = candidates.first(where: {
+            FileManager.default.fileExists(atPath: $0)
+                && CodexApplicationPolicy.isTrustedBundle(at: URL(fileURLWithPath: $0, isDirectory: true))
+        }) {
             NSWorkspace.shared.open(URL(fileURLWithPath: appPath))
         }
     }

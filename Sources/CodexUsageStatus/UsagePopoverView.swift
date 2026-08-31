@@ -421,32 +421,12 @@ struct UsagePopoverView: View {
                     .font(.body)
                     .foregroundStyle(.green)
             case .available(let release):
-                updateReleaseDetails(release, downloadedURL: nil)
+                updateReleaseDetails(release)
                 HStack(spacing: 8) {
-                    Button("立即更新並重新啟動") { model.downloadAvailableUpdate() }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.regular)
                     Button("開啟 Release") { model.openUpdateReleasePage() }
                         .buttonStyle(.link)
                         .font(.subheadline)
                 }
-            case .downloading(let release):
-                updateReleaseDetails(release, downloadedURL: nil)
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text("正在下載、驗證並安裝…")
-                        .font(.body)
-                    Spacer()
-                    Button("取消") { model.cancelUpdateDownload() }
-                        .buttonStyle(.link)
-                        .font(.subheadline)
-                }
-            case .downloaded(let release, let appURL):
-                updateReleaseDetails(release, downloadedURL: appURL)
-                    Text("更新檔已通過 SHA-256（若 Release 提供）與 strict code signature 驗證，正在由背景安裝器替換同一路徑的 App 並重新啟動。")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             case .error(let message):
                 Text(message)
                     .font(.body)
@@ -467,12 +447,10 @@ struct UsagePopoverView: View {
     @ViewBuilder
     private var updateStatusLabel: some View {
         switch model.updateState {
-        case .checking, .downloading:
+        case .checking:
             Text("處理中").font(.subheadline).foregroundStyle(.secondary)
         case .available:
             Text("有新版").font(.subheadline).foregroundStyle(.blue)
-        case .downloaded:
-            Text("已驗證").font(.subheadline).foregroundStyle(.green)
         case .upToDate:
             Text("最新").font(.subheadline).foregroundStyle(.green)
         case .error:
@@ -482,7 +460,7 @@ struct UsagePopoverView: View {
         }
     }
 
-    private func updateReleaseDetails(_ release: AppUpdateRelease, downloadedURL: URL?) -> some View {
+    private func updateReleaseDetails(_ release: AppUpdateRelease) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text("版本 \(release.version)")
                 .font(.body.weight(.semibold))
@@ -496,12 +474,6 @@ struct UsagePopoverView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-            }
-            if let downloadedURL {
-                Text("已驗證：\(downloadedURL.deletingLastPathComponent().lastPathComponent)")
-                    .font(.subheadline)
-                    .foregroundStyle(.green)
-                    .lineLimit(1)
             }
         }
     }

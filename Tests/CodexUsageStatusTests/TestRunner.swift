@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import AppKit
+import Darwin
 
 private final class FeedNotificationSubmissionProbe: FeedNotificationSubmitting {
     let result: Result<Void, Error>
@@ -105,7 +106,7 @@ enum HarnessError: Error, CustomStringConvertible {
 
 @main
 struct CodexUsageStatusTests {
-    static func main() {
+    static func main() async {
         let tests: [(String, () throws -> Void)] = [
             ("full snapshot prefers codex bucket", testFullSnapshotPrefersCodexBucket),
             ("empty codex bucket falls back", testEmptyCodexBucketFallsBack),
@@ -176,7 +177,28 @@ struct CodexUsageStatusTests {
                 print("FAIL \(name): \(error)")
             }
         }
-        print("\(tests.count - failures)/\(tests.count) tests passed")
+        do {
+            try await testLoginLifecycleShutdown()
+            print("PASS login lifecycle shutdown")
+        } catch {
+            failures += 1
+            print("FAIL login lifecycle shutdown: \(error)")
+        }
+        do {
+            try await testGitExecutionBoundary()
+            print("PASS git execution boundary")
+        } catch {
+            failures += 1
+            print("FAIL git execution boundary: \(error)")
+        }
+        do {
+            try await testGitMutationConfigurationSources()
+            print("PASS git mutation configuration sources")
+        } catch {
+            failures += 1
+            print("FAIL git mutation configuration sources: \(error)")
+        }
+        print("\(tests.count + 2 - failures)/\(tests.count + 2) tests passed")
         if failures > 0 { exit(1) }
     }
 
@@ -1355,6 +1377,18 @@ struct CodexUsageStatusTests {
         try expect(AppVersionComparator.isNewer("2.5", than: "2.4.99"), "minor version should compare newer")
         try expect(!AppVersionComparator.isNewer("2.4.11", than: "2.4.11"), "same version is not newer")
         try expect(!AppVersionComparator.isNewer("2.4.10", than: "2.4.11"), "older version is not newer")
+        try expect(AppUpdateReleasePolicy.isSafeVersion("2.5.0"), "release version is path-safe")
+        try expect(AppUpdateReleasePolicy.isSafeVersion("2.5.0.1"), "four-part release version is path-safe")
+        try expect(!AppUpdateReleasePolicy.isSafeVersion("9/../../outside"), "path traversal release version is rejected")
+        try expect(!AppUpdateReleasePolicy.isSafeVersion("2.5.0\ncommand"), "control-character release version is rejected")
+        try expect(AppUpdateReleasePolicy.isOfficialReleaseURL(URL(string: "https://github.com/SaiHoninbo/CodexUsageStatus/releases/tag/v2.5.0")!), "official release URL is allowed")
+        try expect(AppUpdateReleasePolicy.isOfficialReleaseURL(URL(string: "https://github.com:443/SaiHoninbo/CodexUsageStatus/releases/tag/v2.5.0")!), "official HTTPS default port is allowed")
+        try expect(!AppUpdateReleasePolicy.isOfficialReleaseURL(URL(string: "https://github.com:444/SaiHoninbo/CodexUsageStatus/releases/tag/v2.5.0")!), "arbitrary release URL port is rejected")
+        try expect(!AppUpdateReleasePolicy.isOfficialReleaseURL(URL(string: "https://evil.example/releases/v2.5.0")!), "non-GitHub release URL is rejected")
+        try expect(!AppUpdateReleasePolicy.isOfficialReleaseURL(URL(string: "https://token@github.com/SaiHoninbo/CodexUsageStatus/releases/tag/v2.5.0")!), "credential-bearing release URL is rejected")
+        try expect(!AppUpdateReleasePolicy.isOfficialReleaseURL(URL(string: "https://:secret@github.com/SaiHoninbo/CodexUsageStatus/releases/tag/v2.5.0")!), "password-bearing release URL is rejected")
+        try expect(!AppUpdateReleasePolicy.isOfficialReleaseURL(URL(string: "https://github.com/SaiHoninbo/CodexUsageStatus/releases/../evil")!), "release URL path traversal is rejected")
+        try expect(!AppUpdateReleasePolicy.isOfficialReleaseURL(URL(string: "https://github.com/SaiHoninbo/CodexUsageStatus/releases/%2e%2e/evil")!), "encoded release URL path traversal is rejected")
     }
 
     private static func testGitWorkspacePolicies() throws {
@@ -1370,9 +1404,23 @@ struct CodexUsageStatusTests {
         try expect(commit?.suffix(1).first == "file.swift", "commit uses explicit pathspec")
         try expect(GitCommitPolicy.arguments(message: " ", paths: ["file.swift"]) == nil, "empty message rejected")
         try expect(GitCommitPolicy.arguments(message: "safe", paths: ["../secret"]) == nil, "unsafe path rejected")
+        try expect(GitCommitPolicy.arguments(message: "safe", paths: ["*.swift"]) == nil, "wildcard pathspec rejected")
+        try expect(GitCommitPolicy.arguments(message: "safe", paths: [":(glob)**/*.swift"]) == nil, "magic pathspec rejected")
+        try expect(GitCommitPolicy.arguments(message: "safe", paths: [":/rooted.swift"]) == nil, "root pathspec rejected")
+
+        let guarded = GitExecutionPolicy.invocationArguments(["diff", "--", "file.swift"])
+        try expect(guarded.contains("core.fsmonitor=false"), "git execution disables fsmonitor config")
+        try expect(guarded.contains("diff.external="), "git execution disables external diff config")
+        try expect(GitExecutionPolicy.environment["GIT_CONFIG_GLOBAL"] == "/dev/null", "git execution isolates global config")
 
         let identity = GitWorkspaceIdentity(repositoryRoot: "/repo", gitDirectory: "/repo/.git", branch: "main", head: "abc", remote: "origin", upstream: "origin/main", remoteFingerprint: "test-remote")
         try expect(GitPushPolicy.arguments(identity: identity) == ["push", "origin", "HEAD:refs/heads/main"], "push uses explicit refspec")
+        try expect(GitPushPolicy.isSafeRemoteURL("https://github.com/example/repo.git"), "https remote is allowed")
+        try expect(GitPushPolicy.isSafeRemoteURL("git@example.com:repo.git"), "ssh scp remote is allowed")
+        try expect(!GitPushPolicy.isSafeRemoteURL("ext::sh -c whoami"), "ext helper remote is rejected")
+        try expect(!GitPushPolicy.isSafeRemoteURL("file:///tmp/repo"), "file remote is rejected")
+        try expect(!GitPushPolicy.isSafeRemoteURL("https://token@example.com/repo.git"), "credential-bearing remote is rejected")
+        try expect(!GitPushPolicy.isSafeRemoteURL("https://github.com/example/repo.git\n--upload-pack=evil"), "newline remote is rejected")
         try expect(GitWorkspaceSensitivity.isSensitive(path: "credentials/token.pem"), "credential extension is sensitive")
         try expect(!GitWorkspaceSensitivity.isSensitive(path: "Sources/App.swift"), "normal source is not sensitive")
     }
@@ -1464,6 +1512,23 @@ struct CodexUsageStatusTests {
         process.waitUntilExit()
         guard process.terminationStatus == 0 else {
             throw HarnessError.assertion("git fixture command failed: \(arguments.joined(separator: " "))")
+        }
+        return String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    }
+
+    private static func runTool(_ executable: String, _ arguments: [String]) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]
+        let output = Pipe()
+        let error = Pipe()
+        process.standardOutput = output
+        process.standardError = error
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw HarnessError.assertion("tool failed: \(executable) \(arguments.joined(separator: " "))")
         }
         return String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
     }
@@ -1687,8 +1752,6 @@ struct CodexUsageStatusTests {
             tagName: "v2.5.0",
             name: "Codex Usage Status 2.5.0",
             releaseURL: URL(string: "https://example.com/release")!,
-            downloadURL: nil,
-            expectedSHA256: nil,
             notes: "",
             publishedAt: nil
         )
@@ -1703,14 +1766,6 @@ struct CodexUsageStatusTests {
         try expect(
             HUDUpdateBadgePolicy.state(updateState: .available(release), currentVersion: "2.4.51") == .available("2.5.0"),
             "available shows update badge"
-        )
-        try expect(
-            HUDUpdateBadgePolicy.state(updateState: .downloaded(release, URL(fileURLWithPath: "/tmp/CodexUsageStatus.app")), currentVersion: "2.4.51") == .available("2.5.0"),
-            "downloaded remains actionable"
-        )
-        try expect(
-            HUDUpdateBadgePolicy.state(updateState: .downloading(release), currentVersion: "2.4.51") == .downloading,
-            "downloading shows progress"
         )
         try expect(
             HUDUpdateBadgePolicy.state(updateState: .checking, currentVersion: "2.4.51") == .checking,
@@ -1766,6 +1821,187 @@ struct CodexUsageStatusTests {
             !CodexApplicationPolicy.isCodexApplication(bundleIdentifier: nil),
             "missing bundle identity must fail closed"
         )
+
+        // Runtime publisher proof: an ad-hoc bundle that spoofs the native
+        // identifier must still be rejected by the Security.framework gate.
+        let fakeBundle = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexSpoof-\(UUID().uuidString).app", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: fakeBundle) }
+        let fakeContents = fakeBundle.appendingPathComponent("Contents", isDirectory: true)
+        let fakeMacOS = fakeContents.appendingPathComponent("MacOS", isDirectory: true)
+        try FileManager.default.createDirectory(at: fakeMacOS, withIntermediateDirectories: true)
+        let plist = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.openai.codex</string><key>CFBundleExecutable</key><string>CodexSpoof</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>
+        """
+        try Data(plist.utf8).write(to: fakeContents.appendingPathComponent("Info.plist"))
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: fakeMacOS.appendingPathComponent("CodexSpoof"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeMacOS.appendingPathComponent("CodexSpoof").path)
+        _ = try runTool("/usr/bin/codesign", ["--force", "--sign", "-", fakeBundle.path])
+        try expect(!CodexApplicationPolicy.isTrustedBundle(at: fakeBundle), "ad-hoc bundle-id spoof must be rejected")
+        let official = URL(fileURLWithPath: "/Applications/ChatGPT.app", isDirectory: true)
+        if FileManager.default.fileExists(atPath: official.path) {
+            try expect(CodexApplicationPolicy.isTrustedBundle(at: official), "official signed Codex bundle should be accepted")
+        }
+    }
+
+    private static func testLoginLifecycleShutdown() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("codex-login-fixture-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let executable = root.appendingPathComponent("fake-codex")
+        try Data("#!/bin/sh\ntrap 'exit 0' TERM INT\nwhile :; do /bin/sleep 1; done\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let profile = AccountProfile(id: UUID(), fingerprint: "fixture", displayName: "Fixture", accountType: "chatgpt", lastSeen: Date())
+        let service = await MainActor.run { AccountManagementService(executableResolver: { executable.path }) }
+        await MainActor.run {
+            service.startOfficialLogin(profile: profile, codexHomeURL: root) { _ in }
+        }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        let pid = await MainActor.run { service.loginProcessIDs.first }
+        try expect(pid != nil, "login fixture should launch a child")
+        await MainActor.run {
+            service.stopAllLogins()
+            service.stopAllLogins()
+        }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        let registryEmpty = await MainActor.run { service.loginProcessIDs.isEmpty }
+        try expect(registryEmpty, "stopAllLogins clears registry idempotently")
+        if let pid {
+            try expect(kill(pid, 0) != 0, "stopAllLogins terminates login child")
+        }
+    }
+
+    private static func testGitExecutionBoundary() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("codex-git-security-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        _ = try runGit(["init", "-q"], at: root)
+        _ = try runGit(["config", "user.name", "Codex Test"], at: root)
+        _ = try runGit(["config", "user.email", "codex-test@example.invalid"], at: root)
+        let source = root.appendingPathComponent("file.txt")
+        try Data("baseline\n".utf8).write(to: source)
+        _ = try runGit(["add", "--", "file.txt"], at: root)
+        _ = try runGit(["commit", "-q", "-m", "baseline"], at: root)
+
+        let marker = root.appendingPathComponent("marker")
+        let malicious = root.appendingPathComponent("malicious.sh")
+        try Data("#!/bin/sh\ntouch \"\(marker.path)\"\nexit 0\n".utf8).write(to: malicious)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: malicious.path)
+        _ = try runGit(["config", "core.fsmonitor", malicious.path], at: root)
+        _ = try runGit(["config", "diff.evil.textconv", malicious.path], at: root)
+        _ = try runGit(["config", "filter.evil.clean", malicious.path], at: root)
+        _ = try runGit(["config", "commit.gpgsign", "yes"], at: root)
+        _ = try runGit(["config", "url.https://evil.example/.pushInsteadOf", "https://github.com/"], at: root)
+        try Data("*.txt diff=evil\n".utf8).write(to: root.appendingPathComponent(".gitattributes"))
+        try Data("changed\n".utf8).write(to: source)
+
+        let service = GitWorkspaceService()
+        _ = try await service.readStatus(at: root)
+        _ = try await service.readDiff(at: root, path: "file.txt")
+        try expect(!FileManager.default.fileExists(atPath: marker.path), "status/diff never execute fsmonitor or textconv")
+
+        let hook = root.appendingPathComponent(".git/hooks/pre-commit")
+        try Data("#!/bin/sh\ntouch \"\(marker.path)\"\nexit 1\n".utf8).write(to: hook)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+        let snapshot = try await service.readStatus(at: root)
+        do {
+            _ = try await service.commit(at: root, snapshot: snapshot, paths: ["file.txt"], message: "should reject unsafe config")
+            throw HarnessError.assertion("unsafe Git mutation unexpectedly succeeded")
+        } catch let error as GitCommandError {
+            if case .failed = error { } else { throw error }
+        }
+        try expect(!FileManager.default.fileExists(atPath: marker.path), "unsafe hook/config is rejected before commit")
+    }
+
+    /// Local include files and per-worktree config are repository-controlled
+    /// inputs too. Mutation must fail closed when either source enables a
+    /// filter that could execute during staging/commit.
+    private static func testGitMutationConfigurationSources() async throws {
+        let includeRoot = FileManager.default.temporaryDirectory.appendingPathComponent("codex-git-include-config-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: includeRoot) }
+        try FileManager.default.createDirectory(at: includeRoot, withIntermediateDirectories: true)
+        _ = try runGit(["init", "-q"], at: includeRoot)
+        _ = try runGit(["config", "user.name", "Codex Test"], at: includeRoot)
+        _ = try runGit(["config", "user.email", "codex-test@example.invalid"], at: includeRoot)
+        let includeSource = includeRoot.appendingPathComponent("file.txt")
+        try Data("baseline\n".utf8).write(to: includeSource)
+        _ = try runGit(["add", "--", "file.txt"], at: includeRoot)
+        _ = try runGit(["commit", "-q", "-m", "baseline"], at: includeRoot)
+        let includeFile = includeRoot.appendingPathComponent("included-config")
+        let includeMarker = includeRoot.appendingPathComponent("include-marker")
+        let includeFilter = includeRoot.appendingPathComponent("include-filter.sh")
+        try Data("#!/bin/sh\ntouch \"\(includeMarker.path)\"\ncat\n".utf8).write(to: includeFilter)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: includeFilter.path)
+        try Data("[filter \"included\"]\n\tclean = \(includeFilter.path)\n".utf8).write(to: includeFile)
+        _ = try runGit(["config", "--local", "include.path", includeFile.path], at: includeRoot)
+        try Data("*.txt filter=included\n".utf8).write(to: includeRoot.appendingPathComponent(".gitattributes"))
+        try Data("changed\n".utf8).write(to: includeSource)
+
+        let service = GitWorkspaceService()
+        let includeSnapshot = try await service.readStatus(at: includeRoot)
+        do {
+            _ = try await service.commit(at: includeRoot, snapshot: includeSnapshot, paths: ["file.txt"], message: "reject included filter")
+            throw HarnessError.assertion("included Git filter unexpectedly allowed mutation")
+        } catch let error as GitCommandError {
+            if case .failed = error { } else { throw error }
+        }
+        try expect(!FileManager.default.fileExists(atPath: includeMarker.path), "included Git filter is rejected before commit")
+
+        let worktreeRoot = FileManager.default.temporaryDirectory.appendingPathComponent("codex-git-worktree-config-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: worktreeRoot) }
+        try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
+        _ = try runGit(["init", "-q"], at: worktreeRoot)
+        _ = try runGit(["config", "user.name", "Codex Test"], at: worktreeRoot)
+        _ = try runGit(["config", "user.email", "codex-test@example.invalid"], at: worktreeRoot)
+        let worktreeSource = worktreeRoot.appendingPathComponent("file.txt")
+        try Data("baseline\n".utf8).write(to: worktreeSource)
+        _ = try runGit(["add", "--", "file.txt"], at: worktreeRoot)
+        _ = try runGit(["commit", "-q", "-m", "baseline"], at: worktreeRoot)
+        let worktreeMarker = worktreeRoot.appendingPathComponent("worktree-marker")
+        let worktreeFilter = worktreeRoot.appendingPathComponent("worktree-filter.sh")
+        try Data("#!/bin/sh\ntouch \"\(worktreeMarker.path)\"\ncat\n".utf8).write(to: worktreeFilter)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: worktreeFilter.path)
+        _ = try runGit(["config", "extensions.worktreeConfig", "true"], at: worktreeRoot)
+        _ = try runGit(["config", "--worktree", "filter.worktree.clean", worktreeFilter.path], at: worktreeRoot)
+        try Data("*.txt filter=worktree\n".utf8).write(to: worktreeRoot.appendingPathComponent(".gitattributes"))
+        try Data("changed\n".utf8).write(to: worktreeSource)
+
+        let worktreeSnapshot = try await service.readStatus(at: worktreeRoot)
+        do {
+            _ = try await service.commit(at: worktreeRoot, snapshot: worktreeSnapshot, paths: ["file.txt"], message: "reject worktree filter")
+            throw HarnessError.assertion("per-worktree Git filter unexpectedly allowed mutation")
+        } catch let error as GitCommandError {
+            if case .failed = error { } else { throw error }
+        }
+        try expect(!FileManager.default.fileExists(atPath: worktreeMarker.path), "per-worktree Git filter is rejected before commit")
+
+        let askpassRoot = FileManager.default.temporaryDirectory.appendingPathComponent("codex-git-askpass-config-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: askpassRoot) }
+        try FileManager.default.createDirectory(at: askpassRoot, withIntermediateDirectories: true)
+        _ = try runGit(["init", "-q"], at: askpassRoot)
+        _ = try runGit(["config", "user.name", "Codex Test"], at: askpassRoot)
+        _ = try runGit(["config", "user.email", "codex-test@example.invalid"], at: askpassRoot)
+        let askpassSource = askpassRoot.appendingPathComponent("file.txt")
+        try Data("baseline\n".utf8).write(to: askpassSource)
+        _ = try runGit(["add", "--", "file.txt"], at: askpassRoot)
+        _ = try runGit(["commit", "-q", "-m", "baseline"], at: askpassRoot)
+        let askpassMarker = askpassRoot.appendingPathComponent("askpass-marker")
+        let askpassScript = askpassRoot.appendingPathComponent("askpass.sh")
+        try Data("#!/bin/sh\ntouch \"\(askpassMarker.path)\"\nexit 0\n".utf8).write(to: askpassScript)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: askpassScript.path)
+        _ = try runGit(["config", "core.askPass", askpassScript.path], at: askpassRoot)
+        try Data("changed\n".utf8).write(to: askpassSource)
+
+        let askpassSnapshot = try await service.readStatus(at: askpassRoot)
+        do {
+            _ = try await service.commit(at: askpassRoot, snapshot: askpassSnapshot, paths: ["file.txt"], message: "reject askpass helper")
+            throw HarnessError.assertion("core.askpass helper unexpectedly allowed mutation")
+        } catch let error as GitCommandError {
+            if case .failed = error { } else { throw error }
+        }
+        try expect(!FileManager.default.fileExists(atPath: askpassMarker.path), "core.askpass helper is rejected before mutation")
     }
 
     private static func testClipboardTemporaryOperationPolicy() throws {

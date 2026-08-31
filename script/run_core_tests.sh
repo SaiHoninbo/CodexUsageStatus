@@ -13,6 +13,8 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/TokenActivityStore.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/AccountModels.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/ProfileStore.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/CodexCLIResolver.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/AccountManagementService.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/AccountProfileDisplay.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/ThresholdPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDScale.swift" \
@@ -28,6 +30,7 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/AppVersion.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/PopoverPresentationPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/GitWorkspaceModels.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/GitWorkspaceService.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/AppUpdateService.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDUpdateBadgePolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDColorPalette.swift" \
