@@ -21,6 +21,7 @@ struct CodexUsageStatusTests {
             ("full snapshot prefers codex bucket", testFullSnapshotPrefersCodexBucket),
             ("empty codex bucket falls back", testEmptyCodexBucketFallsBack),
             ("sparse patch preserves metadata", testSparsePatchPreservesMetadata),
+            ("purchased credits decode and format", testPurchasedCreditsDecodeAndFormat),
             ("percentages clamp", testPercentagesClamp),
             ("JSONL request framing", testJSONLRequestFraming),
             ("JSONL partial chunks", testJSONLPartialChunks),
@@ -83,7 +84,8 @@ struct CodexUsageStatusTests {
                 "limitId": "legacy",
                 "limitName": "Legacy",
                 "planType": "pro",
-                "primary": ["usedPercent": 40, "resetsAt": 100, "windowDurationMins": 60]
+                "primary": ["usedPercent": 40, "resetsAt": 100, "windowDurationMins": 60],
+                "credits": ["hasCredits": true, "unlimited": false, "balance": "814.3903237500"]
             ],
             "rateLimitsByLimitId": [
                 "codex": [
@@ -108,6 +110,7 @@ struct CodexUsageStatusTests {
         try expect(snapshot.secondary?.usedPercent == 60, "secondary used percent")
         try expect(snapshot.gptReserveWeekly?.usedPercent == 0, "gpt-reserve bucket should be decoded")
         try expect(snapshot.gptReserveWeekly?.remainingPercent == 100, "gpt-reserve remaining percent")
+        try expect(snapshot.credits?.displayBalance == "814.39", "credits should round to two decimals")
     }
 
     private static func testEmptyCodexBucketFallsBack() throws {
@@ -132,7 +135,8 @@ struct CodexUsageStatusTests {
                 "primary": ["usedPercent": 25, "resetsAt": 100, "windowDurationMins": 15],
                 "secondary": ["usedPercent": 40, "resetsAt": 200, "windowDurationMins": 10080],
                 "individualLimit": ["limit": "100", "used": "12", "remainingPercent": 88, "resetsAt": 300],
-                "spendControlReached": false
+                "spendControlReached": false,
+                "credits": ["hasCredits": true, "unlimited": false, "balance": "814.3903237500"]
             ],
             "rateLimitsByLimitId": [
                 "base_model_inference": [
@@ -147,7 +151,8 @@ struct CodexUsageStatusTests {
             "rateLimits": [
                 "limitId": "codex",
                 "primary": ["usedPercent": 31],
-                "spendControlReached": NSNull()
+                "spendControlReached": NSNull(),
+                "credits": ["balance": "900.5"]
             ]
         ])
         guard let merged = patch.applying(to: current) else { throw HarnessError.unwrap("merged snapshot") }
@@ -159,6 +164,44 @@ struct CodexUsageStatusTests {
         try expect(merged.individualLimit?.remainingPercent == 88, "spend control should persist")
         try expect(merged.gptReserveWeekly?.remainingPercent == 96, "gpt-reserve should persist through sparse patch")
         try expect(merged.spendControlReached == false, "null sparse boolean should not clear")
+        try expect(merged.credits?.hasCredits == true, "sparse credits should retain hasCredits")
+        try expect(merged.credits?.unlimited == false, "sparse credits should retain unlimited")
+        try expect(merged.credits?.displayBalance == "900.50", "sparse credits should update balance")
+    }
+
+    private static func testPurchasedCreditsDecodeAndFormat() throws {
+        let snapshot = try UsageDataCodec.decodeFullSnapshot(from: [
+            "rateLimits": [
+                "primary": ["usedPercent": 0],
+                "credits": ["hasCredits": true, "unlimited": false, "balance": "0"]
+            ]
+        ])
+        try expect(snapshot.credits?.isDisplayable == true, "zero purchased credits remain displayable")
+        try expect(snapshot.credits?.displayBalance == "0.00", "zero credits format with two decimals")
+
+        let unlimited = try UsageDataCodec.decodeFullSnapshot(from: [
+            "rateLimits": [
+                "primary": ["usedPercent": 0],
+                "credits": ["hasCredits": true, "unlimited": true]
+            ]
+        ])
+        try expect(unlimited.credits?.displayBalance == "∞", "unlimited credits use an explicit label")
+
+        let invalid = try UsageDataCodec.decodeFullSnapshot(from: [
+            "rateLimits": [
+                "primary": ["usedPercent": 0],
+                "credits": ["hasCredits": true, "unlimited": false, "balance": "not-a-number"]
+            ]
+        ])
+        try expect(invalid.credits?.isDisplayable == false, "invalid balances should not render")
+
+        let cleared = try UsageDataCodec.decodeFullSnapshot(from: [
+            "rateLimits": [
+                "primary": ["usedPercent": 0],
+                "credits": NSNull()
+            ]
+        ])
+        try expect(cleared.credits?.isDisplayable == false, "authoritative null clears credits")
     }
 
     private static func testPercentagesClamp() throws {
@@ -432,7 +475,8 @@ struct CodexUsageStatusTests {
         let cachedA = HUDDualQuotaPresentation(
             profileID: profileA,
             fiveHour: fiveHour,
-            sevenDay: sevenDay
+            sevenDay: sevenDay,
+            credits: CreditsBalance(hasCredits: true, unlimited: false, balance: "814.3903237500")
         )
 
         try expect(
@@ -550,6 +594,10 @@ struct CodexUsageStatusTests {
             "a sparse live response must replace the cached 7-day window"
         )
         try expect(
+            mergedSparse?.credits == cachedA.credits,
+            "a sparse live response must retain the cached purchased credits"
+        )
+        try expect(
             HUDVisibilityPolicy.mergedPresentation(
                 currentProfileID: profileB,
                 live: sparseLive,
@@ -625,7 +673,8 @@ struct CodexUsageStatusTests {
             individualLimit: nil,
             rateLimitReachedType: nil,
             spendControlReached: nil,
-            receivedAt: now
+            receivedAt: now,
+            credits: CreditsBalance(hasCredits: true, unlimited: false, balance: "814.3903237500")
         )
 
         guard let presentation = HUDQuotaPresentationPolicy.make(snapshot: snapshot, profileID: profileID, now: now) else {
@@ -638,6 +687,7 @@ struct CodexUsageStatusTests {
         try expect(presentation.fiveHour?.resetDescription == "4小時45分", "5-hour countdown")
         try expect(presentation.sevenDay?.resetDescription == "2天14小時", "7-day countdown")
         try expect(presentation.fiveHour?.fillFraction == 0.96, "5-hour fill fraction")
+        try expect(presentation.credits?.displayBalance == "814.39", "purchased credits pass through presentation")
         try expect(presentation.sevenDay?.fillFraction == 0.62, "7-day fill fraction")
         try expect(presentation.rowCount == 2, "two published windows produce two HUD rows")
         try expect(
@@ -1463,6 +1513,16 @@ struct CodexUsageStatusTests {
         try expectSizeApproximately(standard.panelSize(quotaRowCount: 1), CGSize(width: 416, height: 193.6), "one quota row removes empty vertical space")
         try expectSizeApproximately(standard.panelSize(quotaRowCount: 2), CGSize(width: 416, height: 240), "two quota rows retain canonical geometry")
         try expectSizeApproximately(standard.panelSize(quotaRowCount: 3), CGSize(width: 416, height: 286.4), "three quota rows grow only by quota height")
+        try expectSizeApproximately(
+            standard.panelSize(quotaRowCount: 3, includesCredits: true),
+            CGSize(width: 416, height: 353.6),
+            "three quota rows plus credits match the expanded reference"
+        )
+        try expectApproximately(
+            standard.panelSize(quotaRowCount: 2, includesCredits: true).height,
+            307.2,
+            "credits add a balance section without changing quota row count"
+        )
         try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller2).panelSize, CGSize(width: 332.8, height: 192), "level 1 scales one layout")
         try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller4).panelSize, CGSize(width: 266.24, height: 153.6), "level 1 scales one layout")
         try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller3).panelSize, CGSize(width: 299.52, height: 172.8), "level 2 scales one layout")
@@ -1496,6 +1556,11 @@ struct CodexUsageStatusTests {
                     dynamicHeight,
                     metrics.panelSize(quotaRowCount: rowCount).height,
                     "dynamic quota layout closes at \(level.displayName), \(rowCount) rows"
+                )
+                try expectApproximately(
+                    metrics.panelSize(quotaRowCount: rowCount, includesCredits: true).height,
+                    dynamicHeight + metrics.creditsSectionHeight + metrics.sectionGap,
+                    "credits layout closes at \(level.displayName), \(rowCount) rows"
                 )
             }
         }

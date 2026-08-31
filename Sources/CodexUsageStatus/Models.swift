@@ -41,6 +41,36 @@ struct SpendControlLimit: Equatable {
     var resetsAt: Int64
 }
 
+/// The separately purchased OpenAI GPT credit balance returned alongside
+/// rate-limit windows. This is intentionally separate from
+/// `RateLimitResetCredits`, which models redeemable reset-credit cards.
+struct CreditsBalance: Equatable {
+    var hasCredits: Bool
+    var unlimited: Bool
+    var balance: String?
+
+    var isDisplayable: Bool {
+        unlimited || (hasCredits && parsedBalance != nil)
+    }
+
+    var displayBalance: String? {
+        if unlimited { return "∞" }
+        guard let decimal = parsedBalance else { return nil }
+
+        let formatter = NumberFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.numberStyle = .decimal
+        formatter.minimumFractionDigits = 2
+        formatter.maximumFractionDigits = 2
+        return formatter.string(from: NSDecimalNumber(decimal: decimal))
+    }
+
+    private var parsedBalance: Decimal? {
+        guard let balance else { return nil }
+        return Decimal(string: balance, locale: Locale(identifier: "en_US_POSIX"))
+    }
+}
+
 struct RateLimitResetCredit: Codable, Equatable, Identifiable {
     let id: String
     let resetType: String?
@@ -140,6 +170,7 @@ struct UsageSnapshot: Equatable {
     var spendControlReached: Bool?
     var rateLimitResetCredits: RateLimitResetCredits?
     var receivedAt: Date
+    var credits: CreditsBalance?
 
     init(
         limitId: String?,
@@ -152,7 +183,8 @@ struct UsageSnapshot: Equatable {
         spendControlReached: Bool?,
         rateLimitResetCredits: RateLimitResetCredits? = nil,
         receivedAt: Date,
-        gptReserveWeekly: RateLimitWindow? = nil
+        gptReserveWeekly: RateLimitWindow? = nil,
+        credits: CreditsBalance? = nil
     ) {
         self.limitId = limitId
         self.limitName = limitName
@@ -165,6 +197,7 @@ struct UsageSnapshot: Equatable {
         self.spendControlReached = spendControlReached
         self.rateLimitResetCredits = rateLimitResetCredits
         self.receivedAt = receivedAt
+        self.credits = credits
     }
 
     var primaryRemainingPercent: Int? {
@@ -189,6 +222,12 @@ struct SpendControlPatch: Equatable {
     var resetsAt: Int64?
 }
 
+struct CreditsBalancePatch: Equatable {
+    var hasCredits: Bool?
+    var unlimited: Bool?
+    var balance: String?
+}
+
 struct RateLimitPatch: Equatable {
     var limitId: String?
     var limitName: String?
@@ -199,6 +238,7 @@ struct RateLimitPatch: Equatable {
     var individualLimit: SpendControlPatch?
     var rateLimitReachedType: String?
     var spendControlReached: Bool?
+    var credits: CreditsBalancePatch? = nil
 
     func applying(to current: UsageSnapshot?, receivedAt: Date = Date()) -> UsageSnapshot? {
         let base = current ?? UsageSnapshot(
@@ -211,13 +251,15 @@ struct RateLimitPatch: Equatable {
             rateLimitReachedType: nil,
             spendControlReached: nil,
             rateLimitResetCredits: nil,
-            receivedAt: receivedAt
+            receivedAt: receivedAt,
+            credits: nil
         )
 
         let primaryWindow = Self.mergeWindow(existing: base.primary, patch: primary)
         let secondaryWindow = Self.mergeWindow(existing: base.secondary, patch: secondary)
         let reserveWindow = Self.mergeWindow(existing: base.gptReserveWeekly, patch: gptReserveWeekly)
         let spendControl = Self.mergeSpendControl(existing: base.individualLimit, patch: individualLimit)
+        let creditBalance = Self.mergeCredits(existing: base.credits, patch: credits)
 
         return UsageSnapshot(
             limitId: limitId ?? base.limitId,
@@ -230,7 +272,23 @@ struct RateLimitPatch: Equatable {
             spendControlReached: spendControlReached ?? base.spendControlReached,
             rateLimitResetCredits: base.rateLimitResetCredits,
             receivedAt: receivedAt,
-            gptReserveWeekly: reserveWindow
+            gptReserveWeekly: reserveWindow,
+            credits: creditBalance
+        )
+    }
+
+    private static func mergeCredits(
+        existing: CreditsBalance?,
+        patch: CreditsBalancePatch?
+    ) -> CreditsBalance? {
+        guard let patch else { return existing }
+        guard patch.hasCredits != nil || patch.unlimited != nil || patch.balance != nil else {
+            return existing
+        }
+        return CreditsBalance(
+            hasCredits: patch.hasCredits ?? existing?.hasCredits ?? false,
+            unlimited: patch.unlimited ?? existing?.unlimited ?? false,
+            balance: patch.balance ?? existing?.balance
         )
     }
 
@@ -303,7 +361,8 @@ enum UsageDataCodec {
             spendControlReached: source["spendControlReached"] as? Bool,
             rateLimitResetCredits: decodeResetCredits(result["rateLimitResetCredits"]),
             receivedAt: receivedAt,
-            gptReserveWeekly: decodeGPTReserveWindow(from: result)
+            gptReserveWeekly: decodeGPTReserveWindow(from: result),
+            credits: decodeCredits(source["credits"])
         )
     }
 
@@ -322,7 +381,8 @@ enum UsageDataCodec {
             gptReserveWeekly: decodeGPTReserveWindowPatch(from: params),
             individualLimit: decodeSpendControlPatch(source["individualLimit"]),
             rateLimitReachedType: string(source["rateLimitReachedType"]),
-            spendControlReached: source["spendControlReached"] as? Bool
+            spendControlReached: source["spendControlReached"] as? Bool,
+            credits: decodeCreditsPatch(source["credits"])
         )
     }
 
@@ -346,6 +406,31 @@ enum UsageDataCodec {
         guard let buckets = params["rateLimitsByLimitId"] as? [String: Any],
               let bucket = gptReserveBucket(from: buckets) else { return nil }
         return decodeWindowPatch(bucket["primary"]) ?? decodeWindowPatch(bucket["secondary"])
+    }
+
+    private static func decodeCredits(_ value: Any?) -> CreditsBalance? {
+        if value is NSNull {
+            // A full snapshot can authoritatively report that this account
+            // has no purchased credits. Keep a non-nil, non-displayable
+            // sentinel so the HUD cache clears an older balance; sparse
+            // patches use `decodeCreditsPatch` and preserve the prior value.
+            return CreditsBalance(hasCredits: false, unlimited: false, balance: nil)
+        }
+        guard let object = value as? [String: Any] else { return nil }
+        let hasCredits = object["hasCredits"] as? Bool ?? object["has_credits"] as? Bool
+        let unlimited = object["unlimited"] as? Bool
+        let balance = decimalString(object["balance"])
+        guard let hasCredits, let unlimited else { return nil }
+        return CreditsBalance(hasCredits: hasCredits, unlimited: unlimited, balance: balance)
+    }
+
+    private static func decodeCreditsPatch(_ value: Any?) -> CreditsBalancePatch? {
+        guard let object = value as? [String: Any] else { return nil }
+        let hasCredits = object["hasCredits"] as? Bool ?? object["has_credits"] as? Bool
+        let unlimited = object["unlimited"] as? Bool
+        let balance = decimalString(object["balance"])
+        guard hasCredits != nil || unlimited != nil || balance != nil else { return nil }
+        return CreditsBalancePatch(hasCredits: hasCredits, unlimited: unlimited, balance: balance)
     }
 
     private static func gptReserveBucket(from buckets: [String: Any]) -> [String: Any]? {
@@ -449,6 +534,12 @@ enum UsageDataCodec {
     }
 
     private static func string(_ value: Any?) -> String? { value as? String }
+
+    private static func decimalString(_ value: Any?) -> String? {
+        if let value = value as? String { return value }
+        if let value = value as? NSNumber { return value.stringValue }
+        return nil
+    }
 
     private static func int(_ value: Any?) -> Int? {
         if let value = value as? Int { return value }

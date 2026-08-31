@@ -24,6 +24,10 @@ struct HUDMetrics: Equatable {
     static let canonicalSectionGap: CGFloat = 11.2
     static let canonicalActionHeight: CGFloat = 38.4
     static let canonicalFooterHeight: CGFloat = 32
+    // Credits is a non-progress balance row between the quota stack and
+    // command controls. Its dividers and breathing room are included in this
+    // token so AppKit and SwiftUI keep one shared height contract.
+    static let canonicalCreditsSectionHeight: CGFloat = 56
     static let canonicalActionSpacing: CGFloat = 8
     static let canonicalFooterSpacing: CGFloat = 9.6
     static let canonicalFooterHorizontalPaddingMultiplier: CGFloat = 0.65
@@ -48,13 +52,14 @@ struct HUDMetrics: Equatable {
     /// the compatibility default; accounts with one or three windows shrink or
     /// grow only by the quota column delta, so no empty placeholder row is
     /// reserved in the HUD.
-    func panelSize(quotaRowCount: Int) -> CGSize {
+    func panelSize(quotaRowCount: Int, includesCredits: Bool = false) -> CGSize {
         let count = max(1, quotaRowCount)
         let canonicalHeight = Self.canonicalPanelSize.height
         let quotaDelta = quotaColumnHeight(for: count) - quotaColumnHeight(for: Self.canonicalQuotaRowCount)
+        let creditsDelta = includesCredits ? creditsSectionHeight + sectionGap : 0
         return CGSize(
             width: Self.canonicalPanelSize.width * factor,
-            height: canonicalHeight * factor + quotaDelta
+            height: canonicalHeight * factor + quotaDelta + creditsDelta
         )
     }
     var outerPadding: CGFloat { Self.canonicalOuterPadding * factor }
@@ -68,6 +73,8 @@ struct HUDMetrics: Equatable {
     var sectionGap: CGFloat { Self.canonicalSectionGap * factor }
     var actionHeight: CGFloat { Self.canonicalActionHeight * factor }
     var footerHeight: CGFloat { Self.canonicalFooterHeight * factor }
+    var creditsSectionHeight: CGFloat { Self.canonicalCreditsSectionHeight * factor }
+    var creditsRowHeight: CGFloat { max(32, creditsSectionHeight - (sectionGap * 0.85)) }
     var actionSpacing: CGFloat { Self.canonicalActionSpacing * factor }
     var footerSpacing: CGFloat { Self.canonicalFooterSpacing * factor }
     var footerHorizontalPadding: CGFloat {

@@ -39,17 +39,20 @@ struct HUDDualQuotaPresentation: Equatable {
     let fiveHour: HUDQuotaWindowPresentation?
     let sevenDay: HUDQuotaWindowPresentation?
     let gptReserveWeekly: HUDQuotaWindowPresentation?
+    let credits: CreditsBalance?
 
     init(
         profileID: UUID,
         fiveHour: HUDQuotaWindowPresentation?,
         sevenDay: HUDQuotaWindowPresentation?,
-        gptReserveWeekly: HUDQuotaWindowPresentation? = nil
+        gptReserveWeekly: HUDQuotaWindowPresentation? = nil,
+        credits: CreditsBalance? = nil
     ) {
         self.profileID = profileID
         self.fiveHour = fiveHour
         self.sevenDay = sevenDay
         self.gptReserveWeekly = gptReserveWeekly
+        self.credits = credits
     }
 
     var rows: [HUDQuotaWindowPresentation] {
@@ -88,7 +91,8 @@ enum HUDQuotaPresentationPolicy {
             profileID: profileID,
             fiveHour: fiveHour,
             sevenDay: sevenDay,
-            gptReserveWeekly: gptReserveWeekly
+            gptReserveWeekly: gptReserveWeekly,
+            credits: snapshot?.credits
         )
     }
 

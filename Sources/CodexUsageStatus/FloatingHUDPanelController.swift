@@ -21,11 +21,12 @@ private enum FloatingHUDLayout {
     static func size(
         for placement: HUDPlacement,
         scaleLevel: HUDScaleLevel = .standard,
-        quotaRowCount: Int = HUDMetrics.canonicalQuotaRowCount
+        quotaRowCount: Int = HUDMetrics.canonicalQuotaRowCount,
+        includesCredits: Bool = false
     ) -> NSSize {
         _ = placement
         let metrics = HUDMetrics(scaleLevel: scaleLevel)
-        let size = metrics.panelSize(quotaRowCount: quotaRowCount)
+        let size = metrics.panelSize(quotaRowCount: quotaRowCount, includesCredits: includesCredits)
         return NSSize(width: size.width, height: size.height)
     }
 }
@@ -39,12 +40,14 @@ private final class FloatingHUDLayoutState: ObservableObject {
     @Published var isCodexFocused = true
     @Published var hasEstablishedPosition = false
     @Published var quotaRowCount: Int = 1
+    @Published var hasCredits = false
 
     var size: NSSize {
         FloatingHUDLayout.size(
             for: placement,
             scaleLevel: scaleLevel,
-            quotaRowCount: quotaRowCount
+            quotaRowCount: quotaRowCount,
+            includesCredits: hasCredits
         )
     }
 }
@@ -163,6 +166,7 @@ final class FloatingHUDPanelController: NSObject {
             setCredentialWatchInterval: { [weak self] seconds in self?.model.setCredentialWatchInterval(seconds) },
             setHUDScaleLevel: { [weak self] level in self?.setHUDScaleLevel(level) },
             quotaRowCountChanged: { [weak self] count in self?.setQuotaRowCount(count) },
+            creditsVisibilityChanged: { [weak self] visible in self?.setCreditsVisibility(visible) },
             checkForUpdates: { [weak self] in self?.model.checkForUpdates() },
             cancelUpdateCheck: { [weak self] in self?.model.cancelUpdateCheck() },
             downloadAvailableUpdate: { [weak self] in self?.model.downloadAvailableUpdate() },
@@ -299,7 +303,8 @@ final class FloatingHUDPanelController: NSObject {
         let newSize = FloatingHUDLayout.size(
             for: placement,
             scaleLevel: newLevel,
-            quotaRowCount: layoutState.quotaRowCount
+            quotaRowCount: layoutState.quotaRowCount,
+            includesCredits: layoutState.hasCredits
         )
         let targetFrame = lastCodexWindowFrame
         let visibleFrame = lastCodexVisibleFrame
@@ -371,7 +376,8 @@ final class FloatingHUDPanelController: NSObject {
         let newSize = FloatingHUDLayout.size(
             for: placement,
             scaleLevel: layoutState.scaleLevel,
-            quotaRowCount: newCount
+            quotaRowCount: newCount,
+            includesCredits: layoutState.hasCredits
         )
         let targetFrame = lastCodexWindowFrame
         let visibleFrame = lastCodexVisibleFrame
@@ -394,6 +400,71 @@ final class FloatingHUDPanelController: NSObject {
         } ?? resizedOrigin
         panel.setFrameOrigin(correctedOrigin)
         layoutState.quotaRowCount = newCount
+        if let targetFrame {
+            saveAnchor(
+                origin: correctedOrigin,
+                targetFrame: targetFrame,
+                panelSize: newSize,
+                placement: placement
+            )
+        }
+        lastPositionedPanelSize = newSize
+        if hasEstablishedPosition, lastKnownSafePanelFrame != nil {
+            lastKnownSafePanelFrame = panel.frame
+            layoutState.hasEstablishedPosition = true
+        }
+    }
+
+    private func synchronizeCreditsVisibility(for panel: NSPanel) {
+        guard let presentation = HUDQuotaPresentationPolicy.make(
+            snapshot: model.snapshot,
+            profileID: model.currentProfileID,
+            now: model.currentDate
+        ) else { return }
+        setCreditsVisibility(presentation.credits?.isDisplayable == true, on: panel)
+    }
+
+    private func setCreditsVisibility(_ visible: Bool) {
+        guard let panel else {
+            layoutState.hasCredits = visible
+            return
+        }
+        setCreditsVisibility(visible, on: panel)
+    }
+
+    private func setCreditsVisibility(_ visible: Bool, on panel: NSPanel) {
+        guard visible != layoutState.hasCredits else { return }
+
+        let oldPanelSize = panel.frame.size
+        let oldOrigin = panel.frame.origin
+        let placement = layoutState.placement
+        let newSize = FloatingHUDLayout.size(
+            for: placement,
+            scaleLevel: layoutState.scaleLevel,
+            quotaRowCount: layoutState.quotaRowCount,
+            includesCredits: visible
+        )
+        let targetFrame = lastCodexWindowFrame
+        let visibleFrame = lastCodexVisibleFrame
+        let resizedOrigin: NSPoint
+        if let targetFrame {
+            resizedOrigin = HUDPlacementPolicy.resizedOrigin(
+                origin: oldOrigin,
+                targetFrame: targetFrame,
+                oldPanelSize: oldPanelSize,
+                newPanelSize: newSize,
+                placement: placement
+            )
+        } else {
+            resizedOrigin = oldOrigin
+        }
+
+        applySize(newSize, to: panel)
+        let correctedOrigin = visibleFrame.map {
+            clampedOrigin(resizedOrigin, panelSize: newSize, visibleFrame: $0)
+        } ?? resizedOrigin
+        panel.setFrameOrigin(correctedOrigin)
+        layoutState.hasCredits = visible
         if let targetFrame {
             saveAnchor(
                 origin: correctedOrigin,
@@ -464,6 +535,7 @@ final class FloatingHUDPanelController: NSObject {
         }
         lastCodexProcessID = codexApp.processIdentifier
         synchronizeQuotaRowCount(for: panel)
+        synchronizeCreditsVisibility(for: panel)
         gitCoordinator.refreshIfNeeded()
         switch position(panel, beside: codexApp) {
         case .positioned:
@@ -613,7 +685,8 @@ final class FloatingHUDPanelController: NSObject {
             let size = FloatingHUDLayout.size(
                 for: anchor.placement,
                 scaleLevel: layoutState.scaleLevel,
-                quotaRowCount: layoutState.quotaRowCount
+                quotaRowCount: layoutState.quotaRowCount,
+                includesCredits: layoutState.hasCredits
             )
             applySize(size, to: panel)
             let origin = HUDPlacementPolicy.origin(
@@ -653,7 +726,8 @@ final class FloatingHUDPanelController: NSObject {
             let size = FloatingHUDLayout.size(
                 for: placement,
                 scaleLevel: layoutState.scaleLevel,
-                quotaRowCount: layoutState.quotaRowCount
+                quotaRowCount: layoutState.quotaRowCount,
+                includesCredits: layoutState.hasCredits
             )
             applySize(size, to: panel)
             let origin = HUDPlacementPolicy.resizedOrigin(
@@ -686,7 +760,8 @@ final class FloatingHUDPanelController: NSObject {
             let size = FloatingHUDLayout.size(
                 for: placement,
                 scaleLevel: layoutState.scaleLevel,
-                quotaRowCount: layoutState.quotaRowCount
+                quotaRowCount: layoutState.quotaRowCount,
+                includesCredits: layoutState.hasCredits
             )
             applySize(size, to: panel)
             let resizedOrigin = HUDPlacementPolicy.resizedOrigin(
@@ -718,7 +793,8 @@ final class FloatingHUDPanelController: NSObject {
             let size = FloatingHUDLayout.size(
                 for: placement,
                 scaleLevel: layoutState.scaleLevel,
-                quotaRowCount: layoutState.quotaRowCount
+                quotaRowCount: layoutState.quotaRowCount,
+                includesCredits: layoutState.hasCredits
             )
             applySize(size, to: panel)
             let resizedOrigin = HUDPlacementPolicy.resizedOrigin(
@@ -870,7 +946,8 @@ final class FloatingHUDPanelController: NSObject {
         let newSize = FloatingHUDLayout.size(
             for: placement,
             scaleLevel: layoutState.scaleLevel,
-            quotaRowCount: layoutState.quotaRowCount
+            quotaRowCount: layoutState.quotaRowCount,
+            includesCredits: layoutState.hasCredits
         )
         let resizedOrigin = HUDPlacementPolicy.resizedOrigin(
             origin: origin,
@@ -1057,7 +1134,7 @@ private struct HUDQuotaRow: View {
     }
 
     private var systemImage: String {
-        kind == .gptReserveWeekly ? "cube" : "clock"
+        "clock"
     }
 
     private var fillFraction: CGFloat {
@@ -1134,6 +1211,72 @@ private struct HUDQuotaRow: View {
                 return "剩餘 \($0.remainingPercent)%，\(reset)"
             } ?? (isUpdating ? "資料更新中" : "此帳號未提供此窗口")
         )
+    }
+}
+
+/// Purchased OpenAI GPT credits are an account balance, not a quota window.
+/// Keep them outside the progress-bar stack so the three-window contract stays
+/// readable and the balance never looks like a fourth blood bar.
+private struct HUDCreditsRow: View {
+    let credits: CreditsBalance
+    let width: CGFloat
+    let sectionHeight: CGFloat
+    let rowHeight: CGFloat
+    let scaleFactor: CGFloat
+
+    private var balanceText: String {
+        credits.displayBalance ?? "—"
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            divider
+            HStack(spacing: max(6, 8 * scaleFactor)) {
+                Image(systemName: "wallet.pass")
+                    .font(.system(size: max(16, 22 * scaleFactor), weight: .semibold))
+                    .foregroundStyle(HUDColorPalette.credits)
+                    .frame(width: max(22, 27 * scaleFactor))
+                Text("Credits")
+                    .font(.system(
+                        size: max(14, 18 * scaleFactor),
+                        weight: .semibold,
+                        design: .rounded
+                    ))
+                    .foregroundStyle(HUDColorPalette.credits)
+                Spacer(minLength: 8 * scaleFactor)
+                Text(balanceText)
+                    .font(.system(
+                        size: max(18, 24 * scaleFactor),
+                        weight: .bold,
+                        design: .rounded
+                    ))
+                    .foregroundStyle(HUDColorPalette.primaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.64)
+                    .allowsTightening(true)
+                Text("balance")
+                    .font(.system(
+                        size: max(11, 13 * scaleFactor),
+                        weight: .medium,
+                        design: .rounded
+                    ))
+                    .foregroundStyle(HUDColorPalette.secondaryText)
+                    .lineLimit(1)
+            }
+            .frame(width: width, height: rowHeight, alignment: .leading)
+            divider
+        }
+        .frame(width: width, height: sectionHeight, alignment: .center)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Credits")
+        .accessibilityValue(credits.unlimited ? "unlimited balance" : "\(balanceText) balance")
+        .help("OpenAI GPT 購買額度餘額")
+    }
+
+    private var divider: some View {
+        Rectangle()
+            .fill(Color.black.opacity(0.14))
+            .frame(width: width, height: max(0.6, 0.8 * scaleFactor))
     }
 }
 
@@ -1428,6 +1571,7 @@ private struct CodexFloatingHUDView: View {
     let setCredentialWatchInterval: (Int) -> Void
     let setHUDScaleLevel: (HUDScaleLevel) -> Void
     let quotaRowCountChanged: (Int) -> Void
+    let creditsVisibilityChanged: (Bool) -> Void
     let checkForUpdates: () -> Void
     let cancelUpdateCheck: () -> Void
     let downloadAvailableUpdate: () -> Void
@@ -1658,12 +1802,27 @@ private struct CodexFloatingHUDView: View {
     @ViewBuilder
     private func hudContainer() -> some View {
         let metrics = HUDMetrics(scaleLevel: layoutState.scaleLevel)
-        let panelSize = metrics.panelSize(quotaRowCount: max(1, layoutState.quotaRowCount))
+        let panelSize = metrics.panelSize(
+            quotaRowCount: max(1, layoutState.quotaRowCount),
+            includesCredits: layoutState.hasCredits
+        )
+        let displayedCredits = displayedPresentation?.credits
+        let shouldShowCredits = displayedCredits?.isDisplayable == true
         VStack(alignment: .leading, spacing: 0) {
             hudHeader(metrics: metrics)
             Color.clear.frame(height: metrics.headerGap)
             quotaStack(width: metrics.contentWidth, height: metrics.quotaRowHeight, gap: metrics.quotaGap)
             Color.clear.frame(height: metrics.sectionGap)
+            if let displayedCredits, shouldShowCredits {
+                HUDCreditsRow(
+                    credits: displayedCredits,
+                    width: metrics.contentWidth,
+                    sectionHeight: metrics.creditsSectionHeight,
+                    rowHeight: metrics.creditsRowHeight,
+                    scaleFactor: metrics.factor
+                )
+                Color.clear.frame(height: metrics.sectionGap)
+            }
             actionCardsRow(metrics: metrics)
             Color.clear.frame(height: metrics.sectionGap)
             footerRow(metrics: metrics)
@@ -1688,6 +1847,7 @@ private struct CodexFloatingHUDView: View {
             cacheCurrentPresentation()
             syncLiveBaseline()
             quotaRowCountChanged(max(1, livePresentation?.rowCount ?? 1))
+            creditsVisibilityChanged(displayedPresentation?.credits?.isDisplayable == true)
         }
         .onChange(of: model.currentProfileID) { _, newProfileID in
             // Never carry quota from one account identity into another. The
@@ -1698,6 +1858,7 @@ private struct CodexFloatingHUDView: View {
             displayedPlan = nil
             presentationCache = nil
             quotaRowCountChanged(1)
+            creditsVisibilityChanged(false)
             trackedProfileID = newProfileID
             resetTracking(for: newProfileID)
             // UsageViewModel clears the old snapshot and lastUpdated before
@@ -1713,6 +1874,7 @@ private struct CodexFloatingHUDView: View {
         .onChange(of: model.snapshot) { _, _ in
             cacheCurrentPresentation()
             observePercentChange()
+            creditsVisibilityChanged(displayedPresentation?.credits?.isDisplayable == true)
             if trackedProfileID == model.currentProfileID,
                let plan = normalizedPlanLabel(model.snapshot?.planType) {
                 displayedPlan = plan
@@ -1720,6 +1882,7 @@ private struct CodexFloatingHUDView: View {
         }
         .onChange(of: presentationCache) { _, _ in
             quotaRowCountChanged(max(1, displayedPresentation?.rowCount ?? 1))
+            creditsVisibilityChanged(displayedPresentation?.credits?.isDisplayable == true)
         }
         .onChange(of: model.lastUpdated) { _, newValue in
             // A managed profile can restore a cached snapshot with the same
@@ -2425,7 +2588,13 @@ private struct CodexFloatingHUDView: View {
             return "\(kind.label)窗口，剩餘 \(presentation.remainingPercent)%，\(reset)"
         }.joined(separator: "；")
         let planText = displayedPlan.map { "，方案 \($0)" } ?? ""
-        return "Codex，\(quotaText)\(planText)，\(model.dataAgeText)，帳號 \(displayedAccountEmail ?? "未提供 Email")。提供更新通知、詳細面板、只貼上、貼上並送出、執行、Commit 與 Push 快捷鈕"
+        let creditsText: String
+        if let credits = displayedPresentation?.credits, credits.isDisplayable {
+            creditsText = "，Credits \(credits.unlimited ? "unlimited" : (credits.displayBalance ?? "無法取得")) balance"
+        } else {
+            creditsText = ""
+        }
+        return "Codex，\(quotaText)\(creditsText)\(planText)，\(model.dataAgeText)，帳號 \(displayedAccountEmail ?? "未提供 Email")。提供更新通知、詳細面板、只貼上、貼上並送出、執行、Commit 與 Push 快捷鈕"
     }
 
     private func cacheCurrentPresentation() {
