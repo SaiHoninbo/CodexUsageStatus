@@ -57,6 +57,7 @@ private final class FloatingHUDLayoutState: ObservableObject {
 
 private final class DraggableHUDPanel: NSPanel {
     var onUserMoved: ((NSPoint) -> Void)?
+    var onDragStateChanged: ((Bool) -> Void)?
     private var dragOffset: NSPoint?
 
     override var canBecomeKey: Bool { false }
@@ -64,21 +65,28 @@ private final class DraggableHUDPanel: NSPanel {
 
     override func mouseDown(with event: NSEvent) {
         dragOffset = event.locationInWindow
+        onDragStateChanged?(true)
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard let dragOffset else { return }
-        let mouseLocation = NSEvent.mouseLocation
-        let origin = NSPoint(
-            x: mouseLocation.x - dragOffset.x,
-            y: mouseLocation.y - dragOffset.y
-        )
+        let screenPoint = convertPoint(toScreen: event.locationInWindow)
+        guard let origin = HUDDragPolicy.origin(
+            screenPoint: screenPoint,
+            dragOffset: dragOffset
+        ) else { return }
         setFrameOrigin(origin)
-        onUserMoved?(origin)
     }
 
     override func mouseUp(with event: NSEvent) {
+        guard dragOffset != nil else { return }
         dragOffset = nil
+        onDragStateChanged?(false)
+        // Persistence and placement/size reconciliation are intentionally
+        // deferred until the drag ends. Doing that work for every high-rate
+        // mouseDragged event can re-enter SwiftUI/AppKit layout and starve the
+        // main event loop, which presents as a full application freeze.
+        onUserMoved?(frame.origin)
     }
 }
 
@@ -118,6 +126,7 @@ final class FloatingHUDPanelController: NSObject {
     private var positioningSessionGeneration: UInt64 = 0
     private var lastPlacement: HUDPlacement = .bottomRight
     private let layoutState = FloatingHUDLayoutState()
+    private var isUserDraggingHUD = false
     /// Only a confirmed focus loss may hide the HUD. AX/Quartz and quota
     /// gaps retain the current panel without scheduling a timeout hide.
     private var focusLossTask: Task<Void, Never>?
@@ -206,6 +215,9 @@ final class FloatingHUDPanelController: NSObject {
         newPanel.onUserMoved = { [weak self] origin in
             self?.savePosition(origin)
         }
+        newPanel.onDragStateChanged = { [weak self] isDragging in
+            self?.isUserDraggingHUD = isDragging
+        }
         panel = newPanel
 
         workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
@@ -273,6 +285,7 @@ final class FloatingHUDPanelController: NSObject {
         modelObservation = nil
         panel?.orderOut(nil)
         panel = nil
+        isUserDraggingHUD = false
         invalidatePositioningSession(clearProcessID: true)
     }
 
@@ -548,6 +561,10 @@ final class FloatingHUDPanelController: NSObject {
 
     private func refreshVisibility() {
         guard let panel else { return }
+        // Automatic positioning and visibility work must not compete with a
+        // user-controlled drag. The panel's final frame is persisted from
+        // mouseUp, after which the next scheduled refresh can resume.
+        guard !isUserDraggingHUD else { return }
         guard model.floatingHUDEnabled else {
             hideAndInvalidatePositioningSession(panel)
             return

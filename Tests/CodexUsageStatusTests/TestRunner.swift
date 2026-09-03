@@ -124,6 +124,7 @@ struct CodexUsageStatusTests {
             ("HUD dual quota presentation policy", testHUDQuotaPresentationPolicy),
             ("HUD cross-Space unique Quartz matching", testHUDCrossSpaceUniqueQuartzMatching),
             ("HUD placement and adaptive anchors", testHUDPlacementAndAdaptiveAnchors),
+            ("HUD drag geometry", testHUDDragGeometry),
             ("token activity decoding", testTokenActivityDecoding),
             ("token activity null fields", testTokenActivityNullFields),
             ("token activity store replacement and retention", testTokenActivityStoreReplacementAndRetention),
@@ -1106,6 +1107,22 @@ struct CodexUsageStatusTests {
             panelSize: CGSize(width: 300, height: 46)
         )
         try expect(restoredTopOrigin == topNewOrigin, "top anchor should round trip through a resize")
+    }
+
+    private static func testHUDDragGeometry() throws {
+        let origin = HUDDragPolicy.origin(
+            screenPoint: CGPoint(x: 1_240, y: 760),
+            dragOffset: CGPoint(x: 48, y: 22)
+        )
+        try expect(origin == CGPoint(x: 1_192, y: 738), "drag preserves the original grab offset")
+
+        try expect(
+            HUDDragPolicy.origin(
+                screenPoint: CGPoint(x: CGFloat.infinity, y: 10),
+                dragOffset: CGPoint(x: 4, y: 4)
+            ) == nil,
+            "non-finite pointer coordinates are rejected"
+        )
     }
 
     private static func testTokenActivityDecoding() throws {

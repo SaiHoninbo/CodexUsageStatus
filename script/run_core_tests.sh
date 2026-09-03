@@ -25,6 +25,7 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDQuotaPresentationPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDVisibilityPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDPlacementPolicy.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/HUDDragPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDContextMenuPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/UsagePopoverTab.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/AppVersion.swift" \
