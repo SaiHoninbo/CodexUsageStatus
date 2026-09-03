@@ -13,6 +13,8 @@ enum HUDContextMenuAction: String, CaseIterable {
     case hudScale
     case paste
     case pasteAndSubmit
+    case openGitWorkspace
+    case refreshGitWorkspace
     case currentAccount
     case allAccounts
     case manageAccounts
@@ -31,6 +33,7 @@ enum HUDContextMenuSection: String, CaseIterable {
     case codex
     case appearance
     case clipboard
+    case git
     case accounts
     case notificationsAndSync
     case app
@@ -41,6 +44,7 @@ enum HUDContextMenuPolicy {
         [.refresh, .showDetails],
         [.openCodex, .resetPosition, .hudScale],
         [.paste, .pasteAndSubmit],
+        [.openGitWorkspace, .refreshGitWorkspace],
         [.currentAccount, .allAccounts, .manageAccounts],
         [
             .notifications,

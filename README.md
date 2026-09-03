@@ -75,10 +75,9 @@ The app talks to the local Codex App Server over its stdio interface. It does no
 The app checks the GitHub `latest release` endpoint at startup and periodically while running. When a newer version is available:
 
 1. The app shows an update state in the popover and may display one notification for that release.
-2. Choose **Download and Verify** to fetch the exact `CodexUsageStatus.app.zip` asset.
-3. After SHA-256 (when published) and strict nested code-signature verification pass, choose **Install and Relaunch**.
+2. You choose **Open Release** to review the official GitHub Release and download it manually.
 
-The installer uses an owner-only staging directory and an atomic swap with a rollback backup. It never reads or replaces Codex credentials, history, quota data, or managed profiles. **Open Release** remains available for manual review.
+The app never downloads, extracts, replaces, or relaunches itself. Manual installation is performed by the user through Finder. Release metadata is accepted only when the version is path-safe and the link is an HTTPS URL on this repository's GitHub Releases page.
 
 ### Release requirements for maintainers
 
@@ -138,7 +137,7 @@ Confirm that the currently running copy of `CodexUsageStatus.app` is enabled und
 
 ### The update checker says no release is available
 
-A maintainer must publish a GitHub Release first. The release should contain the exact asset name `CodexUsageStatus.app.zip`; the app verifies that asset before offering installation.
+A maintainer must publish a GitHub Release first. The release should contain the exact asset name `CodexUsageStatus.app.zip`; the app only opens the official release page and does not fetch the asset itself.
 
 ### macOS says the app cannot be opened
 
@@ -149,10 +148,17 @@ Use the right-click **Open** flow once, then use **System Settings → Privacy &
 This project is released under the MIT License. See [LICENSE](LICENSE).
 
 For security and privacy boundaries, see [SECURITY.md](SECURITY.md).
-## Retired Feed and Git surfaces
+## External reset announcements
 
-The optional third-party RSS/Atom announcement subsystem and the direct Git
-workspace client are retired. Existing Feed tracking bytes are moved to an
-owner-only `retired/feed` quarantine during launch; they are not decoded or
-rewritten. Commit/Push/Commit Push buttons in the HUD remain prompt shortcuts
-sent to Codex and never execute Git commands in this app.
+Codex Usage Status can optionally follow a user-supplied RSS or Atom feed and
+show reset-time clues as an advisory overlay. The App Server remains the only
+authoritative source for quota and reset timestamps; feed predictions never
+overwrite `UsageSnapshot` or quota history. Feed tracking is disabled by
+default, supports manual or scheduled polling, and keeps the newest event in
+the HUD with older events in the Announcements tab.
+
+The app does not use the X API, browser cookies, or X tokens. It does not
+create or manage a third-party credential store. The complete HTTPS Feed URL
+is saved in owner-only Application Support; if a provider embeds a credential
+in the URL query, that value is saved with the URL. Query URLs are never
+written to logs, notifications, errors, or analytics.

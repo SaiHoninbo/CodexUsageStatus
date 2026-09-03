@@ -46,7 +46,15 @@ final class UsageViewModel: ObservableObject {
     @Published private(set) var notifyOnAccountSwitch: Bool
     @Published private(set) var floatingHUDEnabled: Bool
     @Published private(set) var updateState: AppUpdateState = .idle
+    @Published private(set) var feedTrackingState: FeedTrackingState = .disabled
+    @Published private(set) var feedErrorMessage: String?
+    @Published private(set) var announcementEvents: [AnnouncementEvent] = []
+    @Published private(set) var feedURL: URL?
+    @Published private(set) var feedEnabled: Bool
+    @Published private(set) var feedCadence: FeedPollingCadence
+    var feedPredictionsByPostID: [String: ResetPrediction] { feedTrackingService.envelope.predictionsByPostID }
     @Published var historyRange: HistoryRange = .week
+    @Published var announcementRange: HistoryRange = .week
     @Published var tokenActivityRange: TokenActivityRange = .week
     @Published var accountScope: AccountScope = .current
 
@@ -68,6 +76,8 @@ final class UsageViewModel: ObservableObject {
     private let turnNotificationService = TurnNotificationService()
     private let updateService = AppUpdateService()
     private let updateNotificationService = AppUpdateNotificationService()
+    private let feedTrackingService: FeedTrackingService
+    private let feedNotificationService = FeedNotificationService()
     private let defaults = UserDefaults.standard
     private var displayTimer: Timer?
     private var updateCheckTimer: Timer?
@@ -120,10 +130,20 @@ final class UsageViewModel: ObservableObject {
         showTurnContentInNotifications = defaults.object(forKey: PreferenceKey.turnContent) as? Bool ?? false
         notifyOnAccountSwitch = defaults.object(forKey: PreferenceKey.accountSwitch) as? Bool ?? false
         floatingHUDEnabled = defaults.object(forKey: PreferenceKey.floatingHUDEnabled) as? Bool ?? true
-        RetiredFeatureCleanup.run()
+        feedEnabled = defaults.object(forKey: "feed.enabled") as? Bool ?? false
+        feedCadence = FeedPollingCadence(rawValue: defaults.object(forKey: "feed.cadence") as? Int ?? FeedPollingCadence.hour.rawValue) ?? .hour
+        if let raw = defaults.string(forKey: "feed.url") { feedURL = URL(string: raw) } else { feedURL = nil }
+        feedTrackingService = FeedTrackingService()
+        feedTrackingService.notificationService = feedNotificationService
         profileStore = AccountProfileStore()
         accountProfiles = profileStore.accountProfiles()
         profileStoreErrorMessage = profileStore.errorMessage
+        feedTrackingService.onStateChange = { [weak self] state, message in
+            Task { @MainActor [weak self] in self?.feedTrackingState = state; self?.feedErrorMessage = message }
+        }
+        feedTrackingService.onEventsChange = { [weak self] events in
+            Task { @MainActor [weak self] in self?.announcementEvents = events }
+        }
         quotaRefreshIntervalSeconds = Self.clampQuotaInterval(defaults.object(forKey: PreferenceKey.quotaRefreshInterval) as? Int ?? 60)
         globalSyncIntervalSeconds = Self.clampAccountInterval(defaults.object(forKey: PreferenceKey.accountRefreshInterval) as? Int ?? 300)
         tokenActivityRefreshIntervalSeconds = Self.clampTokenInterval(defaults.object(forKey: PreferenceKey.tokenActivityRefreshInterval) as? Int ?? 900)
@@ -134,6 +154,10 @@ final class UsageViewModel: ObservableObject {
             account: globalSyncIntervalSeconds,
             credentialWatch: credentialWatchIntervalSeconds
         )
+        feedTrackingService.notificationsAllowed = { [weak self] in
+            guard let self else { return false }
+            return self.notificationsEnabled && (self.notificationAuthorizationStatus == .authorized || self.notificationAuthorizationStatus == .provisional)
+        }
         accountManagementService.onLoginOutput = { [weak self] profileID, output in
             self?.loginStates[profileID] = output
         }
@@ -170,6 +194,8 @@ final class UsageViewModel: ObservableObject {
             self.currentDate = Date()
             self.errorMessage = nil
             self.resetCredits = snapshot.rateLimitResetCredits
+            let officialResetDates = [snapshot.primary?.resetsAt, snapshot.secondary?.resetsAt, snapshot.gptReserveWeekly?.resetsAt].compactMap { $0 }.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+            self.feedTrackingService.corroborate(officialResetDates: officialResetDates)
             if let selected = self.selectedResetCreditID,
                !(snapshot.rateLimitResetCredits?.availableCredits.contains(where: { $0.id == selected }) ?? false) {
                 self.selectedResetCreditID = nil
@@ -277,6 +303,7 @@ final class UsageViewModel: ObservableObject {
         startDisplayTimer()
         checkForUpdates()
         startUpdateCheckTimer()
+        feedTrackingService.start(enabled: feedEnabled, cadence: feedCadence, feedURL: feedURL)
         if let profile = currentProfile, profile.isManaged {
             defaultClientEnabled = false
             ensureManagedWorker(for: profile)
@@ -295,6 +322,7 @@ final class UsageViewModel: ObservableObject {
         displayTimer = nil
         updateCheckTimer?.invalidate()
         updateCheckTimer = nil
+        feedTrackingService.stop()
         client.stop()
         accountManagementService.stopAllLogins()
         for worker in managedWorkers.values { worker.stop() }
@@ -343,25 +371,6 @@ final class UsageViewModel: ObservableObject {
 
     func openUpdateReleasePage() {
         updateService.openReleasePage()
-    }
-
-    func downloadUpdate() {
-        updateService.download { [weak self] state in self?.updateState = state }
-        updateState = updateService.state
-    }
-
-    func cancelUpdateDownload() {
-        updateService.cancelDownload()
-        updateState = updateService.state
-    }
-
-    func installDownloadedUpdate() {
-        updateService.installDownloadedUpdate()
-        updateState = updateService.state
-    }
-
-    func revealDownloadedUpdate() {
-        updateService.revealDownloadedApp()
     }
 
     func setAccountScope(_ scope: AccountScope) {
@@ -521,6 +530,11 @@ final class UsageViewModel: ObservableObject {
     func setTurnContentInNotifications(_ enabled: Bool) { showTurnContentInNotifications = enabled; defaults.set(enabled, forKey: PreferenceKey.turnContent) }
     func setAccountSwitchNotifications(_ enabled: Bool) { notifyOnAccountSwitch = enabled; defaults.set(enabled, forKey: PreferenceKey.accountSwitch) }
     func setFloatingHUDEnabled(_ enabled: Bool) { floatingHUDEnabled = enabled; defaults.set(enabled, forKey: PreferenceKey.floatingHUDEnabled) }
+    func setFeedEnabled(_ enabled: Bool) { feedEnabled = enabled; defaults.set(enabled, forKey: "feed.enabled"); feedTrackingService.start(enabled: feedEnabled, cadence: feedCadence, feedURL: feedURL) }
+    func setFeedURL(_ url: URL?) { feedURL = url; defaults.set(url?.absoluteString, forKey: "feed.url"); feedTrackingService.start(enabled: feedEnabled, cadence: feedCadence, feedURL: feedURL) }
+    func setFeedCadence(_ cadence: FeedPollingCadence) { feedCadence = cadence; defaults.set(cadence.rawValue, forKey: "feed.cadence"); feedTrackingService.start(enabled: feedEnabled, cadence: feedCadence, feedURL: feedURL) }
+    func refreshFeed() { feedTrackingService.fetch() }
+
     func selectResetCredit(id: String?) {
         guard let id,
               resetCredits?.availableCredits.contains(where: { $0.id == id }) == true else {
@@ -787,6 +801,8 @@ final class UsageViewModel: ObservableObject {
         currentDate = Date()
         errorMessage = nil
         resetCredits = snapshot.rateLimitResetCredits
+        let officialResetDates = [snapshot.primary?.resetsAt, snapshot.secondary?.resetsAt, snapshot.gptReserveWeekly?.resetsAt].compactMap { $0 }.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        feedTrackingService.corroborate(officialResetDates: officialResetDates)
         historyStore = HistoryStore(fileURL: profileStore.historyURL(for: profile))
         _ = historyStore.record(snapshot: snapshot, connectionState: .connected, now: snapshot.receivedAt)
         syncHistoryState()

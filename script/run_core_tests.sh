@@ -30,10 +30,17 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/UsagePopoverTab.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/AppVersion.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/PopoverPresentationPolicy.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/GitWorkspaceModels.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/GitWorkspaceService.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/AppUpdateService.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDUpdateBadgePolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDColorPalette.swift" \
-  "$ROOT_DIR/Sources/CodexUsageStatus/RetiredFeatureCleanup.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/FeedTrackingModels.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/FeedParser.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/ResetPredictionPolicy.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/FeedTrackingStore.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/FeedTrackingService.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/FeedAnnouncementPolicy.swift" \
   "$ROOT_DIR/Tests/CodexUsageStatusTests/TestRunner.swift" \
   -o "$BUILD_DIR/CodexUsageStatusTests"
 

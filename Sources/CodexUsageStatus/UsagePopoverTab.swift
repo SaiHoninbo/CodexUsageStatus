@@ -1,11 +1,13 @@
 import Foundation
-import Combine
 
 /// Stable sections shown by the details popover. Keeping the tab identity
 /// outside the view makes routing and persistence-safe labels easy to test.
 enum UsagePopoverTab: String, CaseIterable, Identifiable {
     case overview
+    case usage
     case history
+    case accountGit
+    case announcements
     case settings
 
     var id: String { rawValue }
@@ -13,31 +15,28 @@ enum UsagePopoverTab: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .overview: return "概覽"
+        case .usage: return "用量"
         case .history: return "歷史"
+        case .accountGit: return "帳號與 Git"
         case .settings: return "設定"
+        case .announcements: return "公告"
         }
     }
 
     var systemImage: String {
         switch self {
         case .overview: return "gauge.with.dots.needle.33percent"
+        case .usage: return "chart.bar.fill"
         case .history: return "chart.xyaxis.line"
+        case .accountGit: return "person.2"
         case .settings: return "gearshape"
+        case .announcements: return "megaphone"
         }
     }
 }
 
-/// Small, explicit navigation owner shared by the status item, HUD and the
-/// popover.  Keeping this object outside the view lets external actions
-/// reliably return an already-open popover to Overview without resurrecting
-/// the retired Git/Announcement route layer.
-@MainActor
-final class PopoverSelectionController: ObservableObject {
-    @Published var selectedTab: UsagePopoverTab = .overview
-    @Published private(set) var requestGeneration = 0
-
-    func select(_ tab: UsagePopoverTab) {
-        selectedTab = tab
-        requestGeneration &+= 1
-    }
+enum DetailsDestination: Equatable {
+    case overview
+    case gitWorkspace
+    case announcements
 }

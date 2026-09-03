@@ -12,7 +12,8 @@ private struct PopoverContentHeightPreferenceKey: PreferenceKey {
 
 struct UsagePopoverView: View {
     @ObservedObject var model: UsageViewModel
-    @ObservedObject var selectionController: PopoverSelectionController
+    @ObservedObject var gitCoordinator: GitWorkspaceCoordinator
+    @ObservedObject var detailsRouter: DetailsRouter
     let openCodex: () -> Void
     let resetHUDPosition: () -> Void
     let quit: () -> Void
@@ -21,8 +22,10 @@ struct UsagePopoverView: View {
     @State private var showClearHistoryConfirmation = false
     @State private var showResetCreditConfirmation = false
     @State private var showRemoveProfileConfirmation = false
+    @State private var selectedTab: UsagePopoverTab = .overview
     @State private var profilePendingRemoval: AccountProfile?
     @State private var measuredContentHeight: CGFloat = 0
+    @State private var feedURLDraft = ""
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
@@ -42,11 +45,42 @@ struct UsagePopoverView: View {
         .frame(width: 430)
         .foregroundStyle(HUDColorPalette.primaryText)
         .preferredColorScheme(.light)
-        .onAppear { selectionController.select(.overview) }
+        .onAppear { syncSelectedTabWithRoute(); feedURLDraft = model.feedURL?.absoluteString ?? "" }
         .onPreferenceChange(PopoverContentHeightPreferenceKey.self) { height in
             guard height > 0, abs(height - measuredContentHeight) > 0.5 else { return }
             measuredContentHeight = height
             onContentHeightChange?(height)
+        }
+        .onChange(of: detailsRouter.destination) { _, _ in syncSelectedTabWithRoute() }
+        .onChange(of: detailsRouter.requestGeneration) { _, _ in syncSelectedTabWithRoute() }
+        .confirmationDialog("確認 Git 操作", isPresented: Binding(
+            get: { gitCoordinator.confirmation != nil },
+            set: { if !$0 { gitCoordinator.cancelConfirmation() } }
+        ), titleVisibility: .visible) {
+            if let confirmation = gitCoordinator.confirmation {
+                switch confirmation {
+                case .commit, .sensitiveCommit:
+                    Button(confirmation == .sensitiveCommit ? "確認提交（含敏感檔案）" : "確認 Commit", role: .destructive) {
+                        gitCoordinator.confirmCommit()
+                    }
+                case .push:
+                    Button("確認 Push", role: .destructive) {
+                        gitCoordinator.confirmPush()
+                    }
+                }
+            }
+            Button("取消", role: .cancel) { gitCoordinator.cancelConfirmation() }
+        } message: {
+            if let confirmation = gitCoordinator.confirmation {
+                switch confirmation {
+                case .commit:
+                    Text("只會提交目前勾選的路徑，不會帶入其他既有 staged 檔案。")
+                case .sensitiveCommit:
+                    Text("選取內容包含可能的敏感檔案。仍要提交嗎？敏感檔案不會在此面板顯示 raw diff。")
+                case .push:
+                    Text("將 Push \(gitCoordinator.branchLabel) 到目前已確認的 upstream。執行前若 repo identity 改變，操作會中止。")
+                }
+            }
         }
         .alert("清除本機歷史？", isPresented: $showClearHistoryConfirmation) {
             Button("清除", role: .destructive) { model.clearHistory() }
@@ -76,38 +110,47 @@ struct UsagePopoverView: View {
     }
 
     private var tabBar: some View {
-        HStack(spacing: 6) {
-            ForEach(UsagePopoverTab.allCases) { tab in
-                Button {
-                    selectionController.select(tab)
-                } label: {
-                    Label(tab.title, systemImage: tab.systemImage)
-                        .font(.caption.weight(.semibold))
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, minHeight: 30)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(UsagePopoverTab.allCases) { tab in
+                    Button {
+                        selectedTab = tab
+                    } label: {
+                        Label(tab.title, systemImage: tab.systemImage)
+                            .font(.caption.weight(.semibold))
+                            .lineLimit(1)
+                            .padding(.horizontal, 9)
+                            .frame(minHeight: 30)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(selectedTab == tab ? Color.white : HUDColorPalette.primaryText)
+                    .background(
+                        selectedTab == tab ? Color.accentColor : Color.black.opacity(0.08),
+                        in: Capsule()
+                    )
+                    .accessibilityAddTraits(selectedTab == tab ? .isSelected : [])
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(selectionController.selectedTab == tab ? Color.white : HUDColorPalette.primaryText)
-                .background(
-                    selectionController.selectedTab == tab ? Color.accentColor : Color.black.opacity(0.08),
-                    in: Capsule()
-                )
-                .accessibilityAddTraits(selectionController.selectedTab == tab ? .isSelected : [])
             }
+            .padding(3)
         }
-        .padding(3)
         .background(Color.secondary.opacity(0.08), in: Capsule())
     }
 
     @ViewBuilder
     private var tabContent: some View {
-        switch selectionController.selectedTab {
+        switch selectedTab {
         case .overview:
             overviewTab
+        case .usage:
+            usageTab
         case .history:
             historyTab
+        case .accountGit:
+            accountGitTab
         case .settings:
             settingsTab
+        case .announcements:
+            announcementsTab
         }
     }
 
@@ -115,14 +158,24 @@ struct UsagePopoverView: View {
         VStack(alignment: .leading, spacing: 16) {
             accountSelector
             quotaSummarySection
-            if model.accountScope == .current {
-                tokenActivitySection
-                resetCreditSection
-            } else {
-                aggregateQuotaSection
-            }
             updateSection
             quickActions
+        }
+    }
+
+    private var usageTab: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if model.accountScope == .all {
+                aggregateQuotaSection
+            } else {
+                windowSection(title: "5 小時", window: quotaWindow(.fiveHour))
+                windowSection(title: "7 天", window: quotaWindow(.sevenDay))
+                if let spend = model.snapshot?.individualLimit {
+                    spendControlSection(spend)
+                }
+            }
+            tokenActivitySection
+            resetCreditSection
         }
     }
 
@@ -132,9 +185,27 @@ struct UsagePopoverView: View {
         }
     }
 
-    private var accountDetailsSection: some View {
+    private var announcementsTab: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("公告").font(.title3.weight(.bold))
+                Spacer()
+                Picker("範圍", selection: $model.announcementRange) {
+                    Text("24 小時").tag(HistoryRange.day)
+                    Text("7 天").tag(HistoryRange.week)
+                    Text("30 天").tag(HistoryRange.month)
+                }.pickerStyle(.segmented).frame(width: 210)
+            }
+            let filtered = FeedAnnouncementPolicy.filter(events: model.announcementEvents, range: model.announcementRange, now: model.currentDate)
+            if filtered.isEmpty { Text("目前沒有外部重置公告。").foregroundStyle(.secondary).padding(.vertical, 20) }
+            else { FeedAnnouncementListView(events: filtered, predictionsByPostID: model.feedPredictionsByPostID) }
+        }
+    }
+
+    private var accountGitTab: some View {
         VStack(alignment: .leading, spacing: 16) {
             accountManagementSection
+            gitWorkspaceSection
             if model.accountScope == .current {
                 accountHealthSection
                 turnActivitySection
@@ -149,10 +220,31 @@ struct UsagePopoverView: View {
     private var settingsTab: some View {
         VStack(alignment: .leading, spacing: 16) {
             settingsSection
-            accountDetailsSection
             syncSettingsSection
+            feedSettingsSection
             metadataSection
             actions
+        }
+    }
+
+    private func syncSelectedTabWithRoute() {
+        switch detailsRouter.destination {
+        case .overview: selectedTab = .overview
+        case .gitWorkspace: selectedTab = .accountGit
+        case .announcements: selectedTab = .announcements
+        }
+    }
+
+    private var feedSettingsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("外部重置公告", systemImage: "megaphone").font(.headline)
+            Text("可用第三方 Feed 追蹤 @thsottiaux；請貼上供應商提供的 HTTPS RSS／Atom URL。").font(.caption).foregroundStyle(.secondary)
+            Toggle("啟用 Feed 追蹤", isOn: Binding(get: { model.feedEnabled }, set: model.setFeedEnabled))
+            TextField("Feed URL（HTTPS）", text: $feedURLDraft)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { model.setFeedURL(URL(string: feedURLDraft.trimmingCharacters(in: .whitespacesAndNewlines))) }
+            Picker("更新頻率", selection: Binding(get: { model.feedCadence }, set: model.setFeedCadence)) { ForEach(FeedPollingCadence.allCases, id: \.self) { Text($0.displayName).tag($0) } }
+            HStack { Text(model.feedTrackingState == .loaded ? "已更新" : (model.feedErrorMessage ?? "僅供參考" )).font(.caption).foregroundStyle(.secondary); Spacer(); Button("立即更新") { model.refreshFeed() } }
         }
     }
 
@@ -201,12 +293,8 @@ struct UsagePopoverView: View {
             }
 
             if model.accountScope == .current {
-                quotaSummaryRow(quotaPresentation(.fiveHour), fallbackTitle: HUDQuotaWindowKind.fiveHour.label, accent: .orange)
-                quotaSummaryRow(quotaPresentation(.sevenDay), fallbackTitle: HUDQuotaWindowKind.sevenDay.label, accent: .blue)
-                quotaSummaryRow(quotaPresentation(.gptReserveWeekly), fallbackTitle: nil, accent: .purple)
-                if let credits = quotaPresentation?.credits, credits.isDisplayable {
-                    creditsSummaryRow(credits)
-                }
+                quotaSummaryRow(title: "5 小時", window: quotaWindow(.fiveHour), accent: .orange)
+                quotaSummaryRow(title: "7 天", window: quotaWindow(.sevenDay), accent: .blue)
             } else {
                 let summaries = model.profileQuotaSummaries()
                 if summaries.isEmpty {
@@ -244,66 +332,39 @@ struct UsagePopoverView: View {
         .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
-    private var quotaPresentation: HUDDualQuotaPresentation? {
-        HUDQuotaPresentationPolicy.make(
-            snapshot: model.snapshot,
-            profileID: model.currentProfileID,
-            now: model.currentDate
-        )
-    }
-
-    private func quotaPresentation(_ kind: HUDQuotaWindowKind) -> HUDQuotaWindowPresentation? {
-        quotaPresentation?.rows.first(where: { $0.kind == kind })
+    private func quotaWindow(_ kind: HUDQuotaWindowKind) -> RateLimitWindow? {
+        let windows = [model.snapshot?.primary, model.snapshot?.secondary].compactMap { $0 }
+        let matches = windows.filter { $0.windowDurationMins == kind.durationMins }
+        guard matches.count == 1 else { return nil }
+        return matches[0]
     }
 
     @ViewBuilder
-    private func quotaSummaryRow(
-        _ presentation: HUDQuotaWindowPresentation?,
-        fallbackTitle: String?,
-        accent: Color
-    ) -> some View {
-        if let presentation {
+    private func quotaSummaryRow(title: String, window: RateLimitWindow?, accent: Color) -> some View {
+        if let window {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(presentation.label)
+                    Text(title)
                         .font(.body.weight(.semibold))
-                    Text("已用 \(100 - presentation.remainingPercent)%")
+                    Text("已用 \(window.clampedUsedPercent)%")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Text("剩餘 \(presentation.remainingPercent)%")
+                    Text("剩餘 \(window.remainingPercent)%")
                         .font(.system(size: 18, weight: .bold, design: .rounded))
                         .foregroundStyle(accent)
                 }
-                ProgressView(value: presentation.fillFraction)
+                ProgressView(value: Double(window.remainingPercent), total: 100)
                     .tint(accent)
-                Text(presentation.resetDescription)
+                Text(model.resetDescription(window.resetsAt))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
         } else {
-            if let fallbackTitle {
-                HStack {
-                    Text(fallbackTitle).font(.body.weight(.semibold))
-                    Spacer()
-                    Text("尚未取得資料").font(.subheadline).foregroundStyle(.secondary)
-                }
-            } else {
-                EmptyView()
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func creditsSummaryRow(_ credits: CreditsBalance) -> some View {
-        if let balance = credits.displayBalance {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Credits")
-                    .font(.body.weight(.semibold))
+            HStack {
+                Text(title).font(.body.weight(.semibold))
                 Spacer()
-                Text(balance)
-                    .font(.system(size: 18, weight: .bold, design: .rounded))
-                    .foregroundStyle(.green)
+                Text("尚未取得資料").font(.subheadline).foregroundStyle(.secondary)
             }
         }
     }
@@ -362,27 +423,9 @@ struct UsagePopoverView: View {
             case .available(let release):
                 updateReleaseDetails(release)
                 HStack(spacing: 8) {
-                    Button("一鍵下載並驗證") { model.downloadUpdate() }
-                        .buttonStyle(.borderedProminent)
-                        .font(.subheadline)
                     Button("開啟 Release") { model.openUpdateReleasePage() }
-                        .buttonStyle(.link).font(.subheadline)
-                }
-            case .downloading(let release):
-                updateReleaseDetails(release)
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("正在下載並驗證…").font(.subheadline).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("取消") { model.cancelUpdateDownload() }.buttonStyle(.link)
-                }
-            case .downloaded(let release, _):
-                updateReleaseDetails(release)
-                HStack(spacing: 8) {
-                    Button("安裝並重新啟動") { model.installDownloadedUpdate() }
-                        .buttonStyle(.borderedProminent)
-                    Button("在 Finder 顯示") { model.revealDownloadedUpdate() }
                         .buttonStyle(.link)
+                        .font(.subheadline)
                 }
             case .error(let message):
                 Text(message)
@@ -408,10 +451,6 @@ struct UsagePopoverView: View {
             Text("處理中").font(.subheadline).foregroundStyle(.secondary)
         case .available:
             Text("有新版").font(.subheadline).foregroundStyle(.blue)
-        case .downloading:
-            Text("下載中").font(.subheadline).foregroundStyle(.orange)
-        case .downloaded:
-            Text("已驗證").font(.subheadline).foregroundStyle(.green)
         case .upToDate:
             Text("最新").font(.subheadline).foregroundStyle(.green)
         case .error:
@@ -587,6 +626,103 @@ struct UsagePopoverView: View {
         }
     }
 
+    private var gitWorkspaceSection: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Label("Git 工作區", systemImage: "arrow.triangle.branch")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Button(action: { gitCoordinator.refreshNow() }) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .help("重新整理 Git 狀態")
+                .disabled(gitCoordinator.operationState.isBusy)
+            }
+
+            if !gitCoordinator.resolution.isKnown {
+                Text(gitCoordinator.resolution.reason.isEmpty ? "請先選擇工作區" : gitCoordinator.resolution.reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("只使用目前 Codex focused window 的公開 metadata；無法可靠判定時不會猜測路徑。")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            } else if let snapshot = gitCoordinator.snapshot {
+                HStack {
+                    Text(snapshot.isDetached ? "detached" : (snapshot.identity.branch ?? "—"))
+                        .font(.caption.weight(.semibold))
+                    if snapshot.ahead > 0 || snapshot.behind > 0 {
+                        Text("↑\(snapshot.ahead) ↓\(snapshot.behind)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Text(snapshot.changes.isEmpty ? "clean" : "\(snapshot.changes.count) 個變更")
+                        .font(.caption2)
+                        .foregroundStyle(snapshot.hasConflicts ? .red : .secondary)
+                }
+                if snapshot.changes.isEmpty {
+                    Text("工作區乾淨，沒有可提交的變更。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(snapshot.changes) { change in
+                        HStack(alignment: .top, spacing: 6) {
+                            Toggle(isOn: Binding(
+                                get: { gitCoordinator.selectedPaths.contains(change.path) },
+                                set: { _ in gitCoordinator.toggleSelection(path: change.path) }
+                            )) {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(change.path)
+                                        .font(.caption)
+                                        .lineLimit(1)
+                                    Text(change.isSensitive ? "敏感檔案：只顯示路徑，不顯示 raw diff" : change.kind.rawValue)
+                                        .font(.caption2)
+                                        .foregroundStyle(change.isSensitive ? .orange : .secondary)
+                                }
+                            }
+                            .toggleStyle(.checkbox)
+                            if !change.isSensitive {
+                                Button(action: { gitCoordinator.loadDiff(path: change.path) }) {
+                                    Image(systemName: "doc.text.magnifyingglass")
+                                }
+                                .buttonStyle(.plain)
+                                .help("預覽差異")
+                            }
+                        }
+                    }
+                }
+                TextField("Commit 訊息", text: $gitCoordinator.commitMessage)
+                    .textFieldStyle(.roundedBorder)
+                HStack(spacing: 8) {
+                    Button("Commit") { gitCoordinator.requestCommitConfirmation() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(gitCoordinator.selectedPaths.isEmpty || gitCoordinator.commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || gitCoordinator.operationState.isBusy)
+                    Button("Push") { gitCoordinator.requestPushConfirmation() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(snapshot.identity.upstream == nil || snapshot.isDetached || gitCoordinator.operationState.isBusy)
+                }
+                if let diff = gitCoordinator.diffPreview {
+                    Text(diff)
+                        .font(.system(.caption2, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(14)
+                        .padding(6)
+                        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+                }
+            }
+
+            switch gitCoordinator.operationState {
+            case .success(let message), .error(let message), .unavailable(let message):
+                Text(message).font(.caption2).foregroundStyle(.secondary)
+            default:
+                EmptyView()
+            }
+        }
+    }
+
     private var accountHealthSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
@@ -701,6 +837,62 @@ struct UsagePopoverView: View {
             Text("Quota 以帳號分列，不計算總剩餘百分比。")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func windowSection(title: String, window: RateLimitWindow?) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+            if let window {
+                HStack {
+                    Text("剩餘")
+                    Spacer()
+                    Text("\(window.remainingPercent)%")
+                        .fontWeight(.semibold)
+                }
+                ProgressView(value: Double(window.remainingPercent), total: 100)
+                    .tint(color(for: window.remainingPercent))
+                HStack {
+                    Text("已用 \(window.clampedUsedPercent)%")
+                    Spacer()
+                    Text(model.resetDescription(window.resetsAt))
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption)
+                if let timestamp = window.resetsAt {
+                    Text(Date(timeIntervalSince1970: TimeInterval(timestamp)).formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            } else {
+                Text("目前沒有資料")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func spendControlSection(_ spend: SpendControlLimit) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("Workspace spend control")
+                .font(.subheadline.weight(.semibold))
+            HStack {
+                Text("剩餘")
+                Spacer()
+                Text("\(spend.remainingPercent)%")
+                    .fontWeight(.semibold)
+            }
+            ProgressView(value: Double(spend.remainingPercent), total: 100)
+                .tint(color(for: spend.remainingPercent))
+            HStack {
+                Text("已用 \(spend.used) / \(spend.limit)")
+                Spacer()
+                Text(model.resetDescription(spend.resetsAt))
+                    .foregroundStyle(.secondary)
+            }
+            .font(.caption)
         }
     }
 
@@ -1109,10 +1301,10 @@ struct UsagePopoverView: View {
     }
 
     private func formatInterval(_ seconds: Int) -> String {
-        if seconds < 60 { return "\(seconds) 秒" }
+        if seconds < 60 { return "(seconds) 秒" }
         let minutes = seconds / 60
-        if minutes < 60 { return "\(minutes) 分鐘" }
-        return "\(minutes / 60) 小時"
+        if minutes < 60 { return "(minutes) 分鐘" }
+        return "(minutes / 60) 小時"
     }
 
     private var metadataSection: some View {
