@@ -1423,7 +1423,11 @@ private struct HUDActionCard: View {
                     .minimumScaleFactor(0.55)
                     .allowsTightening(true)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Keep the semantic label and the visible card on the same
+            // hit-test rectangle. A max-sized label can otherwise retain an
+            // intrinsic Button hit region near the card's rounded edges.
+            .frame(width: width, height: height)
+            .contentShape(shape)
         }
         .buttonStyle(.plain)
         .frame(width: width, height: height)
@@ -2149,6 +2153,10 @@ private struct CodexFloatingHUDView: View {
         hovered: Binding<Bool>
     ) -> some View {
         let isFilled = shortcut == .commitPush
+        let shape = RoundedRectangle(
+            cornerRadius: metrics.footerHeight * 0.24,
+            style: .continuous
+        )
         let backgroundColor = isFilled
             ? (hovered.wrappedValue ? HUDColorPalette.commitPush.opacity(0.94) : HUDColorPalette.commitPush.opacity(0.84))
             : Color.clear
@@ -2175,6 +2183,10 @@ private struct CodexFloatingHUDView: View {
                     .allowsTightening(true)
             }
             .frame(width: width, height: metrics.footerHeight)
+            // Footer buttons previously had a visual background but no
+            // matching content shape. Keep the label and the visible capsule
+            // aligned so edge clicks behave like center clicks.
+            .contentShape(shape)
         }
         .buttonStyle(.plain)
         .disabled(isPromptShortcutInFlight || !layoutState.isCodexFocused || ClipboardPasteService.isTemporaryOperationInFlight)
@@ -2185,8 +2197,9 @@ private struct CodexFloatingHUDView: View {
         .accessibilityValue(shortcut.submitAfterPaste ? "貼上並送出一次" : "貼上但不送出")
         .background(
             backgroundColor,
-            in: RoundedRectangle(cornerRadius: metrics.footerHeight * 0.24, style: .continuous)
+            in: shape
         )
+        .contentShape(shape)
     }
 
     @ViewBuilder
