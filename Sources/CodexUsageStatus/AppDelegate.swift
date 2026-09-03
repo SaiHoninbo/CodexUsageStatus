@@ -3,17 +3,6 @@ import Combine
 import SwiftUI
 
 @MainActor
-final class DetailsRouter: ObservableObject {
-    @Published var destination: DetailsDestination = .overview
-    @Published private(set) var requestGeneration = 0
-
-    func route(to destination: DetailsDestination) {
-        self.destination = destination
-        requestGeneration &+= 1
-    }
-}
-
-@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
@@ -22,8 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var model: UsageViewModel!
     private var modelObservation: AnyCancellable?
     private var floatingHUD: FloatingHUDPanelController!
-    private let gitCoordinator = GitWorkspaceCoordinator()
-    private let detailsRouter = DetailsRouter()
+    private let selectionController = PopoverSelectionController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -53,8 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController = NSHostingController(
             rootView: UsagePopoverView(
                 model: model,
-                gitCoordinator: gitCoordinator,
-                detailsRouter: detailsRouter,
+                selectionController: selectionController,
                 openCodex: { [weak self] in self?.openCodex() },
                 resetHUDPosition: { [weak self] in self?.floatingHUD?.resetPosition() },
                 quit: { NSApp.terminate(nil) },
@@ -64,10 +51,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
         )
 
-        floatingHUD = FloatingHUDPanelController(model: model, gitCoordinator: gitCoordinator)
-        floatingHUD.onShowDetails = { [weak self] in self?.showPopover(destination: .overview) }
-        floatingHUD.onShowGitWorkspace = { [weak self] in self?.showPopover(destination: .gitWorkspace) }
-        floatingHUD.onShowAnnouncements = { [weak self] in self?.showPopover(destination: .announcements) }
+        floatingHUD = FloatingHUDPanelController(model: model)
+        floatingHUD.onShowDetails = { [weak self] in self?.showPopover() }
         floatingHUD.onOpenCodex = { [weak self] in self?.openCodex() }
         floatingHUD.onQuit = { NSApp.terminate(nil) }
         floatingHUD.start()
@@ -94,16 +79,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showPopover(toggle: true, sender: sender)
     }
 
-    private func showPopover(destination: DetailsDestination = .overview, toggle: Bool = false, sender: Any? = nil) {
+    private func showPopover(toggle: Bool = false, sender: Any? = nil) {
         guard let button = statusItem.button else { return }
-        detailsRouter.route(to: destination)
-        if destination == .gitWorkspace { gitCoordinator.refreshNow() }
+        selectionController.select(.overview)
         if toggle && popover.isShown {
             popover.performClose(sender)
         } else {
             if popover.isShown { popover.performClose(sender) }
             // Accessory apps can present an inactive NSPopover on its first
-            // click from either the status item or the HUD Details/Git action.
+            // click from either the status item or the HUD Details action.
             // Activate the app first so AppKit resolves the popover's active
             // material immediately, then pin the appearance before the
             // backing window is created.
@@ -187,7 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openCodex() {
-        if let running = NSWorkspace.shared.runningApplications.first(where: CodexWorkspaceResolver.isCodexApplication) {
+        if let running = NSWorkspace.shared.runningApplications.first(where: CodexApplicationPolicy.isCodexApplication) {
             running.activate(options: [])
             return
         }

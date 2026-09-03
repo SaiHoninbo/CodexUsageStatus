@@ -3,95 +3,6 @@ import CoreGraphics
 import AppKit
 import Darwin
 
-private final class FeedNotificationSubmissionProbe: FeedNotificationSubmitting {
-    let result: Result<Void, Error>
-    private(set) var calls = 0
-
-    init(result: Result<Void, Error>) {
-        self.result = result
-    }
-
-    func send(
-        post: FeedPost,
-        prediction: ResetPrediction?,
-        postCount: Int,
-        completion: @escaping (Result<Void, Error>) -> Void
-    ) {
-        calls += 1
-        completion(result)
-    }
-}
-
-private final class FeedURLProtocolProbe: URLProtocol {
-    static var statusCode = 200
-    static var body = Data()
-    static var headers: [String: String] = [:]
-    static var failure: Error?
-    static var redirectURL: URL?
-    static var requestCount = 0
-
-    static func reset() {
-        statusCode = 200
-        body = Data()
-        headers = [:]
-        failure = nil
-        redirectURL = nil
-        requestCount = 0
-    }
-
-    override class func canInit(with request: URLRequest) -> Bool { true }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-
-    override func startLoading() {
-        Self.requestCount += 1
-        guard let client else { return }
-        if let failure = Self.failure {
-            client.urlProtocol(self, didFailWithError: failure)
-            return
-        }
-        let response = HTTPURLResponse(
-            url: request.url!,
-            statusCode: Self.redirectURL == nil ? Self.statusCode : 302,
-            httpVersion: "HTTP/1.1",
-            headerFields: Self.headers
-        )!
-        if let redirectURL = Self.redirectURL {
-            client.urlProtocol(self, wasRedirectedTo: URLRequest(url: redirectURL), redirectResponse: response)
-            return
-        }
-        client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        if !Self.body.isEmpty { client.urlProtocol(self, didLoad: Self.body) }
-        client.urlProtocolDidFinishLoading(self)
-    }
-
-    override func stopLoading() {}
-}
-
-private final class FeedDeferredTransport: FeedHTTPTransporting {
-    final class Handle: FeedTransportTask {
-        private(set) var cancelCount = 0
-        func cancel() { cancelCount += 1 }
-    }
-
-    private(set) var requests: [URLRequest] = []
-    private(set) var handles: [Handle] = []
-    private var completions: [(Result<FeedHTTPResponse, Error>) -> Void] = []
-
-    @discardableResult
-    func fetch(request: URLRequest, completion: @escaping (Result<FeedHTTPResponse, Error>) -> Void) -> FeedTransportTask {
-        requests.append(request)
-        completions.append(completion)
-        let handle = Handle()
-        handles.append(handle)
-        return handle
-    }
-
-    func complete(_ index: Int, with result: Result<FeedHTTPResponse, Error>) {
-        guard completions.indices.contains(index) else { return }
-        completions[index](result)
-    }
-}
-
 enum HarnessError: Error, CustomStringConvertible {
     case assertion(String)
     case unwrap(String)
@@ -140,6 +51,7 @@ struct CodexUsageStatusTests {
             ("managed profile has isolated CODEX_HOME", testManagedProfileHasIsolatedCodexHome),
             ("managed profile imports auth atomically", testManagedProfileImportsAuth),
             ("update version comparison", testUpdateVersionComparison),
+            ("retired feature cleanup", testRetiredFeatureCleanup),
             ("HUD context menu policy", testHUDContextMenuPolicy),
             ("usage popover tabs and app version", testUsagePopoverTabsAndAppVersion),
             ("popover presentation appearance policy", testPopoverPresentationAppearancePolicy),
@@ -149,23 +61,6 @@ struct CodexUsageStatusTests {
             ("Codex application identity", testCodexApplicationIdentity),
             ("Codex prompt shortcuts", testCodexPromptShortcuts),
             ("temporary clipboard guards", testClipboardTemporaryOperationPolicy),
-            ("Git status parser and safety policies", testGitWorkspacePolicies),
-            ("Git selected commit isolation", testGitSelectedCommitIsolation),
-            ("Git untracked commit and sensitive boundaries", testGitUntrackedCommitAndSensitiveBoundaries),
-            ("Git push identity freeze", testGitPushIdentityFreeze),
-            ("feed prediction timezone provenance", testFeedPredictionTimezoneProvenance),
-            ("feed announcement grouping", testFeedAnnouncementGrouping),
-            ("feed store retention map invariant", testFeedStoreRetentionMapInvariant),
-            ("feed parser nested content", testFeedParserNestedContent),
-            ("feed URL safety policy", testFeedURLSafetyPolicy),
-            ("feed parser entities and external entity isolation", testFeedParserEntitiesAndExternalEntityIsolation),
-            ("feed store identity and update semantics", testFeedStoreIdentityAndUpdateSemantics),
-            ("feed announcement Rule2 and prediction selection", testFeedAnnouncementRule2AndPredictionSelection),
-            ("feed notification injected submission", testFeedNotificationInjectedSubmission),
-            ("feed HTTP transport status and limits", testFeedHTTPTransportStatusAndLimits),
-            ("feed HTTP transport redirect and timeout", testFeedHTTPTransportRedirectAndTimeout),
-            ("feed service validators generation and notification dedupe", testFeedServiceValidatorsGenerationAndNotificationDedupe)
-            ,("feed continuation rejects unrelated update", testFeedContinuationRejectsUnrelatedUpdate)
         ]
 
         var failures = 0
@@ -185,21 +80,7 @@ struct CodexUsageStatusTests {
             failures += 1
             print("FAIL login lifecycle shutdown: \(error)")
         }
-        do {
-            try await testGitExecutionBoundary()
-            print("PASS git execution boundary")
-        } catch {
-            failures += 1
-            print("FAIL git execution boundary: \(error)")
-        }
-        do {
-            try await testGitMutationConfigurationSources()
-            print("PASS git mutation configuration sources")
-        } catch {
-            failures += 1
-            print("FAIL git mutation configuration sources: \(error)")
-        }
-        print("\(tests.count + 2 - failures)/\(tests.count + 2) tests passed")
+        print("\(tests.count - failures)/\(tests.count) tests passed")
         if failures > 0 { exit(1) }
     }
 
@@ -1406,132 +1287,48 @@ struct CodexUsageStatusTests {
         try expect(!AppUpdateReleasePolicy.isOfficialReleaseURL(URL(string: "https://:secret@github.com/SaiHoninbo/CodexUsageStatus/releases/tag/v2.5.0")!), "password-bearing release URL is rejected")
         try expect(!AppUpdateReleasePolicy.isOfficialReleaseURL(URL(string: "https://github.com/SaiHoninbo/CodexUsageStatus/releases/../evil")!), "release URL path traversal is rejected")
         try expect(!AppUpdateReleasePolicy.isOfficialReleaseURL(URL(string: "https://github.com/SaiHoninbo/CodexUsageStatus/releases/%2e%2e/evil")!), "encoded release URL path traversal is rejected")
+        try expect(AppUpdateReleasePolicy.isOfficialAssetURL(URL(string: "https://github.com/SaiHoninbo/CodexUsageStatus/releases/download/v2.5.0/CodexUsageStatus.app.zip")!), "official app asset URL is allowed")
+        try expect(!AppUpdateReleasePolicy.isOfficialAssetURL(URL(string: "https://objects.githubusercontent.com/github-production-release-asset/CodexUsageStatus.app.zip")!), "untrusted asset host is rejected")
+        try expect(!AppUpdateReleasePolicy.isOfficialAssetURL(URL(string: "https://github.com/SaiHoninbo/CodexUsageStatus/releases/download/v2.5.0/other.zip")!), "unrelated asset is rejected")
     }
 
-    private static func testGitWorkspacePolicies() throws {
-        let payload = "# branch.oid abcdef123\0# branch.head main\0# branch.upstream origin/main\0# branch.ab +2 -1\01 .M N... 100644 100644 100644 abc def file.swift\0? .env\0"
-        let parsed = GitStatusPorcelainParser.parse(Data(payload.utf8))
-        try expect(parsed.branch == "main", "branch parses")
-        try expect(parsed.ahead == 2 && parsed.behind == 1, "ahead/behind parses")
-        try expect(parsed.changes.contains { $0.path == "file.swift" && $0.isUnstaged }, "modified path parses")
-        try expect(parsed.changes.contains { $0.path == ".env" && $0.isSensitive }, "sensitive path parses")
-
-        let commit = GitCommitPolicy.arguments(message: "safe change", paths: ["file.swift"])
-        try expect(commit?.contains("--only") == true, "commit isolates selected paths")
-        try expect(commit?.suffix(1).first == "file.swift", "commit uses explicit pathspec")
-        try expect(GitCommitPolicy.arguments(message: " ", paths: ["file.swift"]) == nil, "empty message rejected")
-        try expect(GitCommitPolicy.arguments(message: "safe", paths: ["../secret"]) == nil, "unsafe path rejected")
-        try expect(GitCommitPolicy.arguments(message: "safe", paths: ["*.swift"]) == nil, "wildcard pathspec rejected")
-        try expect(GitCommitPolicy.arguments(message: "safe", paths: [":(glob)**/*.swift"]) == nil, "magic pathspec rejected")
-        try expect(GitCommitPolicy.arguments(message: "safe", paths: [":/rooted.swift"]) == nil, "root pathspec rejected")
-
-        let guarded = GitExecutionPolicy.invocationArguments(["diff", "--", "file.swift"])
-        try expect(guarded.contains("core.fsmonitor=false"), "git execution disables fsmonitor config")
-        try expect(guarded.contains("diff.external="), "git execution disables external diff config")
-        try expect(GitExecutionPolicy.environment["GIT_CONFIG_GLOBAL"] == "/dev/null", "git execution isolates global config")
-
-        let identity = GitWorkspaceIdentity(repositoryRoot: "/repo", gitDirectory: "/repo/.git", branch: "main", head: "abc", remote: "origin", upstream: "origin/main", remoteFingerprint: "test-remote")
-        try expect(GitPushPolicy.arguments(identity: identity) == ["push", "origin", "HEAD:refs/heads/main"], "push uses explicit refspec")
-        try expect(GitPushPolicy.isSafeRemoteURL("https://github.com/example/repo.git"), "https remote is allowed")
-        try expect(GitPushPolicy.isSafeRemoteURL("git@example.com:repo.git"), "ssh scp remote is allowed")
-        try expect(!GitPushPolicy.isSafeRemoteURL("ext::sh -c whoami"), "ext helper remote is rejected")
-        try expect(!GitPushPolicy.isSafeRemoteURL("file:///tmp/repo"), "file remote is rejected")
-        try expect(!GitPushPolicy.isSafeRemoteURL("https://token@example.com/repo.git"), "credential-bearing remote is rejected")
-        try expect(!GitPushPolicy.isSafeRemoteURL("https://github.com/example/repo.git\n--upload-pack=evil"), "newline remote is rejected")
-        try expect(GitWorkspaceSensitivity.isSensitive(path: "credentials/token.pem"), "credential extension is sensitive")
-        try expect(!GitWorkspaceSensitivity.isSensitive(path: "Sources/App.swift"), "normal source is not sensitive")
-    }
-
-    /// Exercises the exact commit contract against a disposable repository:
-    /// an already-staged path must remain staged when a different modified
-    /// path is committed with `--only`.
-    private static func testGitSelectedCommitIsolation() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("codex-git-commit-isolation-\(UUID().uuidString)", isDirectory: true)
+    private static func testRetiredFeatureCleanup() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("codex-retired-cleanup-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        _ = try runGit(["init", "-q"], at: root)
-        _ = try runGit(["config", "user.name", "Codex Test"], at: root)
-        _ = try runGit(["config", "user.email", "codex-test@example.invalid"], at: root)
-        try Data("a0\n".utf8).write(to: root.appendingPathComponent("A.swift"))
-        try Data("b0\n".utf8).write(to: root.appendingPathComponent("B.swift"))
-        _ = try runGit(["add", "--", "A.swift", "B.swift"], at: root)
-        _ = try runGit(["commit", "-q", "-m", "baseline"], at: root)
+        let appDirectory = root.appendingPathComponent("com.openai.codex-usage-status", isDirectory: true)
+        try FileManager.default.createDirectory(at: appDirectory, withIntermediateDirectories: true)
+        let source = appDirectory.appendingPathComponent("feed-tracking.json")
+        let bytes = Data("{\"legacy\":true}\n".utf8)
+        try bytes.write(to: source)
+        let suite = "CodexUsageStatusTests.retired.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: "feed.enabled")
+        defaults.set("https://example.invalid/feed", forKey: "feed.url")
+        defaults.set(3600, forKey: "feed.cadence")
 
-        try Data("a1\n".utf8).write(to: root.appendingPathComponent("A.swift"))
-        try Data("b1\n".utf8).write(to: root.appendingPathComponent("B.swift"))
-        _ = try runGit(["add", "--", "A.swift"], at: root)
-        guard let arguments = GitCommitPolicy.arguments(message: "selected B", paths: ["B.swift"]) else {
-            throw HarnessError.unwrap("selected commit arguments")
-        }
-        _ = try runGit(arguments, at: root)
-
-        let committed = try runGit(["show", "--format=", "--name-only", "HEAD"], at: root)
-        try expect(committed.contains("B.swift"), "selected modified path must be committed")
-        try expect(!committed.contains("A.swift"), "pre-existing staged path must not be committed")
-        let status = try runGit(["status", "--short"], at: root)
-        try expect(status.split(separator: "\n").contains { $0.hasSuffix("A.swift") }, "pre-existing staged path remains staged")
+        let now = Date(timeIntervalSince1970: 1_756_000_000)
+        try expect(
+            RetiredFeatureCleanup.quarantineFeedStore(
+                fileManager: .default,
+                applicationSupportDirectory: root,
+                now: now
+            ),
+            "legacy feed store is moved to quarantine"
+        )
+        try expect(!FileManager.default.fileExists(atPath: source.path), "legacy feed source is no longer active")
+        let quarantine = appDirectory.appendingPathComponent("retired/feed", isDirectory: true)
+        let entries = try FileManager.default.contentsOfDirectory(at: quarantine, includingPropertiesForKeys: nil)
+        try expect(entries.count == 1, "quarantine contains one archived feed file")
+        let archivedBytes = try Data(contentsOf: entries[0])
+        try expect(archivedBytes == bytes, "quarantine preserves raw feed bytes")
+        let mode = try FileManager.default.attributesOfItem(atPath: entries[0].path)[.posixPermissions] as? NSNumber
+        try expect(mode?.intValue == 0o600, "quarantine file is owner-only")
+        defaults.removeObject(forKey: "feed.enabled")
+        defaults.removeObject(forKey: "feed.url")
+        defaults.removeObject(forKey: "feed.cadence")
     }
 
-    /// Verifies the selected-untracked intent-to-add flow and the sensitive
-    /// diff boundary used by the service before any raw preview is rendered.
-    private static func testGitUntrackedCommitAndSensitiveBoundaries() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("codex-git-untracked-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        _ = try runGit(["init", "-q"], at: root)
-        _ = try runGit(["config", "user.name", "Codex Test"], at: root)
-        _ = try runGit(["config", "user.email", "codex-test@example.invalid"], at: root)
-        try Data("tracked\n".utf8).write(to: root.appendingPathComponent("Tracked.swift"))
-        _ = try runGit(["add", "--", "Tracked.swift"], at: root)
-        _ = try runGit(["commit", "-q", "-m", "baseline"], at: root)
-        try Data("staged\n".utf8).write(to: root.appendingPathComponent("Tracked.swift"))
-        _ = try runGit(["add", "--", "Tracked.swift"], at: root)
-        try Data("new\n".utf8).write(to: root.appendingPathComponent("New.swift"))
-        _ = try runGit(["add", "--intent-to-add", "--", "New.swift"], at: root)
-        guard let arguments = GitCommitPolicy.arguments(message: "selected new", paths: ["New.swift"]) else {
-            throw HarnessError.unwrap("untracked commit arguments")
-        }
-        _ = try runGit(arguments, at: root)
-        let committed = try runGit(["show", "--format=", "--name-only", "HEAD"], at: root)
-        try expect(committed.contains("New.swift"), "selected untracked path must be committed")
-        try expect(!committed.contains("Tracked.swift"), "unrelated staged path must remain outside commit")
-        let status = try runGit(["status", "--short"], at: root)
-        try expect(status.split(separator: "\n").contains { $0.hasSuffix("Tracked.swift") }, "unrelated staged path remains staged")
-
-        for sensitive in [".env", "auth.json", "accounts/profile.json", "keys/private.pem", "token-activity.json"] {
-            try expect(GitWorkspaceSensitivity.isSensitive(path: sensitive), "sensitive path must be suppressed: \(sensitive)")
-        }
-        try expect(!GitWorkspaceSensitivity.isSensitive(path: "Sources/Feature.swift"), "normal path remains previewable")
-    }
-
-    private static func testGitPushIdentityFreeze() throws {
-        let base = GitWorkspaceIdentity(repositoryRoot: "/repo", gitDirectory: "/repo/.git", branch: "main", head: "abc", remote: "origin", upstream: "origin/main", remoteFingerprint: "fingerprint")
-        try expect(GitPushPolicy.arguments(identity: base) == ["push", "origin", "HEAD:refs/heads/main"], "push uses frozen explicit refspec")
-        let changedHead = GitWorkspaceIdentity(repositoryRoot: base.repositoryRoot, gitDirectory: base.gitDirectory, branch: base.branch, head: "def", remote: base.remote, upstream: base.upstream, remoteFingerprint: base.remoteFingerprint)
-        try expect(changedHead != base, "HEAD drift must invalidate frozen identity")
-        let changedRemote = GitWorkspaceIdentity(repositoryRoot: base.repositoryRoot, gitDirectory: base.gitDirectory, branch: base.branch, head: base.head, remote: base.remote, upstream: base.upstream, remoteFingerprint: "other")
-        try expect(changedRemote != base, "remote drift must invalidate frozen identity")
-        let missingFingerprint = GitWorkspaceIdentity(repositoryRoot: base.repositoryRoot, gitDirectory: base.gitDirectory, branch: base.branch, head: base.head, remote: base.remote, upstream: base.upstream, remoteFingerprint: nil)
-        try expect(GitPushPolicy.arguments(identity: missingFingerprint) == nil, "missing remote identity must fail closed")
-    }
-
-    private static func runGit(_ arguments: [String], at root: URL) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = arguments
-        process.currentDirectoryURL = root
-        process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "GIT_TERMINAL_PROMPT": "0"]
-        let output = Pipe()
-        let error = Pipe()
-        process.standardOutput = output
-        process.standardError = error
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw HarnessError.assertion("git fixture command failed: \(arguments.joined(separator: " "))")
-        }
-        return String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-    }
 
     private static func runTool(_ executable: String, _ arguments: [String]) throws -> String {
         let process = Process()
@@ -1556,7 +1353,7 @@ struct CodexUsageStatusTests {
         try expect(actions.contains(.openCodex) && actions.contains(.resetPosition), "Codex actions are present")
         try expect(actions.contains(.hudScale), "HUD scale action is present")
         try expect(actions.contains(.paste) && actions.contains(.pasteAndSubmit), "clipboard actions are distinct")
-        try expect(actions.contains(.openGitWorkspace) && actions.contains(.refreshGitWorkspace), "git actions are present")
+        try expect(!actions.contains(where: { $0.rawValue.lowercased().contains("git") }), "direct Git actions are retired")
         try expect(actions.contains(.currentAccount) && actions.contains(.allAccounts) && actions.contains(.manageAccounts), "account actions are present")
         try expect(actions.contains(.checkForUpdates) && actions.contains(.quit), "update and quit actions are present")
         try expect(HUDContextMenuPolicy.pasteActionsEnabled(isCodexFocused: true), "focused paste is enabled")
@@ -1566,11 +1363,11 @@ struct CodexUsageStatusTests {
 
     private static func testUsagePopoverTabsAndAppVersion() throws {
         try expect(
-            UsagePopoverTab.allCases.map(\.rawValue) == ["overview", "usage", "history", "accountGit", "announcements", "settings"],
-            "usage popover exposes stable content tabs"
+            UsagePopoverTab.allCases.map(\.rawValue) == ["overview", "history", "settings"],
+            "usage popover exposes the three product tabs"
         )
         try expect(UsagePopoverTab.settings.title == "設定", "settings has a dedicated tab")
-        try expect(UsagePopoverTab.accountGit.title == "帳號與 Git", "account and Git have a dedicated tab")
+        try expect(UsagePopoverTab.allCases.first == .overview, "popover defaults to overview")
         try expect(AppVersion.label == "v\(AppVersion.current)", "app version label is derived from bundle version")
     }
 
@@ -1711,14 +1508,9 @@ struct CodexUsageStatusTests {
             "credits add a balance section without changing quota row count"
         )
         try expectApproximately(
-            standard.panelSize(quotaRowCount: 2, includesCredits: true, hasAnnouncement: true).height,
-            391.2,
-            "announcement height composes with credits geometry"
-        )
-        try expectApproximately(
-            standard.panelSize(quotaRowCount: 2, includesCredits: false, hasAnnouncement: false).height,
+            standard.panelSize(quotaRowCount: 2, includesCredits: false).height,
             240,
-            "no credits and no announcement preserve canonical geometry"
+            "no credits preserve canonical geometry"
         )
         try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller2).panelSize, CGSize(width: 332.8, height: 192), "level 1 scales one layout")
         try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller4).panelSize, CGSize(width: 266.24, height: 153.6), "level 1 scales one layout")
@@ -1769,6 +1561,8 @@ struct CodexUsageStatusTests {
             tagName: "v2.5.0",
             name: "Codex Usage Status 2.5.0",
             releaseURL: URL(string: "https://example.com/release")!,
+            downloadURL: nil,
+            expectedSHA256: nil,
             notes: "",
             publishedAt: nil
         )
@@ -1890,136 +1684,6 @@ struct CodexUsageStatusTests {
         }
     }
 
-    private static func testGitExecutionBoundary() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("codex-git-security-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        _ = try runGit(["init", "-q"], at: root)
-        _ = try runGit(["config", "user.name", "Codex Test"], at: root)
-        _ = try runGit(["config", "user.email", "codex-test@example.invalid"], at: root)
-        let source = root.appendingPathComponent("file.txt")
-        try Data("baseline\n".utf8).write(to: source)
-        _ = try runGit(["add", "--", "file.txt"], at: root)
-        _ = try runGit(["commit", "-q", "-m", "baseline"], at: root)
-
-        let marker = root.appendingPathComponent("marker")
-        let malicious = root.appendingPathComponent("malicious.sh")
-        try Data("#!/bin/sh\ntouch \"\(marker.path)\"\nexit 0\n".utf8).write(to: malicious)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: malicious.path)
-        _ = try runGit(["config", "core.fsmonitor", malicious.path], at: root)
-        _ = try runGit(["config", "diff.evil.textconv", malicious.path], at: root)
-        _ = try runGit(["config", "filter.evil.clean", malicious.path], at: root)
-        _ = try runGit(["config", "commit.gpgsign", "yes"], at: root)
-        _ = try runGit(["config", "url.https://evil.example/.pushInsteadOf", "https://github.com/"], at: root)
-        try Data("*.txt diff=evil\n".utf8).write(to: root.appendingPathComponent(".gitattributes"))
-        try Data("changed\n".utf8).write(to: source)
-
-        let service = GitWorkspaceService()
-        _ = try await service.readStatus(at: root)
-        _ = try await service.readDiff(at: root, path: "file.txt")
-        try expect(!FileManager.default.fileExists(atPath: marker.path), "status/diff never execute fsmonitor or textconv")
-
-        let hook = root.appendingPathComponent(".git/hooks/pre-commit")
-        try Data("#!/bin/sh\ntouch \"\(marker.path)\"\nexit 1\n".utf8).write(to: hook)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
-        let snapshot = try await service.readStatus(at: root)
-        do {
-            _ = try await service.commit(at: root, snapshot: snapshot, paths: ["file.txt"], message: "should reject unsafe config")
-            throw HarnessError.assertion("unsafe Git mutation unexpectedly succeeded")
-        } catch let error as GitCommandError {
-            if case .failed = error { } else { throw error }
-        }
-        try expect(!FileManager.default.fileExists(atPath: marker.path), "unsafe hook/config is rejected before commit")
-    }
-
-    /// Local include files and per-worktree config are repository-controlled
-    /// inputs too. Mutation must fail closed when either source enables a
-    /// filter that could execute during staging/commit.
-    private static func testGitMutationConfigurationSources() async throws {
-        let includeRoot = FileManager.default.temporaryDirectory.appendingPathComponent("codex-git-include-config-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: includeRoot) }
-        try FileManager.default.createDirectory(at: includeRoot, withIntermediateDirectories: true)
-        _ = try runGit(["init", "-q"], at: includeRoot)
-        _ = try runGit(["config", "user.name", "Codex Test"], at: includeRoot)
-        _ = try runGit(["config", "user.email", "codex-test@example.invalid"], at: includeRoot)
-        let includeSource = includeRoot.appendingPathComponent("file.txt")
-        try Data("baseline\n".utf8).write(to: includeSource)
-        _ = try runGit(["add", "--", "file.txt"], at: includeRoot)
-        _ = try runGit(["commit", "-q", "-m", "baseline"], at: includeRoot)
-        let includeFile = includeRoot.appendingPathComponent("included-config")
-        let includeMarker = includeRoot.appendingPathComponent("include-marker")
-        let includeFilter = includeRoot.appendingPathComponent("include-filter.sh")
-        try Data("#!/bin/sh\ntouch \"\(includeMarker.path)\"\ncat\n".utf8).write(to: includeFilter)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: includeFilter.path)
-        try Data("[filter \"included\"]\n\tclean = \(includeFilter.path)\n".utf8).write(to: includeFile)
-        _ = try runGit(["config", "--local", "include.path", includeFile.path], at: includeRoot)
-        try Data("*.txt filter=included\n".utf8).write(to: includeRoot.appendingPathComponent(".gitattributes"))
-        try Data("changed\n".utf8).write(to: includeSource)
-
-        let service = GitWorkspaceService()
-        let includeSnapshot = try await service.readStatus(at: includeRoot)
-        do {
-            _ = try await service.commit(at: includeRoot, snapshot: includeSnapshot, paths: ["file.txt"], message: "reject included filter")
-            throw HarnessError.assertion("included Git filter unexpectedly allowed mutation")
-        } catch let error as GitCommandError {
-            if case .failed = error { } else { throw error }
-        }
-        try expect(!FileManager.default.fileExists(atPath: includeMarker.path), "included Git filter is rejected before commit")
-
-        let worktreeRoot = FileManager.default.temporaryDirectory.appendingPathComponent("codex-git-worktree-config-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: worktreeRoot) }
-        try FileManager.default.createDirectory(at: worktreeRoot, withIntermediateDirectories: true)
-        _ = try runGit(["init", "-q"], at: worktreeRoot)
-        _ = try runGit(["config", "user.name", "Codex Test"], at: worktreeRoot)
-        _ = try runGit(["config", "user.email", "codex-test@example.invalid"], at: worktreeRoot)
-        let worktreeSource = worktreeRoot.appendingPathComponent("file.txt")
-        try Data("baseline\n".utf8).write(to: worktreeSource)
-        _ = try runGit(["add", "--", "file.txt"], at: worktreeRoot)
-        _ = try runGit(["commit", "-q", "-m", "baseline"], at: worktreeRoot)
-        let worktreeMarker = worktreeRoot.appendingPathComponent("worktree-marker")
-        let worktreeFilter = worktreeRoot.appendingPathComponent("worktree-filter.sh")
-        try Data("#!/bin/sh\ntouch \"\(worktreeMarker.path)\"\ncat\n".utf8).write(to: worktreeFilter)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: worktreeFilter.path)
-        _ = try runGit(["config", "extensions.worktreeConfig", "true"], at: worktreeRoot)
-        _ = try runGit(["config", "--worktree", "filter.worktree.clean", worktreeFilter.path], at: worktreeRoot)
-        try Data("*.txt filter=worktree\n".utf8).write(to: worktreeRoot.appendingPathComponent(".gitattributes"))
-        try Data("changed\n".utf8).write(to: worktreeSource)
-
-        let worktreeSnapshot = try await service.readStatus(at: worktreeRoot)
-        do {
-            _ = try await service.commit(at: worktreeRoot, snapshot: worktreeSnapshot, paths: ["file.txt"], message: "reject worktree filter")
-            throw HarnessError.assertion("per-worktree Git filter unexpectedly allowed mutation")
-        } catch let error as GitCommandError {
-            if case .failed = error { } else { throw error }
-        }
-        try expect(!FileManager.default.fileExists(atPath: worktreeMarker.path), "per-worktree Git filter is rejected before commit")
-
-        let askpassRoot = FileManager.default.temporaryDirectory.appendingPathComponent("codex-git-askpass-config-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: askpassRoot) }
-        try FileManager.default.createDirectory(at: askpassRoot, withIntermediateDirectories: true)
-        _ = try runGit(["init", "-q"], at: askpassRoot)
-        _ = try runGit(["config", "user.name", "Codex Test"], at: askpassRoot)
-        _ = try runGit(["config", "user.email", "codex-test@example.invalid"], at: askpassRoot)
-        let askpassSource = askpassRoot.appendingPathComponent("file.txt")
-        try Data("baseline\n".utf8).write(to: askpassSource)
-        _ = try runGit(["add", "--", "file.txt"], at: askpassRoot)
-        _ = try runGit(["commit", "-q", "-m", "baseline"], at: askpassRoot)
-        let askpassMarker = askpassRoot.appendingPathComponent("askpass-marker")
-        let askpassScript = askpassRoot.appendingPathComponent("askpass.sh")
-        try Data("#!/bin/sh\ntouch \"\(askpassMarker.path)\"\nexit 0\n".utf8).write(to: askpassScript)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: askpassScript.path)
-        _ = try runGit(["config", "core.askPass", askpassScript.path], at: askpassRoot)
-        try Data("changed\n".utf8).write(to: askpassSource)
-
-        let askpassSnapshot = try await service.readStatus(at: askpassRoot)
-        do {
-            _ = try await service.commit(at: askpassRoot, snapshot: askpassSnapshot, paths: ["file.txt"], message: "reject askpass helper")
-            throw HarnessError.assertion("core.askpass helper unexpectedly allowed mutation")
-        } catch let error as GitCommandError {
-            if case .failed = error { } else { throw error }
-        }
-        try expect(!FileManager.default.fileExists(atPath: askpassMarker.path), "core.askpass helper is rejected before mutation")
-    }
 
     private static func testClipboardTemporaryOperationPolicy() throws {
         try expect(ClipboardTemporaryOperationPolicy.canStart(isOperationInFlight: false), "idle operation can start")
@@ -2041,307 +1705,6 @@ struct CodexUsageStatusTests {
         ), "new user clipboard is never overwritten")
     }
 
-    private static func testFeedPredictionTimezoneProvenance() throws {
-        let feedURL = URL(string: "https://example.com/feed")!
-        let post = FeedPost(id: "p", canonicalURL: nil, publishedAt: nil, updatedAt: nil, firstSeenAt: Date(timeIntervalSince1970: 1_725_000_000), title: "Reset window", plainTextSnippet: "Reset today 14:00-15:00 PST", feedURL: feedURL)
-        var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        let prediction = ResetPredictionPolicy.predict(post: post, now: Date(timeIntervalSince1970: 1_725_000_000), systemTimeZone: TimeZone(secondsFromGMT: 0)!, calendar: calendar)
-        try expect(prediction?.interpretedTimeZoneLabel == "PST", "PST label is retained")
-        try expect(prediction?.interpretedTimeZoneIdentifier == "GMT-0800", "PST identifier is retained")
-        try expect(prediction?.sourceURL == nil, "missing source URL remains optional")
-    }
-
-    private static func testFeedAnnouncementGrouping() throws {
-        let feedURL = URL(string: "https://example.com/feed")!
-        let now = Date(timeIntervalSince1970: 1_725_000_000)
-        let p1 = FeedPost(id: "a", canonicalURL: nil, publishedAt: now, updatedAt: nil, firstSeenAt: now, title: "Reset", plainTextSnippet: "Reset today 14:00-15:00 PST", feedURL: feedURL)
-        let p2 = FeedPost(id: "b", canonicalURL: nil, publishedAt: now.addingTimeInterval(3600), updatedAt: nil, firstSeenAt: now.addingTimeInterval(3600), title: "Update", plainTextSnippet: "Update: moved to tomorrow 14:00-15:00 PST", feedURL: feedURL)
-        var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        let predictions = [p1, p2].compactMap { post in ResetPredictionPolicy.predict(post: post, now: now, systemTimeZone: TimeZone(secondsFromGMT: 0)!, calendar: calendar).map { (post.id, $0) } }.reduce(into: [:]) { $0[$1.0] = $1.1 }
-        let events = FeedAnnouncementPolicy.events(posts: [p1, p2], predictions: predictions)
-        try expect(events.count == 1, "continuation posts stay in one event")
-        try expect(events.first?.id == "a", "root post remains event identity")
-        try expect(events.first?.hasConflictingPredictions == true, "moved prediction marks conflict")
-    }
-
-    private static func testFeedStoreRetentionMapInvariant() throws {
-        let url = URL(fileURLWithPath: "/private/tmp/feed-test-\(UUID().uuidString).json")
-        let store = FeedTrackingStore(fileURL: url)
-        let feedURL = URL(string: "https://example.com/feed")!
-        let post = FeedPost(id: "p", canonicalURL: nil, publishedAt: Date(), updatedAt: nil, firstSeenAt: Date(), title: "Reset", plainTextSnippet: "Reset", feedURL: feedURL)
-        _ = store.upsert(post: post, prediction: nil); store.prune(now: Date())
-        try expect(Set(store.envelope.predictionsByPostID.keys).isSubset(of: Set(store.envelope.posts.map(\.id))), "prediction map keys stay within posts")
-    }
-
-    private static func testFeedParserNestedContent() throws {
-        let url = URL(string: "https://example.com/feed")!
-        let xml = "<rss><channel><title>Feed</title><item><guid>x</guid><title>Reset</title><description><![CDATA[<p>Reset today 14:00-15:00 PST</p>]]></description></item></channel></rss>"
-        let parsed = try FeedParser.parse(data: Data(xml.utf8), feedURL: url, firstSeenAt: Date(timeIntervalSince1970: 1))
-        try expect(parsed.posts.first?.plainTextSnippet.contains("Reset today") == true, "nested CDATA content is preserved")
-    }
-
-    private static func testFeedURLSafetyPolicy() throws {
-        let valid = URL(string: "https://example.com/reset.xml")!
-        if case .success(let returned) = FeedURLPolicy.validate(valid) {
-            try expect(returned == valid, "public HTTPS feed is accepted")
-        } else {
-            throw HarnessError.assertion("public HTTPS feed should be accepted")
-        }
-
-        let cases: [(String, FeedURLPolicyError, String)] = [
-            ("http://example.com/feed", .httpsRequired, "HTTP is rejected"),
-            ("https://user:secret@example.com/feed", .userinfoNotAllowed, "URL userinfo is rejected"),
-            ("https://localhost/feed", .privateAddressNotAllowed, "localhost is rejected"),
-            ("https://127.0.0.1/feed", .privateAddressNotAllowed, "IPv4 loopback is rejected"),
-            ("https://10.1.2.3/feed", .privateAddressNotAllowed, "RFC1918 10/8 is rejected"),
-            ("https://172.20.1.4/feed", .privateAddressNotAllowed, "RFC1918 172.16/12 is rejected"),
-            ("https://192.168.1.4/feed", .privateAddressNotAllowed, "RFC1918 192.168/16 is rejected"),
-            ("https://169.254.1.2/feed", .privateAddressNotAllowed, "IPv4 link-local is rejected"),
-            ("https://[::1]/feed", .privateAddressNotAllowed, "IPv6 loopback is rejected"),
-            ("https://[fe80::1]/feed", .privateAddressNotAllowed, "IPv6 link-local is rejected"),
-            ("https://[fc00::1]/feed", .privateAddressNotAllowed, "IPv6 unique-local is rejected"),
-            ("https://[::ffff:127.0.0.1]/feed", .privateAddressNotAllowed, "IPv4-mapped IPv6 loopback is rejected")
-        ]
-        for (raw, expected, message) in cases {
-            guard let url = URL(string: raw) else { throw HarnessError.assertion("fixture URL parses: \(raw)") }
-            guard case .failure(let error) = FeedURLPolicy.validate(url) else { throw HarnessError.assertion(message) }
-            try expect(error == expected, message)
-        }
-        try expect(FeedHTTPTransport.maxBodyBytes == 2 * 1024 * 1024, "transport enforces 2 MiB body limit")
-        try expect(FeedHTTPTransport.timeout == 20, "transport uses 20 second timeout")
-    }
-
-    private static func testFeedParserEntitiesAndExternalEntityIsolation() throws {
-        let normalized = FeedParser.plainText("<p>A &amp; B &#39; &#x2F; &apos;</p>")
-        try expect(normalized == "A & B ' / '", "HTML and numeric entities become plain text")
-
-        let url = URL(string: "https://example.com/feed")!
-        let malicious = "<!DOCTYPE rss [<!ENTITY leaked SYSTEM \"file:///etc/passwd\">]><rss><channel><item><guid>external</guid><title>Reset</title><description>&leaked;</description></item></channel></rss>"
-        let parsed = try? FeedParser.parse(data: Data(malicious.utf8), feedURL: url, firstSeenAt: Date(timeIntervalSince1970: 1))
-        try expect(parsed == nil || !parsed!.posts.contains(where: { $0.plainTextSnippet.contains("root:") }), "external entity content is never loaded")
-    }
-
-    private static func testFeedStoreIdentityAndUpdateSemantics() throws {
-        let base = FileManager.default.temporaryDirectory.appendingPathComponent("codex-feed-store-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: base) }
-        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        let fileURL = base.appendingPathComponent("feed.json")
-        let urlA = URL(string: "https://example.com/a.xml")!
-        let urlB = URL(string: "https://example.com/b.xml")!
-        let firstSeen = Date(timeIntervalSince1970: 1_725_000_000)
-        let published = Date(timeIntervalSince1970: 1_725_000_100)
-        let store = FeedTrackingStore(fileURL: fileURL)
-        try expect(store.configure(feedURL: urlA), "initial feed URL is configured")
-        let post = FeedPost(id: "guid-1", canonicalURL: URL(string: "https://example.com/post/1"), publishedAt: published, updatedAt: nil, firstSeenAt: firstSeen, title: "Reset window", plainTextSnippet: "Reset today", feedURL: urlA)
-        let prediction = ResetPrediction(windowStart: published, windowEnd: published.addingTimeInterval(3600), inferenceConfidence: .medium, corroboration: .unverified, reason: "Reset today", sourcePostID: post.id, sourceURL: post.canonicalURL, interpretedTimeZoneIdentifier: "UTC", interpretedTimeZoneLabel: "UTC", detectedAt: firstSeen)
-        try expect(store.upsert(post: post, prediction: prediction), "new post is inserted")
-        store.replaceMetadata(title: "A", link: urlA, etag: "abc", lastModified: "yesterday", successfulAt: published)
-        store.markNotified(postID: post.id)
-        try store.save()
-
-        let reloaded = FeedTrackingStore(fileURL: fileURL)
-        try expect(reloaded.envelope.configuredFeedURL == urlA, "configured URL round trips")
-        try expect(reloaded.envelope.predictionsByPostID[post.id] == prediction, "per-post prediction round trips")
-        try expect(reloaded.envelope.sentNotificationPostIDs.contains(post.id), "notification IDs round trip")
-        try expect(reloaded.envelope.etag == "abc" && reloaded.envelope.lastModified == "yesterday", "validators round trip")
-
-        let unchanged = FeedPost(id: post.id, canonicalURL: post.canonicalURL, publishedAt: published, updatedAt: nil, firstSeenAt: firstSeen.addingTimeInterval(999), title: "Reset window", plainTextSnippet: "Reset today", feedURL: urlA)
-        try expect(!reloaded.upsert(post: unchanged, prediction: nil), "same effective content is not replaced")
-        try expect(reloaded.envelope.posts.first?.firstSeenAt == firstSeen, "same-ID firstSeenAt remains stable")
-        try expect(reloaded.envelope.predictionsByPostID[post.id] == prediction, "same-content post is not reanalyzed")
-
-        let updated = FeedPost(id: post.id, canonicalURL: post.canonicalURL, publishedAt: published, updatedAt: published.addingTimeInterval(60), firstSeenAt: firstSeen.addingTimeInterval(999), title: "Reset window updated", plainTextSnippet: "Reset tomorrow", feedURL: urlA)
-        let updatedPrediction = ResetPrediction(windowStart: published.addingTimeInterval(86400), windowEnd: published.addingTimeInterval(90000), inferenceConfidence: .medium, corroboration: .unverified, reason: "Reset tomorrow", sourcePostID: updated.id, sourceURL: updated.canonicalURL, interpretedTimeZoneIdentifier: "UTC", interpretedTimeZoneLabel: "UTC", detectedAt: updated.updatedAt!)
-        try expect(reloaded.upsert(post: updated, prediction: updatedPrediction), "changed same-ID content is replaced")
-        try expect(reloaded.envelope.posts.first?.firstSeenAt == firstSeen, "updated same-ID post preserves firstSeenAt")
-        try expect(reloaded.envelope.predictionsByPostID[post.id] == updatedPrediction, "updated same-ID post replaces prediction")
-
-        try expect(reloaded.configure(feedURL: urlB), "changing feed URL resets feed state")
-        try expect(reloaded.envelope.configuredFeedURL == urlB && reloaded.envelope.posts.isEmpty, "feed URL change clears posts")
-        try expect(reloaded.envelope.predictionsByPostID.isEmpty && reloaded.envelope.sentNotificationPostIDs.isEmpty, "feed URL change clears prediction and notification state")
-        try expect(reloaded.envelope.etag == nil && reloaded.envelope.lastSuccessfulFetch == nil, "feed URL change clears validators and fetch timestamp")
-    }
-
-    private static func testFeedAnnouncementRule2AndPredictionSelection() throws {
-        let feedURL = URL(string: "https://example.com/feed")!
-        let now = Date(timeIntervalSince1970: 1_725_000_000)
-        func post(_ id: String, _ offset: TimeInterval, _ title: String = "Reset status") -> FeedPost {
-            let date = now.addingTimeInterval(offset)
-            return FeedPost(id: id, canonicalURL: nil, publishedAt: date, updatedAt: nil, firstSeenAt: date, title: title, plainTextSnippet: "Reset notice", feedURL: feedURL)
-        }
-        func prediction(_ post: FeedPost, _ startOffset: TimeInterval?, _ duration: TimeInterval = 3600) -> ResetPrediction {
-            let start = startOffset.map { now.addingTimeInterval($0) }
-            return ResetPrediction(windowStart: start, windowEnd: start.map { $0.addingTimeInterval(duration) }, inferenceConfidence: .medium, corroboration: .unverified, reason: "Reset notice", sourcePostID: post.id, sourceURL: nil, interpretedTimeZoneIdentifier: "UTC", interpretedTimeZoneLabel: "UTC", detectedAt: now)
-        }
-        let a = post("a", 0)
-        let b = post("b", 3600)
-        let c = post("c", 7200)
-        let aPrediction = prediction(a, 10 * 3600, 2 * 3600)
-        let bPrediction = prediction(b, 11.5 * 3600, 2 * 3600)
-        let cPrediction = prediction(c, 10.5 * 3600, 30 * 60)
-        let events = FeedAnnouncementPolicy.events(posts: [a, b, c], predictions: [a.id: aPrediction, b.id: bPrediction, c.id: cPrediction])
-        try expect(events.count == 2, "Rule2 does not use an aggregate union for transitive chaining")
-        let merged = try unwrap(events.first(where: { $0.id == a.id }), "merged Rule2 event")
-        try expect(merged.posts.map(\.id) == [a.id, b.id], "overlapping windows merge against current best-known window")
-        try expect(merged.bestKnownPrediction?.sourcePostID == b.id, "best-known prediction is the latest valid window")
-
-        let noTime = post("d", 10_800, "Update")
-        let noTimeText = FeedPost(id: noTime.id, canonicalURL: noTime.canonicalURL, publishedAt: noTime.publishedAt, updatedAt: noTime.updatedAt, firstSeenAt: noTime.firstSeenAt, title: "Update", plainTextSnippet: "still working on reset", feedURL: noTime.feedURL)
-        let selectionEvents = FeedAnnouncementPolicy.events(posts: [a, noTimeText], predictions: [a.id: aPrediction])
-        let selection = try unwrap(selectionEvents.first, "latest/best-known event")
-        try expect(selection.latestPrediction == nil, "latest prediction remains the latest post's own nil prediction")
-        try expect(selection.bestKnownPrediction?.sourcePostID == a.id, "best-known prediction keeps the latest valid window")
-        try expect(selection.latestActivityAt == noTimeText.effectiveActivityAt, "event activity follows latest post")
-        try expect(FeedAnnouncementPolicy.filter(events: selectionEvents, range: .day, now: now.addingTimeInterval(2 * 24 * 3600)).isEmpty, "announcement range filtering uses latest activity")
-    }
-
-    private static func testFeedNotificationInjectedSubmission() throws {
-        let feedURL = URL(string: "https://example.com/feed")!
-        let post = FeedPost(id: "notification", canonicalURL: nil, publishedAt: nil, updatedAt: nil, firstSeenAt: Date(), title: "Reset", plainTextSnippet: "Reset", feedURL: feedURL)
-        let successProbe = FeedNotificationSubmissionProbe(result: .success(()))
-        var success: Result<Void, Error>?
-        successProbe.send(post: post, prediction: nil, postCount: 1) { success = $0 }
-        try expect(successProbe.calls == 1, "injected sender receives one submission")
-        guard case .success? = success else { throw HarnessError.assertion("injected success reaches completion") }
-
-        let failureProbe = FeedNotificationSubmissionProbe(result: .failure(HarnessError.assertion("expected failure")))
-        var failure: Result<Void, Error>?
-        failureProbe.send(post: post, prediction: nil, postCount: 1) { failure = $0 }
-        guard case .failure? = failure else { throw HarnessError.assertion("injected failure reaches completion") }
-    }
-
-    private static func testFeedHTTPTransportStatusAndLimits() throws {
-        let url = URL(string: "https://example.com/feed")!
-        func fetch(_ transport: FeedHTTPTransport) -> Result<FeedHTTPResponse, Error> {
-            let semaphore = DispatchSemaphore(value: 0)
-            var result: Result<FeedHTTPResponse, Error>?
-            var request = URLRequest(url: url)
-            request.timeoutInterval = 2
-            _ = transport.fetch(request: request) { value in result = value; semaphore.signal() }
-            _ = semaphore.wait(timeout: .now() + 5)
-            return result ?? .failure(FeedTransportError.timeout)
-        }
-
-        FeedURLProtocolProbe.reset()
-        FeedURLProtocolProbe.statusCode = 304
-        FeedURLProtocolProbe.headers = ["ETag": "\"probe\"", "Last-Modified": "Mon, 31 Aug 2026 00:00:00 GMT"]
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [FeedURLProtocolProbe.self]
-        let notModified = fetch(FeedHTTPTransport(configuration: configuration, preflight: { _ in true }))
-        guard case .success(let response) = notModified else { throw HarnessError.assertion("304 is returned as a successful transport response") }
-        try expect(response.statusCode == 304, "304 is preserved as a terminal response")
-
-        for statusCode in [401, 403, 404, 429, 500, 503] {
-            FeedURLProtocolProbe.reset()
-            FeedURLProtocolProbe.statusCode = statusCode
-            let serverError = fetch(FeedHTTPTransport(configuration: configuration, preflight: { _ in true }))
-            guard case .failure(let error) = serverError else { throw HarnessError.assertion("HTTP \(statusCode) should fail") }
-            guard case .httpStatus(statusCode) = error as? FeedTransportError else { throw HarnessError.assertion("HTTP \(statusCode) maps to FeedTransportError.httpStatus") }
-        }
-
-        FeedURLProtocolProbe.reset()
-        FeedURLProtocolProbe.statusCode = 200
-        FeedURLProtocolProbe.headers = ["Content-Length": String(FeedHTTPTransport.maxBodyBytes + 1)]
-        let oversized = fetch(FeedHTTPTransport(configuration: configuration, preflight: { _ in true }))
-        guard case .failure(let error) = oversized else { throw HarnessError.assertion("oversized Content-Length should fail") }
-        guard case .bodyTooLarge = error as? FeedTransportError else { throw HarnessError.assertion("oversized response maps to bodyTooLarge") }
-
-        FeedURLProtocolProbe.reset()
-        FeedURLProtocolProbe.statusCode = 200
-        FeedURLProtocolProbe.body = Data(repeating: 0x61, count: FeedHTTPTransport.maxBodyBytes + 1)
-        let streamedOversized = fetch(FeedHTTPTransport(configuration: configuration, preflight: { _ in true }))
-        guard case .failure(let streamedError) = streamedOversized else { throw HarnessError.assertion("streamed oversized body should fail") }
-        guard case .bodyTooLarge = streamedError as? FeedTransportError else { throw HarnessError.assertion("streamed oversized body maps to bodyTooLarge") }
-
-        FeedURLProtocolProbe.reset()
-        let preflightRejected = fetch(FeedHTTPTransport(configuration: configuration, preflight: { _ in false }))
-        guard case .failure(let preflightError) = preflightRejected else { throw HarnessError.assertion("failed preflight should fail closed") }
-        guard case .dnsPreflightFailed = preflightError as? FeedTransportError else { throw HarnessError.assertion("failed preflight maps to dnsPreflightFailed") }
-    }
-
-    private static func testFeedHTTPTransportRedirectAndTimeout() throws {
-        let url = URL(string: "https://example.com/feed")!
-        func fetch() -> Result<FeedHTTPResponse, Error> {
-            let semaphore = DispatchSemaphore(value: 0)
-            var result: Result<FeedHTTPResponse, Error>?
-            let configuration = URLSessionConfiguration.ephemeral
-            configuration.protocolClasses = [FeedURLProtocolProbe.self]
-            let transport = FeedHTTPTransport(configuration: configuration, preflight: { _ in true })
-            _ = transport.fetch(request: URLRequest(url: url)) { value in result = value; semaphore.signal() }
-            _ = semaphore.wait(timeout: .now() + 5)
-            return result ?? .failure(FeedTransportError.timeout)
-        }
-
-        FeedURLProtocolProbe.reset()
-        FeedURLProtocolProbe.redirectURL = URL(string: "http://example.com/private")!
-        let redirect = fetch()
-        guard case .failure(let redirectError) = redirect else { throw HarnessError.assertion("unsafe redirect should fail") }
-        guard case .redirectRejected = redirectError as? FeedTransportError else { throw HarnessError.assertion("unsafe redirect maps to redirectRejected") }
-
-        FeedURLProtocolProbe.reset()
-        FeedURLProtocolProbe.failure = NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut)
-        let timeout = fetch()
-        guard case .failure(let timeoutError) = timeout else { throw HarnessError.assertion("timed out transport should fail") }
-        guard case .timeout = timeoutError as? FeedTransportError else { throw HarnessError.assertion("timed out URLSession maps to timeout") }
-    }
-
-    private static func testFeedServiceValidatorsGenerationAndNotificationDedupe() throws {
-        let base = FileManager.default.temporaryDirectory.appendingPathComponent("codex-feed-service-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: base) }
-        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        let store = FeedTrackingStore(fileURL: base.appendingPathComponent("feed.json"))
-        let feedURL = URL(string: "https://example.com/feed")!
-        let now = Date(timeIntervalSince1970: 1_725_000_000)
-        let transport = FeedDeferredTransport()
-        let notifications = FeedNotificationSubmissionProbe(result: .success(()))
-        let service = FeedTrackingService(store: store, transport: transport, now: { now }, systemTimeZone: TimeZone(secondsFromGMT: 0)!)
-        service.notificationService = notifications
-        service.notificationsAllowed = { true }
-        service.start(enabled: true, cadence: .manual, feedURL: feedURL)
-        try expect(transport.requests.count == 1, "service performs immediate configured fetch")
-
-        func response(title: String, statusCode: Int = 200, etag: String? = nil) -> FeedHTTPResponse {
-            let body = "<rss><channel><item><guid>stable-post</guid><title>\(title)</title><description>Reset today 14:00-15:00 PST</description></item></channel></rss>"
-            var headers: [AnyHashable: Any] = [:]
-            if let etag { headers["ETag"] = etag; headers["Last-Modified"] = "Mon, 31 Aug 2026 00:00:00 GMT" }
-            return FeedHTTPResponse(data: statusCode == 304 ? Data() : Data(body.utf8), statusCode: statusCode, headers: headers)
-        }
-
-        transport.complete(0, with: .success(response(title: "Baseline", etag: "one")))
-        try expect(store.envelope.etag == "one" && store.envelope.lastModified != nil, "service persists ETag and Last-Modified")
-
-        service.fetch()
-        try expect(transport.requests[1].value(forHTTPHeaderField: "If-None-Match") == "one", "next fetch sends persisted ETag")
-        try expect(transport.requests[1].value(forHTTPHeaderField: "If-Modified-Since") != nil, "next fetch sends persisted Last-Modified")
-        service.fetch()
-        try expect(transport.handles[1].cancelCount == 1, "new fetch cancels previous request")
-        transport.complete(1, with: .success(response(title: "Stale response", etag: "stale")))
-        transport.complete(2, with: .success(response(title: "Fresh response", etag: "two")))
-        try expect(store.envelope.posts.first?.title == "Fresh response", "stale generation cannot overwrite fresh response")
-        try expect(notifications.calls == 1, "changed post sends one notification")
-
-        service.fetch()
-        try expect(transport.requests[3].value(forHTTPHeaderField: "If-None-Match") == "two", "fresh validator is used after update")
-        transport.complete(3, with: .success(response(title: "ignored", statusCode: 304)))
-        try expect(service.state == .notModified && store.envelope.lastSuccessfulFetch != nil, "304 updates successful fetch state")
-
-        service.fetch()
-        transport.complete(4, with: .success(response(title: "Fresh response", etag: "two")))
-        try expect(notifications.calls == 1, "unchanged post does not enqueue duplicate notification")
-    }
-
-    private static func testFeedContinuationRejectsUnrelatedUpdate() throws {
-        let feedURL = URL(string: "https://example.com/feed")!
-        let now = Date(timeIntervalSince1970: 1_725_000_000)
-        let root = FeedPost(id: "root", canonicalURL: nil, publishedAt: now, updatedAt: nil, firstSeenAt: now, title: "Reset", plainTextSnippet: "Reset today 14:00-15:00 PST", feedURL: feedURL)
-        let unrelated = FeedPost(id: "unrelated", canonicalURL: nil, publishedAt: now.addingTimeInterval(3600), updatedAt: nil, firstSeenAt: now, title: "Update", plainTextSnippet: "landing page is live", feedURL: feedURL)
-        let calendar = Calendar(identifier: .gregorian)
-        let predictions = [root].reduce(into: [String: ResetPrediction]()) { result, post in
-            if let prediction = ResetPredictionPolicy.predict(post: post, now: now, systemTimeZone: .current, calendar: calendar) { result[post.id] = prediction }
-        }
-        let events = FeedAnnouncementPolicy.events(posts: [root, unrelated], predictions: predictions)
-        try expect(events.count == 2 && events.contains(where: { $0.id == root.id && $0.posts.map({ $0.id }) == [root.id] }), "unrelated continuation does not merge into reset event")
-    }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         guard condition() else { throw HarnessError.assertion(message) }

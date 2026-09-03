@@ -79,9 +79,10 @@ App 透過 stdio 介面連接本機 Codex App Server，不使用私有網路端�
 App 啟動時以及執行期間會定期檢查 GitHub 的 `latest release`。發現新版本時：
 
 1. Popover 顯示更新狀態，並可能對該版本顯示一次通知。
-2. 由使用者按下「開啟 Release」，在官方 GitHub Release 頁面檢視並手動下載。
+2. 按下「下載並驗證」取得完全相同的 `CodexUsageStatus.app.zip` asset。
+3. SHA-256（若 Release 有提供）與 strict nested code-signature 驗證通過後，按下「安裝並重新啟動」。
 
-App 不會自行下載、解壓、替換或重新啟動自己；安裝由使用者透過 Finder 手動完成。只有版本格式安全且連結是本 repository GitHub Releases 的 HTTPS 網址時，才會接受更新 metadata。
+安裝器使用 owner-only 暫存目錄，並以含 rollback backup 的原子替換更新 App；不會讀取或替換 Codex credentials、歷史、quota 或受管 profile。「開啟 Release」仍可用於人工檢視。
 
 ### 維護者發布規則
 
@@ -139,7 +140,7 @@ outputs/CodexUsageStatus.app.zip
 
 ### 更新檢查顯示沒有正式版本
 
-維護者必須先建立 GitHub Release，建議包含名稱完全一致的 `CodexUsageStatus.app.zip`；App 只會開啟官方 Release 頁面，不會自行下載 asset。Commit 或 source ZIP 都不算正式 Release。
+維護者必須先建立 GitHub Release，且包含名稱完全一致的 `CodexUsageStatus.app.zip`；App 會在提供安裝前驗證該 asset。Commit 或 source ZIP 都不算正式 Release。
 
 ### macOS 顯示無法打開 App
 
@@ -150,12 +151,9 @@ outputs/CodexUsageStatus.app.zip
 本專案採用 MIT License，詳見 [LICENSE](LICENSE)。
 
 安全與隱私邊界請參考 [SECURITY.md](SECURITY.md)。
-## 外部重置公告
+## 已退役的 Feed 與 Git surface
 
-App 可選擇追蹤使用者提供的 RSS／Atom Feed，將可能的重置時間以「僅供參考」
-公告顯示在 HUD 與「公告」分頁。用量與正式重置時間仍完全以 App Server 為準，
-Feed 推測不會覆寫 `UsageSnapshot` 或用量歷史；功能預設關閉，可手動或定期更新。
-
-本 App 不使用 X API、不讀取瀏覽器 Cookie，也不建立或管理 X token。完整 HTTPS
-Feed URL 會保存在 owner-only Application Support；若供應商將 credential 放在 URL
-query 中，該值會隨 URL 保存，但不會寫入 log、通知、錯誤訊息或 analytics。
+第三方 RSS／Atom 公告 subsystem 與直接 Git 工作區 client 已退役。既有 Feed
+tracking bytes 會在啟動時搬到 owner-only `retired/feed` quarantine，不會 decode
+或重新 serialize。HUD 上的 Commit／Push／Commit Push 仍只是送給 Codex 的 prompt
+shortcut，App 本身不會執行 Git 指令。

@@ -43,24 +43,17 @@ account identifiers and local paths before submitting.
 
 ## Maintainer release boundary
 
-The app's update checker reads latest-release metadata and opens the official
-GitHub Release page. It never downloads, extracts, executes, replaces, or
-relaunches an app bundle. Maintainers must publish release assets with a formal
+The app's update checker reads latest-release metadata, verifies the exact
+`CodexUsageStatus.app.zip` asset (published SHA-256 when present), extracts it
+into an owner-only staging directory, and runs strict nested code-signature
+verification before installation. The detached installer performs an atomic
+swap with rollback and never touches Codex credentials, quota, history, or
+managed profiles. Maintainers must publish release assets with a formal
 signing identity and inspect the ZIP inventory before distribution; assets must
 not include source archives, tests, credentials, token activity, history, or
 AppleDouble files.
-## User-configured Feed boundary
 
-Optional reset announcements fetch a user-configured third-party HTTPS RSS or
-Atom endpoint. Redirect hosts are revalidated, private/loopback/link-local
-addresses are rejected by an initial DNS preflight, XML external entities are
-disabled, and response bodies are capped at 2 MiB with a 20-second timeout.
-This is a preflight hostname policy; the URLSession transport does not claim
-connection-level DNS/IP pinning against DNS rebinding.
-
-Feed state is persisted in owner-only Application Support using atomic JSON
-writes and corruption quarantine. The full configured URL is retained because
-it is user configuration; query credentials, if present, are never emitted to
-logs, notifications, errors, or analytics. Feed content is untrusted plain
-text and is advisory only. It cannot change official quota state, reset times,
-history, or notification delegate ownership.
+The optional third-party Feed and direct Git client are retired. At launch,
+legacy Feed state is moved byte-for-byte into an owner-only quarantine and
+Feed-specific notification identifiers are removed. The cleanup never decodes
+the old payload, and quota, Turn, and updater notifications are unaffected.
