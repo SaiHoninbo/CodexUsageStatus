@@ -11,6 +11,7 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/JSONRPC.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HistoryStore.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/TokenActivityStore.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/HUDPresentation.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/AccountModels.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/ProfileStore.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/CodexCLIResolver.swift" \

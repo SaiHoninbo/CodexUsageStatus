@@ -6,8 +6,6 @@ import SwiftUI
 private enum FloatingHUDLayout {
     // C layout: both placements use one scalable panel geometry. Placement
     // changes the anchor only; it never creates a second size contract.
-    static let bottomRightSize = NSSize(width: 416, height: 240)
-    static let topRightSize = NSSize(width: 416, height: 240)
     // Sizes used by the previous shipped HUD builds. These are only used
     // while migrating persisted screen anchors; new anchors are size-agnostic.
     static let previousWideSize = NSSize(width: 360, height: 60)
@@ -249,11 +247,15 @@ final class FloatingHUDPanelController: NSObject {
             Task { @MainActor [weak self] in self?.requestVisibilityRefresh() }
         }
 
-        modelObservation = model.objectWillChange.sink { [weak self] _ in
-            // @Published emits before the value is assigned. Hop to the next
-            // main-actor turn so the HUD sees the new preference/state.
-            guard let self else { return }
-            self.requestGeometryRefresh()
+        // Geometry depends only on quota rows/Credits and profile resets. A
+        // narrow publisher keeps history, token-range, notification, login,
+        // and status-item publications from scheduling even the cheap resize
+        // path; visibility remains on the event-driven AX path plus fallback.
+        modelObservation = Publishers.Merge(
+            model.$snapshot.map { _ in () }.eraseToAnyPublisher(),
+            model.$currentProfileID.map { _ in () }.eraseToAnyPublisher()
+        ).sink { [weak self] _ in
+            self?.requestGeometryRefresh()
         }
 
         // Visibility/placement uses AX and CGWindowList, so it is deliberately
@@ -1339,6 +1341,82 @@ private struct HUDCreditsRow: View {
     }
 }
 
+private struct HUDTokenActivitySummaryView: View, Equatable {
+    let summaryMetrics: [TokenActivityMetric]?
+    let width: CGFloat
+    let height: CGFloat
+    let scaleFactor: CGFloat
+    let isStale: Bool
+
+    private var metrics: [TokenActivityMetric] {
+        summaryMetrics ?? TokenActivityPresentation.metrics(for: nil)
+    }
+
+    static func == (lhs: HUDTokenActivitySummaryView, rhs: HUDTokenActivitySummaryView) -> Bool {
+        lhs.summaryMetrics == rhs.summaryMetrics
+            && lhs.width == rhs.width
+            && lhs.height == rhs.height
+            && lhs.scaleFactor == rhs.scaleFactor
+            && lhs.isStale == rhs.isStale
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            metricRow(Array(metrics.prefix(3)))
+            Rectangle()
+                .fill(Color.black.opacity(0.12))
+                .frame(height: max(0.5, 0.7 * scaleFactor))
+            metricRow(Array(metrics.suffix(2)))
+        }
+        .padding(.horizontal, max(6, 8 * scaleFactor))
+        .frame(width: width, height: height)
+        .background(Color.white.opacity(0.34), in: RoundedRectangle(cornerRadius: max(7, height * 0.18), style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: max(7, height * 0.18), style: .continuous)
+                .stroke(isStale ? Color.orange.opacity(0.42) : Color.black.opacity(0.14), lineWidth: max(0.6, 0.8 * scaleFactor))
+        }
+        .opacity(isStale ? 0.88 : 1)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("帳號歷史摘要")
+        .accessibilityValue(metrics.map { "\($0.label) \($0.value)" }.joined(separator: "；") + (isStale ? "；資料較舊" : ""))
+        .help(isStale ? "帳號歷史摘要（資料較舊）" : "帳號歷史摘要")
+    }
+
+    private func metricRow(_ rowMetrics: [TokenActivityMetric]) -> some View {
+        HStack(spacing: 0) {
+            ForEach(Array(rowMetrics.enumerated()), id: \.offset) { index, metric in
+                if index > 0 {
+                    Rectangle()
+                        .fill(Color.black.opacity(0.12))
+                        .frame(width: max(0.5, 0.7 * scaleFactor))
+                        .padding(.vertical, max(4, 5 * scaleFactor))
+                }
+                metricCell(metric)
+            }
+        }
+    }
+
+    private func metricCell(_ metric: TokenActivityMetric) -> some View {
+        VStack(alignment: .leading, spacing: max(0.5, 1 * scaleFactor)) {
+            Text(metric.label)
+                .font(.system(size: max(7, 9 * scaleFactor), weight: .medium, design: .rounded))
+                .foregroundStyle(HUDColorPalette.secondaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.62)
+                .allowsTightening(true)
+            Text(metric.value)
+                .font(.system(size: max(10, 14 * scaleFactor), weight: .bold, design: .rounded))
+                .foregroundStyle(HUDColorPalette.primaryText)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.42)
+                .allowsTightening(true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, max(4, 7 * scaleFactor))
+    }
+}
+
 private struct HUDActionCard: View {
     fileprivate enum FillStyle {
         case neutral
@@ -1455,6 +1533,7 @@ private struct HUDActionCard: View {
         .onHover { isHovered = $0 }
         .help(helpText)
         .accessibilityLabel(accessibilityLabel)
+        .accessibilityHint(helpText)
     }
 }
 
@@ -1635,7 +1714,10 @@ private struct CodexFloatingHUDView: View {
     @State private var isDetailsHovered = false
     @State private var isPasteHovered = false
     @State private var isPasteAndSubmitHovered = false
-    @State private var isExecuteHovered = false
+    @State private var isContinueHovered = false
+    @State private var isFixUntilDoneHovered = false
+    @State private var isFullVerificationHovered = false
+    @State private var isCommitAndPushHovered = false
     @State private var isPasteAndSubmitInFlight = false
     @State private var isPromptShortcutInFlight = false
     @State private var trackedProfileID: UUID?
@@ -1831,6 +1913,15 @@ private struct CodexFloatingHUDView: View {
         let displayedCredits = displayedPresentation?.credits
         let shouldShowCredits = displayedCredits?.isDisplayable == true
         VStack(alignment: .leading, spacing: 0) {
+            HUDTokenActivitySummaryView(
+                summaryMetrics: model.hudTokenActivityMetrics,
+                width: metrics.contentWidth,
+                height: metrics.tokenSummaryHeight,
+                scaleFactor: metrics.factor,
+                isStale: model.hudTokenActivityIsStale
+            )
+            .equatable()
+            Color.clear.frame(height: metrics.tokenSummaryGap)
             hudHeader(metrics: metrics)
             Color.clear.frame(height: metrics.headerGap)
             quotaStack(width: metrics.contentWidth, height: metrics.quotaRowHeight, gap: metrics.quotaGap)
@@ -1846,6 +1937,8 @@ private struct CodexFloatingHUDView: View {
                 Color.clear.frame(height: metrics.sectionGap)
             }
             actionCardsRow(metrics: metrics)
+            Color.clear.frame(height: metrics.workflowActionGap)
+            workflowShortcutsRow(metrics: metrics)
         }
         .padding(metrics.outerPadding)
         .frame(width: panelSize.width, height: panelSize.height, alignment: .topLeading)
@@ -2039,9 +2132,33 @@ private struct CodexFloatingHUDView: View {
         HStack(spacing: metrics.actionSpacing) {
             pasteShortcutButton(metrics: metrics)
             pasteAndSubmitShortcutButton(metrics: metrics)
-            executeShortcutButton(metrics: metrics)
+            continueShortcutButton(metrics: metrics)
         }
         .frame(width: metrics.contentWidth, height: metrics.actionHeight, alignment: .leading)
+    }
+
+    private func workflowShortcutsRow(metrics: HUDMetrics) -> some View {
+        HStack(spacing: metrics.actionSpacing) {
+            workflowShortcutButton(
+                .fixUntilDone,
+                fillColor: HUDColorPalette.fixAction,
+                metrics: metrics,
+                isHovered: $isFixUntilDoneHovered
+            )
+            workflowShortcutButton(
+                .fullVerification,
+                fillColor: HUDColorPalette.verificationAction,
+                metrics: metrics,
+                isHovered: $isFullVerificationHovered
+            )
+            workflowShortcutButton(
+                .commitAndPush,
+                fillColor: HUDColorPalette.commitPushAction,
+                metrics: metrics,
+                isHovered: $isCommitAndPushHovered
+            )
+        }
+        .frame(width: metrics.contentWidth, height: metrics.workflowActionHeight, alignment: .leading)
     }
 
     private func detailsShortcutButton(metrics: HUDMetrics) -> some View {
@@ -2099,29 +2216,52 @@ private struct CodexFloatingHUDView: View {
         .opacity(isPasteAndSubmitInFlight ? 0.45 : 1)
     }
 
-    private func executeShortcutButton(metrics: HUDMetrics) -> some View {
-        HUDActionCard(
-            title: "執行",
-            systemImage: "play.fill",
+    private func continueShortcutButton(metrics: HUDMetrics) -> some View {
+        workflowShortcutButton(
+            .continueTask,
+            fillColor: HUDColorPalette.continueAction,
+            metrics: metrics,
+            height: metrics.actionHeight,
+            isHovered: $isContinueHovered
+        )
+    }
+
+    private func workflowShortcutButton(
+        _ shortcut: CodexPromptShortcut,
+        fillColor: Color,
+        metrics: HUDMetrics,
+        height: CGFloat? = nil,
+        isHovered: Binding<Bool>
+    ) -> some View {
+        let cardHeight = height ?? metrics.workflowActionHeight
+        let isDisabled = isPromptShortcutInFlight
+            || !layoutState.isCodexFocused
+            || ClipboardPasteService.isTemporaryOperationInFlight
+        let helpText = layoutState.isCodexFocused
+            ? shortcut.helpText
+            : "切換回 Codex 後可使用「\(shortcut.rawValue)」"
+        return HUDActionCard(
+            title: shortcut.rawValue,
+            systemImage: shortcut == .commitAndPush ? "arrow.up.circle.fill" : (shortcut == .continueTask ? "play.fill" : (shortcut == .fullVerification ? "checkmark.circle.fill" : "wrench.and.screwdriver.fill")),
             iconSize: 12,
             action: {
                 guard !isPromptShortcutInFlight,
                       layoutState.isCodexFocused,
                       !ClipboardPasteService.isTemporaryOperationInFlight else { return }
                 isPromptShortcutInFlight = true
-                promptShortcut(.execute) { _ in
+                promptShortcut(shortcut) { _ in
                     isPromptShortcutInFlight = false
                 }
             },
-            isDisabled: isPromptShortcutInFlight || !layoutState.isCodexFocused || ClipboardPasteService.isTemporaryOperationInFlight,
-            helpText: layoutState.isCodexFocused ? "執行" : "切換回 Codex 後可執行",
-            accessibilityLabel: "執行",
+            isDisabled: isDisabled,
+            helpText: helpText,
+            accessibilityLabel: shortcut.accessibilityLabel,
             fillStyle: layoutState.isCodexFocused
-                ? .filled(background: HUDColorPalette.executeAction, foreground: .white)
+                ? .filled(background: fillColor, foreground: .white)
                 : .neutral,
             width: metrics.actionCardWidth,
-            height: metrics.actionHeight,
-            isHovered: $isExecuteHovered
+            height: cardHeight,
+            isHovered: isHovered
         )
     }
 
@@ -2526,7 +2666,8 @@ private struct CodexFloatingHUDView: View {
         } else {
             creditsText = ""
         }
-        return "Codex，\(quotaText)\(creditsText)\(planText)，\(model.dataAgeText)，帳號 \(displayedAccountEmail ?? "未提供 Email")。提供更新通知、詳細面板、只貼上、貼上並送出與執行"
+        let workflowText = CodexPromptShortcut.allCases.map(\.rawValue).joined(separator: "、")
+        return "Codex，\(quotaText)\(creditsText)\(planText)，\(model.dataAgeText)，帳號 \(displayedAccountEmail ?? "未提供 Email")。提供更新通知、詳細面板、只貼上、貼上並送出與\(workflowText)"
     }
 
     private func cacheCurrentPresentation() {
