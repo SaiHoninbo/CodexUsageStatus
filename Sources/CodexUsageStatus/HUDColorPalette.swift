@@ -13,6 +13,9 @@ enum HUDColorPalette {
     static let gptReserveWeekly = Color.teal
     static let credits = Color.teal
     static let submitAction = Color.blue
-    static let executeAction = Color.green
+    static let continueAction = Color.green
+    static let fixAction = Color.orange
+    static let verificationAction = Color.purple
+    static let commitPushAction = Color.green
     static let update = Color.orange
 }

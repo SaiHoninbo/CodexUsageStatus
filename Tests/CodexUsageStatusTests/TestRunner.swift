@@ -67,12 +67,18 @@ struct CodexUsageStatusTests {
             ("HUD drag geometry", testHUDDragGeometry),
             ("token activity decoding", testTokenActivityDecoding),
             ("token activity null fields", testTokenActivityNullFields),
+            ("token activity presentation", testTokenActivityPresentation),
+            ("token activity aggregation", testTokenActivityAggregation),
+            ("token activity update feedback", testTokenActivityUpdateFeedback),
+            ("status item presentation projection", testStatusItemPresentationProjection),
+            ("HUD presentation boundary", testHUDPresentationBoundary),
             ("token activity store replacement and retention", testTokenActivityStoreReplacementAndRetention),
             ("corrupt token activity preserves memory", testCorruptTokenActivityPreservesMemory),
             ("reset credit decoding and sparse preservation", testResetCreditDecoding),
             ("reset credit consume request", testResetCreditConsumeRequest),
             ("account health decoding", testAccountHealthDecoding),
             ("account profile display formatting", testAccountProfileDisplayFormatting),
+            ("account scope summary", testAccountScopeSummary),
             ("turn activity event decoding", testTurnActivityDecoding),
             ("account profiles isolate email", testAccountProfilesIsolateEmail),
             ("account read disables refresh token", testAccountReadDisablesRefreshToken),
@@ -1076,6 +1082,341 @@ struct CodexUsageStatusTests {
         try expect(snapshot.dailyUsageBuckets == nil, "null buckets should remain unknown")
     }
 
+    private static func testTokenActivityPresentation() throws {
+        let snapshot = TokenActivitySnapshot(
+            fetchedAt: Date(timeIntervalSince1970: 0),
+            lifetimeTokens: 4_829_524_138,
+            peakDailyTokens: 575_763_278,
+            longestRunningTurnSec: 64 * 3600 + 45 * 60,
+            currentStreakDays: 1,
+            longestStreakDays: 24,
+            dailyUsageBuckets: nil
+        )
+        let metrics = TokenActivityPresentation.metrics(for: snapshot)
+        try expect(metrics.map(\.label) == [
+            "累計 token", "歷史單日峰值", "最長 Turn 時間", "目前連續", "最長連續"
+        ], "summary labels preserve the five-field contract")
+        try expect(metrics.map(\.value) == [
+            "4,829,524,138", "575,763,278", "64 小時 45 分", "1 天", "24 天"
+        ], "summary values use grouping and existing duration semantics")
+        let sameMetricsDifferentFetch = TokenActivitySnapshot(
+            fetchedAt: Date(timeIntervalSince1970: 99_999),
+            lifetimeTokens: snapshot.lifetimeTokens,
+            peakDailyTokens: snapshot.peakDailyTokens,
+            longestRunningTurnSec: snapshot.longestRunningTurnSec,
+            currentStreakDays: snapshot.currentStreakDays,
+            longestStreakDays: snapshot.longestStreakDays,
+            dailyUsageBuckets: [DailyTokenUsage(startDate: "2026-09-05", tokens: 1)]
+        )
+        try expect(TokenActivityPresentation.metrics(for: sameMetricsDifferentFetch) == metrics, "raw fetch time and daily buckets do not change HUD metrics")
+
+        let nilSnapshot = TokenActivitySnapshot(
+            fetchedAt: Date(), lifetimeTokens: nil, peakDailyTokens: nil,
+            longestRunningTurnSec: nil, currentStreakDays: nil,
+            longestStreakDays: nil, dailyUsageBuckets: nil
+        )
+        try expect(TokenActivityPresentation.metrics(for: nilSnapshot).allSatisfy { $0.value == "—" }, "unknown fields render a dash")
+        try expect(TokenActivityPresentation.metrics(for: nil).count == 5, "missing snapshot still renders five stable HUD cells")
+        try expect(TokenActivityPresentation.metrics(for: nil).allSatisfy { $0.value == "—" }, "missing snapshot renders dashes")
+        try expect(TokenActivityPresentation.durationText(45) == "45 秒", "short durations preserve seconds")
+        try expect(TokenActivityPresentation.durationText(125) == "2 分 5 秒", "minute durations preserve seconds")
+    }
+
+    private static func testTokenActivityAggregation() throws {
+        let first = TokenActivitySnapshot(
+            fetchedAt: Date(timeIntervalSince1970: 100), lifetimeTokens: 100,
+            peakDailyTokens: 900, longestRunningTurnSec: 30,
+            currentStreakDays: 2, longestStreakDays: 4,
+            dailyUsageBuckets: [DailyTokenUsage(startDate: "2026-09-01", tokens: 10)]
+        )
+        let second = TokenActivitySnapshot(
+            fetchedAt: Date(timeIntervalSince1970: 200), lifetimeTokens: nil,
+            peakDailyTokens: 1_500, longestRunningTurnSec: nil,
+            currentStreakDays: 3, longestStreakDays: nil,
+            dailyUsageBuckets: [DailyTokenUsage(startDate: "2026-09-02", tokens: 20)]
+        )
+        let aggregate = TokenActivityPresentation.aggregate(
+            snapshots: [first, second],
+            dailyBuckets: [DailyTokenUsage(startDate: "2026-09-02", tokens: 20)],
+            fetchedAt: second.fetchedAt
+        )
+        try expect(aggregate?.lifetimeTokens == 100, "all-account lifetime sums known values")
+        try expect(aggregate?.peakDailyTokens == 1_500, "historical peak ignores selected chart range")
+        try expect(aggregate?.longestRunningTurnSec == 30, "longest turn uses known profile maxima")
+        try expect(aggregate?.dailyUsageBuckets?.count == 1, "daily buckets remain range-scoped")
+        let allUnknown = TokenActivitySnapshot(
+            fetchedAt: Date(), lifetimeTokens: nil, peakDailyTokens: nil,
+            longestRunningTurnSec: nil, currentStreakDays: nil,
+            longestStreakDays: nil, dailyUsageBuckets: nil
+        )
+        let unknownAggregate = TokenActivityPresentation.aggregate(
+            snapshots: [allUnknown], dailyBuckets: [], fetchedAt: allUnknown.fetchedAt
+        )
+        try expect(unknownAggregate?.lifetimeTokens == nil, "all-account aggregation does not fabricate unknown lifetime")
+        try expect(unknownAggregate?.peakDailyTokens == nil, "all-account aggregation does not fabricate unknown peak")
+    }
+
+    private static func testTokenActivityUpdateFeedback() throws {
+        let baseDate = Date(timeIntervalSince1970: 1_757_000_000)
+
+        func snapshot(
+            at offset: TimeInterval = 0,
+            lifetime: Int64? = 4_829_524_138,
+            peak: Int64? = 575_763_278,
+            longestTurn: Int64? = 64 * 3600 + 45 * 60,
+            currentStreak: Int64? = 1,
+            longestStreak: Int64? = 24
+        ) -> TokenActivitySnapshot {
+            TokenActivitySnapshot(
+                fetchedAt: baseDate.addingTimeInterval(offset),
+                lifetimeTokens: lifetime,
+                peakDailyTokens: peak,
+                longestRunningTurnSec: longestTurn,
+                currentStreakDays: currentStreak,
+                longestStreakDays: longestStreak,
+                dailyUsageBuckets: nil
+            )
+        }
+
+        let old = snapshot()
+        let increased = snapshot(
+            at: 60,
+            lifetime: 4_831_028_746,
+            peak: 600_000_000,
+            longestTurn: 70 * 3600,
+            currentStreak: 2
+        )
+        let event = TokenActivityFeedbackPolicy.make(
+            previousSource: old,
+            previousSummary: old,
+            currentSummary: increased,
+            incoming: increased,
+            generation: 7
+        )
+        try expect(event?.generation == 7, "qualifying network update carries its generation")
+        try expect(event?.previousLifetimeTokens == old.lifetimeTokens, "feedback retains the previous lifetime")
+        try expect(event?.lifetimeTokens == increased.lifetimeTokens, "feedback retains the final lifetime")
+        try expect(event?.lifetimeDelta == 1_504_608, "feedback computes the lifetime delta")
+        try expect(event?.changed(TokenActivityPresentation.peakLabel) == true, "changed peak metric is marked for pulse")
+        try expect(event?.changed(TokenActivityPresentation.longestTurnLabel) == true, "changed turn metric is marked for pulse")
+        try expect(event?.changed(TokenActivityPresentation.currentStreakLabel) == true, "changed streak metric is marked for pulse")
+        try expect(TokenActivitySoundPolicy.shouldPlay(for: event, enabled: true), "sound preference enables one chime for the event")
+        try expect(!TokenActivitySoundPolicy.shouldPlay(for: event, enabled: false), "sound preference disables the chime without disabling animation")
+        try expect(TokenActivitySoundPolicy.preferredSystemSoundName == "Tink", "token credit chime prefers the Tink system sound")
+        try expect(TokenActivitySoundPolicy.fallbackSystemSoundName == "Glass", "token credit chime falls back to Glass")
+        try expect(TokenActivitySoundPolicy.select(tinkAvailable: true, glassAvailable: true) == .tink, "available Tink wins sound selection")
+        try expect(TokenActivitySoundPolicy.select(tinkAvailable: false, glassAvailable: true) == .glass, "Glass is selected when Tink is unavailable")
+        try expect(TokenActivitySoundPolicy.select(tinkAvailable: false, glassAvailable: false) == .beep, "beep remains the safe final fallback")
+        var soundGate = TokenActivitySoundGate()
+        try expect(soundGate.consume(feedback: event, enabled: true), "sound gate accepts the first event generation")
+        try expect(!soundGate.consume(feedback: event, enabled: true), "sound gate rejects a duplicate generation")
+
+        let duplicate = snapshot(at: 120, lifetime: increased.lifetimeTokens)
+        try expect(
+            TokenActivityFeedbackPolicy.make(
+                previousSource: increased,
+                previousSummary: increased,
+                currentSummary: duplicate,
+                incoming: duplicate,
+                generation: 8
+            ) == nil,
+            "same lifetime never creates a second event or sound"
+        )
+        let equalTimestampLarger = snapshot(at: 60, lifetime: 5_000_000_000)
+        try expect(
+            TokenActivityFeedbackPolicy.make(
+                previousSource: increased,
+                previousSummary: increased,
+                currentSummary: equalTimestampLarger,
+                incoming: equalTimestampLarger,
+                generation: 8
+            ) == nil,
+            "equal fetchedAt never creates feedback even when lifetime is larger"
+        )
+        let secondaryOnly = snapshot(at: 120, lifetime: increased.lifetimeTokens, peak: 700_000_000)
+        try expect(
+            TokenActivityFeedbackPolicy.make(
+                previousSource: increased,
+                previousSummary: increased,
+                currentSummary: secondaryOnly,
+                incoming: secondaryOnly,
+                generation: 8
+            ) == nil,
+            "secondary-only changes do not roll or chime without lifetime growth"
+        )
+        try expect(!TokenActivitySoundPolicy.shouldPlay(for: nil, enabled: true), "a non-event cannot produce a second chime")
+        try expect(!soundGate.consume(feedback: nil, enabled: true), "sound gate ignores a non-event")
+        try expect(
+            TokenActivityFeedbackPolicy.make(
+                previousSource: nil,
+                previousSummary: nil,
+                currentSummary: increased,
+                incoming: increased,
+                generation: 8
+            ) == nil,
+            "startup and cache hydration without a network baseline stay silent"
+        )
+        try expect(
+            TokenActivityFeedbackPolicy.make(
+                previousSource: old,
+                previousSummary: old,
+                currentSummary: increased,
+                incoming: increased,
+                generation: 8,
+                sameProfile: false
+            ) == nil,
+            "profile-boundary updates never create feedback"
+        )
+
+        let olderButLarger = snapshot(at: -60, lifetime: 9_000_000_000)
+        try expect(
+            TokenActivityFeedbackPolicy.make(
+                previousSource: old,
+                previousSummary: old,
+                currentSummary: olderButLarger,
+                incoming: olderButLarger,
+                generation: 9
+            ) == nil,
+            "older snapshots never create feedback"
+        )
+
+        let nilLifetimePatch = snapshot(at: 60, lifetime: nil)
+        let retainedMerged = snapshot(at: 60, lifetime: old.lifetimeTokens)
+        try expect(
+            TokenActivityFeedbackPolicy.make(
+                previousSource: old,
+                previousSummary: old,
+                currentSummary: retainedMerged,
+                incoming: nilLifetimePatch,
+                generation: 10
+            ) == nil,
+            "sparse nil lifetime patches never animate retained values"
+        )
+
+        let slots = TokenOdometerPresentation.slots(
+            previous: old.lifetimeTokens ?? 0,
+            current: increased.lifetimeTokens ?? 0
+        )
+        let formattedSlots = slots.map { String($0.currentCharacter) }.joined().replacingOccurrences(of: " ", with: "")
+        try expect(formattedSlots == TokenActivityPresentation.tokenCount(increased.lifetimeTokens), "odometer final value exactly matches the formatted lifetime")
+        try expect(slots.contains(where: { $0.isChangedDigit }), "odometer identifies changed numeric slots")
+        try expect(slots.contains(where: { $0.currentCharacter == "," && !$0.isChangedDigit }), "odometer keeps separators stable")
+        try expect(TokenActivityFeedbackAnimation.duration(reduceMotion: false) == 0.6, "normal roll duration is bounded")
+        try expect(TokenActivityFeedbackAnimation.duration(reduceMotion: true) == 0.18, "Reduce Motion uses a short crossfade duration")
+        let standardSize = HUDMetrics(scaleLevel: .standard).panelSize(quotaRowCount: 2, includesCredits: false)
+        let afterFeedbackSize = HUDMetrics(scaleLevel: .standard).panelSize(quotaRowCount: 2, includesCredits: false)
+        try expect(standardSize == afterFeedbackSize, "token feedback does not change HUD geometry")
+    }
+
+    private static func testStatusItemPresentationProjection() throws {
+        let base = StatusItemPresentationSource(
+            stackedTitle: "Codex\n86%",
+            tooltip: "Codex 86% · 4 小時後重置 · 已連線 · 剛剛更新",
+            color: .green
+        )
+        let same = StatusItemPresentationPolicy.make(from: base)
+        try expect(same == StatusItemPresentationPolicy.make(from: base), "equal relevant status state removes duplicate updates")
+        try expect(
+            StatusItemPresentationPolicy.make(from: StatusItemPresentationSource(stackedTitle: "Codex\n85%", tooltip: base.tooltip, color: .orange)) != same,
+            "quota changes update the status projection"
+        )
+        try expect(
+            StatusItemPresentationPolicy.make(from: StatusItemPresentationSource(stackedTitle: base.stackedTitle, tooltip: "Codex 86% · 3 小時後重置 · 已連線 · 剛剛更新", color: base.color)) != same,
+            "reset/age/turn tooltip changes update the status projection"
+        )
+        // Unrelated history/chart/notification/login state is absent from the
+        // source by construction, so the same source remains identical.
+        try expect(StatusItemPresentationPolicy.make(from: base) == same, "irrelevant model publications do not alter the projection")
+    }
+
+    private static func testHUDPresentationBoundary() throws {
+        let profileID = UUID()
+
+        func makePresentation(
+            remainingPercent: Int = 86,
+            tokenValue: String = "4,829,524,138",
+            profileIDOverride: UUID? = nil,
+            reduceMotion: Bool = false,
+            tokenFeedback: TokenActivityUpdateFeedback? = nil
+        ) -> HUDPresentation {
+            let effectiveProfileID = profileIDOverride ?? profileID
+            let fiveHour = HUDQuotaWindowPresentation(
+                kind: .fiveHour,
+                durationMins: 300,
+                label: "5 小時",
+                remainingPercent: remainingPercent,
+                resetsAt: 1_757_000_000,
+                resetDescription: "4 小時 9 分"
+            )
+            let sevenDay = HUDQuotaWindowPresentation(
+                kind: .sevenDay,
+                durationMins: 10_080,
+                label: "7 天",
+                remainingPercent: 44,
+                resetsAt: 1_757_600_000,
+                resetDescription: "5 天 1 小時"
+            )
+            return HUDPresentation(
+                profileID: effectiveProfileID,
+                accountEmail: "person@example.com",
+                plan: "Plus",
+                identityEmail: "person@example.com",
+                identityPlan: "Plus",
+                quota: HUDDualQuotaPresentation(
+                    profileID: effectiveProfileID,
+                    fiveHour: fiveHour,
+                    sevenDay: sevenDay
+                ),
+                tokenMetrics: [
+                    TokenActivityMetric(label: TokenActivityPresentation.lifetimeLabel, value: tokenValue),
+                    TokenActivityMetric(label: TokenActivityPresentation.peakLabel, value: "575,763,278"),
+                    TokenActivityMetric(label: TokenActivityPresentation.longestTurnLabel, value: "64 小時 45 分"),
+                    TokenActivityMetric(label: TokenActivityPresentation.currentStreakLabel, value: "1 天"),
+                    TokenActivityMetric(label: TokenActivityPresentation.longestStreakLabel, value: "24 天")
+                ],
+                tokenActivityFeedback: tokenFeedback,
+                tokenActivityIsStale: false,
+                updateBadge: .version("2.4.65"),
+                dataAgeText: "剛剛更新",
+                connectionState: .connected,
+                isStale: false,
+                isQuotaUpdating: false,
+                isCodexFocused: true,
+                quotaRowCount: 2,
+                hasCredits: false,
+                scaleLevel: .standard,
+                isPasteAndSubmitInFlight: false,
+                isPromptShortcutInFlight: false,
+                clipboardOperationInFlight: false,
+                decreaseAmount: nil,
+                remainingPercent: remainingPercent,
+                statusColor: .green,
+                isPasteHovered: false,
+                isPasteAndSubmitHovered: false,
+                isContinueHovered: false,
+                isFixUntilDoneHovered: false,
+                isFullVerificationHovered: false,
+                isCommitAndPushHovered: false,
+                reduceMotion: reduceMotion
+            )
+        }
+
+        let base = makePresentation()
+        try expect(base == makePresentation(), "identical HUD presentation values are equal")
+        try expect(base != makePresentation(remainingPercent: 85), "quota changes invalidate the HUD presentation")
+        try expect(base != makePresentation(tokenValue: "4,829,524,139"), "token metric changes invalidate the HUD presentation")
+        try expect(base != makePresentation(profileIDOverride: UUID()), "profile identity changes invalidate the HUD presentation")
+        try expect(base != makePresentation(reduceMotion: true), "Reduce Motion changes invalidate pulse presentation")
+        let feedback = TokenActivityUpdateFeedback(
+            generation: 1,
+            previousLifetimeTokens: 4_829_524_138,
+            lifetimeTokens: 4_831_028_746,
+            changedMetricLabels: [TokenActivityPresentation.lifetimeLabel]
+        )
+        try expect(base != makePresentation(tokenFeedback: feedback), "token feedback changes invalidate only the visual boundary")
+        try expect(makePresentation(tokenFeedback: feedback) == makePresentation(tokenFeedback: feedback), "identical token feedback remains equatable")
+    }
+
     private static func testTokenActivityStoreReplacementAndRetention() throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent("codex-token-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: base) }
@@ -1311,6 +1652,54 @@ struct CodexUsageStatusTests {
         try expect(apiDisplay.subtitle == "API Key · 未提供方案", "no-email account should show safe fallback")
     }
 
+    private static func testAccountScopeSummary() throws {
+        let now = Date()
+        let active = AccountProfile(
+            id: UUID(), fingerprint: "active", displayName: "Active",
+            accountType: "chatgpt", authMode: "chatgpt", lastSeen: now
+        )
+        let stale = AccountProfile(
+            id: UUID(), fingerprint: "stale", displayName: "Stale",
+            accountType: "chatgpt", authMode: "chatgpt", lastSeen: now
+        )
+        let unidentified = AccountProfile(
+            id: UUID(), fingerprint: "unknown", displayName: "Unknown",
+            accountType: "chatgpt", authMode: "chatgpt", lastSeen: now,
+            isUnidentified: true
+        )
+        let activeSnapshot = UsageSnapshot(
+            limitId: "codex", limitName: "Codex", planType: "plus",
+            primary: RateLimitWindow(usedPercent: 20, resetsAt: nil, windowDurationMins: 300),
+            secondary: nil, individualLimit: nil, rateLimitReachedType: nil,
+            spendControlReached: nil, receivedAt: now
+        )
+        let staleSnapshot = UsageSnapshot(
+            limitId: "codex", limitName: "Codex", planType: "free",
+            primary: RateLimitWindow(usedPercent: 80, resetsAt: nil, windowDurationMins: 300),
+            secondary: nil, individualLimit: nil, rateLimitReachedType: nil,
+            spendControlReached: nil, receivedAt: now
+        )
+        let summaries = [
+            ProfileQuotaSummary(
+                profile: active,
+                latestSample: HistorySample(snapshot: activeSnapshot, connectionState: .connected, receivedAt: now)
+            ),
+            ProfileQuotaSummary(
+                profile: stale,
+                latestSample: HistorySample(snapshot: staleSnapshot, connectionState: .offline, receivedAt: now)
+            ),
+            ProfileQuotaSummary(profile: unidentified, latestSample: nil)
+        ]
+        let summary = AccountScopeSummary.make(
+            profiles: [active, stale, unidentified],
+            quotaSummaries: summaries
+        )
+        try expect(summary.totalAccounts == 3, "all-account overview shows total account count")
+        try expect(summary.availableOrActiveAccounts == 1, "all-account overview counts recent connected accounts")
+        try expect(summary.staleAccounts == 2, "all-account overview counts offline and missing data as stale")
+        try expect(summary.unidentifiedAccounts == 1, "all-account overview counts unidentified profiles")
+    }
+
     private static func testUpdateVersionComparison() throws {
         try expect(AppVersionComparator.isNewer("v2.4.12", than: "2.4.11"), "v tag should compare newer")
         try expect(AppVersionComparator.isNewer("2.5", than: "2.4.99"), "minor version should compare newer")
@@ -1487,37 +1876,20 @@ struct CodexUsageStatusTests {
 
     private static func testHUDMetrics() throws {
         let standard = HUDMetrics(scaleLevel: .standard)
-        try expect(standard.panelSize == CGSize(width: 416, height: 196.8), "compact panel size after Git footer retirement")
-        try expectApproximately(standard.contentWidth, 387.2, "content width follows outer padding")
-        try expectApproximately(standard.quotaColumnHeight, 86.4, "quota rows close to 86.4pt")
-        try expectApproximately(standard.headerHeight, 24, "header height")
-        try expectApproximately(standard.headerGap, 8, "header gap")
-        try expectApproximately(standard.verticalContentHeight, 168, "vertical content closes with header")
-        try expectApproximately(standard.verticalContentHeight + standard.outerPadding * 2, 196.8, "canonical height closes")
-        try expectSizeApproximately(standard.panelSize(quotaRowCount: 1), CGSize(width: 416, height: 150.4), "one quota row removes empty vertical space")
-        try expectSizeApproximately(standard.panelSize(quotaRowCount: 2), CGSize(width: 416, height: 196.8), "two quota rows use compact geometry")
-        try expectSizeApproximately(standard.panelSize(quotaRowCount: 3), CGSize(width: 416, height: 243.2), "three quota rows grow only by quota height")
-        try expectSizeApproximately(
-            standard.panelSize(quotaRowCount: 3, includesCredits: true),
-            CGSize(width: 416, height: 310.4),
-            "three quota rows plus credits match the expanded reference"
-        )
-        try expectApproximately(
-            standard.panelSize(quotaRowCount: 2, includesCredits: true).height,
-            264,
-            "credits add a balance section without changing quota row count"
-        )
-        try expectApproximately(
-            standard.panelSize(quotaRowCount: 2, includesCredits: false).height,
-            196.8,
-            "no credits preserve canonical geometry after announcement removal"
-        )
-        try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller2).panelSize, CGSize(width: 332.8, height: 157.44), "smaller2 scales compact layout")
-        try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller4).panelSize, CGSize(width: 266.24, height: 125.952), "smaller4 scales compact layout")
-        try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller3).panelSize, CGSize(width: 299.52, height: 141.696), "smaller3 scales compact layout")
-        try expectSizeApproximately(HUDMetrics(scaleLevel: .smaller1).panelSize, CGSize(width: 374.4, height: 177.12), "smaller1 scales compact layout")
-        try expectSizeApproximately(HUDMetrics(scaleLevel: .larger1).panelSize, CGSize(width: 478.4, height: 226.32), "larger1 scales compact layout")
-        try expectSizeApproximately(HUDMetrics(scaleLevel: .larger2).panelSize, CGSize(width: 540.8, height: 255.84), "larger2 scales compact layout")
+        try expectApproximately(standard.panelSize.width, 416, "canonical panel width")
+        try expectApproximately(standard.panelSize.height, 256.4, "canonical panel height derives compact summary and workflow rows")
+        try expect(standard.panelSize.height >= 250 && standard.panelSize.height <= 265, "standard two-quota HUD stays in the preferred compact range")
+        try expect(standard.panelSize.height <= 270, "standard two-quota HUD stays below the maximum compact height")
+        try expectApproximately(standard.contentWidth, 394, "content width follows outer padding")
+        try expectApproximately(standard.quotaColumnHeight, 73, "quota rows close to the compact quota budget")
+        try expectApproximately(standard.headerHeight, 22, "header height")
+        try expectApproximately(standard.headerGap, 5, "header gap")
+        try expect(standard.tokenSummaryHeight >= 52, "token summary has a compact but readable height")
+        try expect(standard.workflowActionHeight / standard.actionHeight > 0.7 && standard.workflowActionHeight / standard.actionHeight < 0.8, "workflow cards are 70–80% of primary row")
+        try expectApproximately(standard.verticalContentHeight + standard.outerPadding * 2, standard.panelSize.height, "canonical height closes from derived tokens")
+        try expect(standard.panelSize(quotaRowCount: 1).height < standard.panelSize(quotaRowCount: 2).height, "one quota row removes empty vertical space")
+        try expect(standard.panelSize(quotaRowCount: 3).height > standard.panelSize(quotaRowCount: 2).height, "three quota rows grow only by quota height")
+        try expect(standard.panelSize(quotaRowCount: 2, includesCredits: true).height > standard.panelSize(quotaRowCount: 2).height, "Credits adds a balance section")
         try expect(
             3 * standard.actionCardWidth + (standard.actionSpacing * 2) <= standard.contentWidth + 0.01,
             "standard action cards fit three columns"
@@ -1533,6 +1905,8 @@ struct CodexUsageStatusTests {
                 3 * metrics.actionCardWidth + (metrics.actionSpacing * 2) <= metrics.contentWidth + 0.01,
                 "action cards fit three columns at every scale level"
             )
+            try expect(metrics.workflowActionHeight < metrics.actionHeight, "workflow row remains subordinate at \(level.displayName)")
+            try expect(metrics.tokenSummaryHeight >= 40 * metrics.factor, "token summary keeps two rows within the scaled cell budget at \(level.displayName)")
             for rowCount in 1...3 {
                 let dynamicHeight = metrics.verticalContentHeight(for: rowCount) + metrics.outerPadding * 2
                 try expectApproximately(
@@ -1585,9 +1959,18 @@ struct CodexUsageStatusTests {
     }
 
     private static func testCodexPromptShortcuts() throws {
-        try expect(CodexPromptShortcut.execute.text == "執行", "execute shortcut text")
-        try expect(CodexPromptShortcut.execute.submitAfterPaste, "execute shortcut submits")
-        try expect(CodexPromptShortcut.allCases == [.execute], "only execute shortcut remains")
+        let shortcuts = CodexPromptShortcut.allCases
+        try expect(shortcuts == [.continueTask, .fixUntilDone, .fullVerification, .commitAndPush], "workflow shortcuts preserve the four-case order")
+        try expect(shortcuts.map(\.rawValue) == ["繼續", "修到完成", "完整驗證", "Commit + Push"], "visible labels stay separate from payloads")
+        try expect(shortcuts.map(\.text) == [
+            "go on",
+            "Continue the current task using the latest repo reality. Fix repairable issues automatically, rerun affected verification, and keep going until the task is complete or a true material blocker is found. Do not stop for routine approvals or previously decided matters.",
+            "Verify the current implementation against the latest repo reality. Run the relevant tests, build, diff checks, and necessary runtime verification. Auto-repair repairable failures and rerun affected checks. Finish with a concise verification result and remaining declared limits.",
+            "Review the current repository, branch, working tree, diff, verification status, and sensitive-content risk. If the current change is safe and sufficiently verified, create an appropriate commit and push it to the existing upstream. Stop only for a true material risk such as repository identity mismatch, unexpected branch or remote target, secret exposure, destructive Git, or material scope mismatch."
+        ], "workflow payloads match the fixed transport contract")
+        try expect(shortcuts.allSatisfy { $0.submitAfterPaste }, "every workflow shortcut submits after paste")
+        try expect(shortcuts.allSatisfy { $0.accessibilityLabel == $0.rawValue }, "accessibility uses concise labels")
+        try expect(CodexPromptShortcut.commitAndPush.helpText.contains("不會執行 Git"), "Commit + Push explains that Usage App never runs Git")
     }
 
     private static func testCodexApplicationIdentity() throws {

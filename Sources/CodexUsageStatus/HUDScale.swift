@@ -2,7 +2,7 @@ import Foundation
 
 /// Seven proportional HUD sizes centered on the current C layout: four
 /// compact levels, standard, and two larger levels. The standard level is
-/// the 416x240 reference used by the current HUD.
+/// the 416x256.4 reference used by the current HUD.
 enum HUDScaleLevel: Int, CaseIterable, Codable, Equatable {
     // New compact levels use additive raw identities so existing persisted
     // raw values 1...5 retain their historical physical meaning.
@@ -56,8 +56,8 @@ enum HUDScaleLevel: Int, CaseIterable, Codable, Equatable {
         if schemaVersion == 4 {
             // Schema 4 briefly treated the former 520x260 draft as the
             // canonical 100% size. Its level 1 was the historical 416x208
-            // UI; preserve that visible size when mapping into the current
-            // 416x240 reference.
+            // UI; map that logical level into the current 416x256.4 scale
+            // space rather than carrying forward the retired geometry.
             let migrated: HUDScaleLevel
             switch rawValue {
             case 1: migrated = .standard
@@ -71,9 +71,8 @@ enum HUDScaleLevel: Int, CaseIterable, Codable, Equatable {
 
         if schemaVersion == 3 {
             // Schema 3 used 520x260 as 100%. The user's currently visible
-            // smallest HUD was schema-3 level 1 (416x208), so preserve that
-            // historical physical size while mapping into the current
-            // 416x240 scale space.
+            // smallest HUD was schema-3 level 1 (416x208); map that logical
+            // level into the current 416x256.4 scale space.
             let migrated: HUDScaleLevel
             switch rawValue {
             case 1: migrated = .standard

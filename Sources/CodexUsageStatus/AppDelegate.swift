@@ -9,7 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var outsideClickMonitor: Any?
     private var localClickMonitor: Any?
     private var model: UsageViewModel!
-    private var modelObservation: AnyCancellable?
+    private var statusItemObservation: AnyCancellable?
     private var statusItemUpdateTask: Task<Void, Never>?
     private var terminationReplyPending = false
     private var floatingHUD: FloatingHUDPanelController!
@@ -78,9 +78,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         floatingHUD.onQuit = { NSApp.terminate(nil) }
         floatingHUD.start()
 
-        modelObservation = model.objectWillChange.sink { [weak self] _ in
-            self?.scheduleStatusItemUpdate()
-        }
+        statusItemObservation = model.$statusItemPresentation
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                self?.scheduleStatusItemUpdate()
+            }
         model.start()
         updateStatusItem()
     }
@@ -189,10 +191,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         paragraphStyle.minimumLineHeight = 7
         paragraphStyle.maximumLineHeight = 9
         let statusFont = NSFont.monospacedDigitSystemFont(ofSize: 8.5, weight: .medium)
+        let presentation = model.statusItemPresentation
         button.attributedTitle = NSAttributedString(
-            string: model.menuBarStackedTitle,
+            string: presentation.stackedTitle,
             attributes: [
-                .foregroundColor: NSColor(model.menuBarColor),
+                .foregroundColor: statusItemNSColor(presentation.color),
                 .font: statusFont,
                 .paragraphStyle: paragraphStyle,
                 // Lower the compact title slightly so its top line aligns
@@ -200,7 +203,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .baselineOffset: -2
             ]
         )
-        button.toolTip = model.statusTooltip
+        button.toolTip = presentation.tooltip
+    }
+
+    private func statusItemNSColor(_ color: StatusItemColor) -> NSColor {
+        switch color {
+        case .secondary: return .secondaryLabelColor
+        case .red: return .systemRed
+        case .orange: return .systemOrange
+        case .green: return .systemGreen
+        }
     }
 
     /// Coalesce bursts from quota/account updates so AppKit does not rebuild

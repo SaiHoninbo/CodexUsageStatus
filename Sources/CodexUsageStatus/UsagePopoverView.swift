@@ -116,7 +116,7 @@ struct UsagePopoverView: View {
         VStack(alignment: .leading, spacing: 16) {
             accountSelector
             quotaSummarySection
-            overviewActivitySummary
+            overviewTurnActivity
             resetCreditSection
             updateSection
             quickActions
@@ -133,14 +133,6 @@ struct UsagePopoverView: View {
     private var settingsTab: some View {
         VStack(alignment: .leading, spacing: 16) {
             accountManagementSection
-            if model.accountScope == .current {
-                accountHealthSection
-                turnActivitySection
-            } else {
-                Text("全部帳號模式：帳號健康與即時 Turn 僅適用目前帳號。")
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-            }
             settingsSection
             syncSettingsSection
             metadataSection
@@ -203,40 +195,46 @@ struct UsagePopoverView: View {
                     quotaSummaryRow(kind: .gptReserveWeekly, presentation: reserve, accent: .purple)
                 }
             } else {
-                let summaries = model.profileQuotaSummaries()
-                if summaries.isEmpty {
+                let summary = model.accountScopeSummary
+                if summary.totalAccounts == 0 {
                     Text("尚未取得帳號用量。")
                         .font(.body)
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(summaries) { summary in
-                        HStack(spacing: 10) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(model.accountProfileDisplay(for: summary.profile).title)
-                                    .font(.body.weight(.semibold))
-                                    .lineLimit(1)
-                                Text(summary.isStale ? "資料較舊" : "已同步")
-                                    .font(.subheadline)
-                                    .foregroundStyle(summary.isStale ? .orange : .secondary)
-                            }
-                            Spacer()
-                            if let remaining = summary.primaryRemainingPercent {
-                                Text("剩餘 \(remaining)%")
-                                    .font(.system(size: 18, weight: .bold, design: .rounded))
-                                    .foregroundStyle(color(for: remaining))
-                            } else {
-                                Text("—")
-                                    .font(.title3.weight(.semibold))
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .padding(.vertical, 2)
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                        accountScopeMetric("帳號總數", summary.totalAccounts, color: .blue)
+                        accountScopeMetric("可用／活躍", summary.availableOrActiveAccounts, color: .green)
+                        accountScopeMetric("資料較舊", summary.staleAccounts, color: .orange)
+                        accountScopeMetric("未識別", summary.unidentifiedAccounts, color: .secondary)
                     }
+                    Button {
+                        selectionController.select(.settings)
+                    } label: {
+                        Label("前往帳號管理", systemImage: "arrow.right")
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                    .buttonStyle(.link)
+                    .font(.caption.weight(.semibold))
+                    .accessibilityHint("前往設定中的帳號管理")
                 }
             }
         }
         .padding(14)
         .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func accountScopeMetric(_ label: String, _ value: Int, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("\(value)")
+                .font(.title3.weight(.bold))
+                .foregroundStyle(color)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(Color.white.opacity(0.48), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     @ViewBuilder
@@ -268,30 +266,46 @@ struct UsagePopoverView: View {
         }
     }
 
-    private var overviewActivitySummary: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Label("Token Activity", systemImage: "bolt.horizontal.circle")
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                Text(model.tokenActivityState.displayName)
-                    .font(.caption)
-                    .foregroundStyle(model.tokenActivityState == .loaded ? .green : .secondary)
-            }
-            if let activity = model.displayedTokenActivity {
-                HStack(spacing: 16) {
-                    metric("累計 token", tokenCount(activity.lifetimeTokens))
-                    metric("單日峰值", tokenCount(activity.peakDailyTokens))
-                    metric("最長執行", durationText(activity.longestRunningTurnSec))
-                }
-            } else {
-                Text("尚未取得 Token Activity；可在設定中查看完整分析。")
+    @ViewBuilder
+    private var overviewTurnActivity: some View {
+        if model.accountScope != .current {
+            EmptyView()
+        } else {
+            switch model.activeTurn.state {
+            case .active, .completed, .failed, .interrupted:
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        Label("目前 Turn", systemImage: "bolt.horizontal.circle")
+                            .font(.subheadline.weight(.semibold))
+                        Spacer()
+                        Text(model.activeTurn.state.displayName)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(model.activeTurn.state == .active ? .blue : (model.activeTurn.state == .failed ? .orange : .secondary))
+                    }
+                    HStack(spacing: 12) {
+                        if let elapsed = model.activeTurn.elapsedSeconds {
+                            Text(durationText(elapsed))
+                        }
+                        if let tokens = model.activeTurn.tokenTotal {
+                            Text("\(TokenActivityPresentation.tokenCount(tokens)) token")
+                        }
+                        if let error = model.activeTurn.errorMessage, !error.isEmpty {
+                            Text(error)
+                                .foregroundStyle(.orange)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                    }
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                }
+                .padding(12)
+                .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            case .idle, .unknown:
+                EmptyView()
             }
         }
-        .padding(12)
-        .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private var quickActions: some View {
@@ -551,75 +565,11 @@ struct UsagePopoverView: View {
         }
     }
 
-    private var accountHealthSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("帳號健康")
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                Text(model.accountHealthState.displayName)
-                    .font(.caption)
-                    .foregroundStyle(model.accountHealthState == .loaded ? .green : .secondary)
-            }
-            if let account = model.accountHealth {
-                metadataRow("登入模式", account.identity.authMode ?? "—")
-                metadataRow("帳號類型", account.identity.accountType ?? "—")
-                metadataRow("方案", account.identity.planType ?? "—")
-                metadataRow("需要 OpenAI 認證", account.identity.requiresOpenAIAuth ? "是" : "否")
-                metadataRow("Email", account.identity.email ?? "未提供")
-                metadataRow("同步時間", account.receivedAt.formatted(date: .abbreviated, time: .shortened))
-            } else {
-                Text(model.accountHealthErrorMessage ?? "尚未取得帳號資料。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private var turnActivitySection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("即時 Turn")
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                Text(model.activeTurn.state.displayName)
-                    .font(.caption)
-                    .foregroundStyle(model.activeTurn.state == .active ? .blue : .secondary)
-            }
-            if model.activeTurn.state == .idle || model.activeTurn.state == .unknown {
-                Text(model.activeTurn.state.displayName)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                if let threadID = model.activeTurn.threadID { metadataRow("Thread", String(threadID.prefix(12))) }
-                if let turnID = model.activeTurn.turnID { metadataRow("Turn", String(turnID.prefix(12))) }
-                if let started = model.activeTurn.startedAt {
-                    metadataRow("開始", started.formatted(date: .omitted, time: .shortened))
-                }
-                if let elapsed = model.activeTurn.elapsedSeconds {
-                    metadataRow("耗時", durationText(elapsed))
-                }
-                if let tokens = model.activeTurn.tokenTotal {
-                    metadataRow("目前 token", tokens.formatted())
-                }
-                if let content = model.activeTurn.content, !content.isEmpty {
-                    Text(content)
-                        .font(.caption)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let error = model.activeTurn.errorMessage {
-                    Text(error).font(.caption).foregroundStyle(.orange)
-                }
-            }
-        }
-    }
-
-
     private var tokenActivitySection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Token Activity")
-                    .font(.subheadline.weight(.semibold))
+                Text("帳號歷史摘要")
+                    .font(.headline)
                 Spacer()
                 Text(model.tokenActivityState.displayName)
                     .font(.caption)
@@ -627,11 +577,11 @@ struct UsagePopoverView: View {
             }
             if let activity = model.displayedTokenActivity {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 6) {
-                    metric("累計 token", tokenCount(activity.lifetimeTokens))
-                    metric("單日峰值", tokenCount(activity.peakDailyTokens))
-                    metric("最長執行", durationText(activity.longestRunningTurnSec))
-                    metric(model.accountScope == .all ? "單一帳號最長目前連續" : "目前連續", daysText(activity.currentStreakDays))
-                    metric(model.accountScope == .all ? "單一帳號最長連續" : "最長連續", daysText(activity.longestStreakDays))
+                    metric(TokenActivityPresentation.lifetimeLabel, tokenCount(activity.lifetimeTokens))
+                    metric(TokenActivityPresentation.peakLabel, tokenCount(activity.peakDailyTokens))
+                    metric(TokenActivityPresentation.longestTurnLabel, durationText(activity.longestRunningTurnSec))
+                    metric(TokenActivityPresentation.currentStreakLabel, daysText(activity.currentStreakDays))
+                    metric(TokenActivityPresentation.longestStreakLabel, daysText(activity.longestStreakDays))
                 }
                 HStack {
                     Text("每日 token")
@@ -752,20 +702,15 @@ struct UsagePopoverView: View {
     }
 
     private func tokenCount(_ value: Int64?) -> String {
-        guard let value else { return "—" }
-        return value.formatted()
+        TokenActivityPresentation.tokenCount(value)
     }
 
     private func daysText(_ value: Int64?) -> String {
-        guard let value else { return "—" }
-        return "\(value) 天"
+        TokenActivityPresentation.daysText(value)
     }
 
     private func durationText(_ value: Int64?) -> String {
-        guard let value else { return "—" }
-        if value < 60 { return "\(value) 秒" }
-        if value < 3600 { return "\(value / 60) 分 \(value % 60) 秒" }
-        return "\(value / 3600) 小時 \((value % 3600) / 60) 分"
+        TokenActivityPresentation.durationText(value)
     }
 
     private func creditDate(_ timestamp: Int64?) -> String {
@@ -859,7 +804,7 @@ struct UsagePopoverView: View {
                     .foregroundStyle(.orange)
             }
             if model.accountScope == .all {
-                Text("此區塊仍顯示目前帳號歷史；全部帳號的聚合資料請查看上方 Token Activity 與 Quota。")
+                Text("此區塊仍顯示目前帳號歷史；全部帳號的聚合摘要與每日 token 請查看本頁的帳號歷史摘要。")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }

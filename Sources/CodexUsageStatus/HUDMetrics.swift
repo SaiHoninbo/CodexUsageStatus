@@ -7,30 +7,51 @@ import Foundation
 struct HUDMetrics: Equatable {
     let scaleLevel: HUDScaleLevel
 
-    // The current smallest C-layout HUD is the user's 100% reference.
-    // Larger/smaller levels are derived from this compact 416x196.8 base as a single
-    // proportional layout, rather than treating the old 520x260 draft as
-    // the standard.
-    // The direct Git footer was retired in V2. Removing its vertical budget
-    // keeps the panel tight instead of leaving an empty band below actions.
-    static let canonicalPanelSize = CGSize(width: 416, height: 196.8)
-    static let canonicalOuterPadding: CGFloat = 14.4
-    static let canonicalHeaderHeight: CGFloat = 24
-    static let canonicalHeaderGap: CGFloat = 8
-    static let canonicalQuotaRowHeight: CGFloat = 40
+    // The current C-layout HUD is derived from one compact 416x256.4 base.
+    // Every scale level preserves this complete geometry contract, including
+    // the token summary, quota stack, optional Credits row, and two action
+    // rows. The retired direct Git footer has no reserved vertical budget.
+    // 52pt leaves two readable metric baselines plus the separator at the
+    // smallest 0.64 scale without letting either row clip into its neighbor.
+    static let canonicalTokenSummaryHeight: CGFloat = 52
+    static let canonicalTokenSummaryGap: CGFloat = 5
+    static let canonicalPanelWidth: CGFloat = 416
+    static let canonicalOuterPadding: CGFloat = 11
+    static let canonicalHeaderHeight: CGFloat = 22
+    static let canonicalHeaderGap: CGFloat = 5
+    static let canonicalQuotaRowHeight: CGFloat = 34
     static let canonicalQuotaRowCount: Int = 2
     // Keep identity/header text visually aligned with the primary quota
     // label (for example, "5 小時") at every HUD scale.
     static let canonicalQuotaPrimaryTextScale: CGFloat = 0.46
-    static let canonicalQuotaGap: CGFloat = 6.4
-    static let canonicalSectionGap: CGFloat = 11.2
+    static let canonicalQuotaGap: CGFloat = 5
+    static let canonicalSectionGap: CGFloat = 6
     static let canonicalActionHeight: CGFloat = 38.4
+    static let canonicalWorkflowActionHeight: CGFloat = 28
+    static let canonicalWorkflowActionGap: CGFloat = 5
     // Credits is a non-progress balance row between the quota stack and
     // command controls. Its dividers and breathing room are included in this
     // token so AppKit and SwiftUI keep one shared height contract.
-    static let canonicalCreditsSectionHeight: CGFloat = 56
+    // Reserve enough room for the two fractional divider strokes even at the
+    // smallest .64 scale. The row itself may stay at its 32pt readability
+    // floor without bleeding into the following section gap.
+    static let canonicalCreditsSectionHeight: CGFloat = 52
     static let canonicalActionSpacing: CGFloat = 8
-    static let canonicalCornerRadius: CGFloat = 19.2
+    static let canonicalCornerRadius: CGFloat = 15.2
+    static let canonicalPanelSize = CGSize(
+        width: canonicalPanelWidth,
+        height: (canonicalOuterPadding * 2)
+            + canonicalTokenSummaryHeight
+            + canonicalTokenSummaryGap
+            + canonicalHeaderHeight
+            + canonicalHeaderGap
+            + (canonicalQuotaRowHeight * CGFloat(canonicalQuotaRowCount))
+            + (canonicalQuotaGap * CGFloat(canonicalQuotaRowCount - 1))
+            + canonicalSectionGap
+            + canonicalActionHeight
+            + canonicalWorkflowActionGap
+            + canonicalWorkflowActionHeight
+    )
 
     init(scaleLevel: HUDScaleLevel = .standard) {
         self.scaleLevel = scaleLevel
@@ -70,6 +91,10 @@ struct HUDMetrics: Equatable {
     var quotaGap: CGFloat { Self.canonicalQuotaGap * factor }
     var sectionGap: CGFloat { Self.canonicalSectionGap * factor }
     var actionHeight: CGFloat { Self.canonicalActionHeight * factor }
+    var workflowActionHeight: CGFloat { Self.canonicalWorkflowActionHeight * factor }
+    var tokenSummaryHeight: CGFloat { Self.canonicalTokenSummaryHeight * factor }
+    var tokenSummaryGap: CGFloat { Self.canonicalTokenSummaryGap * factor }
+    var workflowActionGap: CGFloat { Self.canonicalWorkflowActionGap * factor }
     var creditsSectionHeight: CGFloat { Self.canonicalCreditsSectionHeight * factor }
     var creditsRowHeight: CGFloat { max(32, creditsSectionHeight - (sectionGap * 0.85)) }
     var actionSpacing: CGFloat { Self.canonicalActionSpacing * factor }
@@ -95,7 +120,16 @@ struct HUDMetrics: Equatable {
         verticalContentHeight(for: Self.canonicalQuotaRowCount)
     }
 
-    func verticalContentHeight(for rowCount: Int) -> CGFloat {
-        headerHeight + headerGap + quotaColumnHeight(for: rowCount) + sectionGap + actionHeight
+    func verticalContentHeight(for rowCount: Int, includesCredits: Bool = false) -> CGFloat {
+        tokenSummaryHeight
+            + tokenSummaryGap
+            + headerHeight
+            + headerGap
+            + quotaColumnHeight(for: rowCount)
+            + sectionGap
+            + (includesCredits ? creditsSectionHeight + sectionGap : 0)
+            + actionHeight
+            + workflowActionGap
+            + workflowActionHeight
     }
 }

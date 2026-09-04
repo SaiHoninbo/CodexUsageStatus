@@ -1,14 +1,23 @@
 import Foundation
 import SwiftUI
 import UserNotifications
+import AppKit
 
 @MainActor
 final class UsageViewModel: ObservableObject {
-    @Published private(set) var snapshot: UsageSnapshot?
-    @Published private(set) var connectionState: ConnectionState = .disconnected
+    @Published private(set) var snapshot: UsageSnapshot? {
+        didSet { refreshStatusItemPresentation() }
+    }
+    @Published private(set) var connectionState: ConnectionState = .disconnected {
+        didSet { refreshStatusItemPresentation() }
+    }
     @Published private(set) var errorMessage: String?
-    @Published private(set) var lastUpdated: Date?
-    @Published private(set) var currentDate = Date()
+    @Published private(set) var lastUpdated: Date? {
+        didSet { refreshStatusItemPresentation() }
+    }
+    @Published private(set) var currentDate = Date() {
+        didSet { refreshStatusItemPresentation() }
+    }
     @Published private(set) var historySamples: [HistorySample] = []
     @Published private(set) var historyErrorMessage: String?
     @Published private(set) var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
@@ -17,6 +26,12 @@ final class UsageViewModel: ObservableObject {
     @Published private(set) var notificationSoundEnabled: Bool
     @Published private(set) var notificationThresholds: [Int]
     @Published private(set) var tokenActivity: TokenActivitySnapshot?
+    /// Range-independent five-field projection used by the HUD. Keeping only
+    /// the visible metrics published (rather than the raw fetched timestamp or
+    /// daily buckets) prevents chart-range changes and timestamp churn from
+    /// redrawing the compact summary.
+    @Published private(set) var hudTokenActivityMetrics: [TokenActivityMetric]?
+    @Published private(set) var hudTokenActivityFeedback: TokenActivityUpdateFeedback?
     @Published private(set) var tokenActivityState: TokenActivityState = .idle
     @Published private(set) var tokenActivityErrorMessage: String?
     @Published private(set) var resetCredits: RateLimitResetCredits?
@@ -36,7 +51,9 @@ final class UsageViewModel: ObservableObject {
     @Published private(set) var globalSyncIntervalSeconds: Int = 300
     @Published private(set) var tokenActivityRefreshIntervalSeconds: Int = 900
     @Published private(set) var credentialWatchIntervalSeconds: Int = 15
-    @Published private(set) var activeTurn: TurnActivitySnapshot = .idle
+    @Published private(set) var activeTurn: TurnActivitySnapshot = .idle {
+        didSet { refreshStatusItemPresentation() }
+    }
     @Published private(set) var notifyOnTurnSuccess: Bool
     @Published private(set) var notifyOnTurnFailure: Bool
     @Published private(set) var notifyOnTurnInterrupted: Bool
@@ -49,6 +66,7 @@ final class UsageViewModel: ObservableObject {
     @Published var historyRange: HistoryRange = .week
     @Published var tokenActivityRange: TokenActivityRange = .week
     @Published var accountScope: AccountScope = .current
+    @Published private(set) var statusItemPresentation = StatusItemPresentation.placeholder
 
     let loginItemManager = LoginItemManager()
 
@@ -70,6 +88,15 @@ final class UsageViewModel: ObservableObject {
     private let updateNotificationService = AppUpdateNotificationService()
     private let defaults = UserDefaults.standard
     private var displayTimer: Timer?
+    private var hudTokenActivityFetchedAt: Date?
+    private var hudTokenActivitySummary: TokenActivitySnapshot?
+    private var hudTokenActivityFeedbackGeneration: UInt64 = 0
+    private var tokenActivitySoundGate = TokenActivitySoundGate()
+    /// A profile/account or scope boundary suppresses the first subsequent
+    /// network callback so it cannot be mistaken for a live update to the
+    /// newly selected surface.
+    private var suppressNextTokenActivityFeedback = false
+    private var suppressedTokenActivityProfileID: UUID?
     private var updateCheckTimer: Timer?
     private var pendingUnidentifiedProfileBoundary = false
     private var defaultClientEnabled = true
@@ -80,6 +107,13 @@ final class UsageViewModel: ObservableObject {
     private var localStoresLoaded = false
     private var startupTask: Task<Void, Never>?
     private var defaultClientStopTask: Task<Void, Never>?
+
+    private struct TokenActivityNetworkUpdate {
+        let previousSource: TokenActivitySnapshot?
+        let incoming: TokenActivitySnapshot
+        let profileID: UUID?
+        let suppressFeedback: Bool
+    }
 
     private enum PreferenceKey {
         static let notificationsEnabled = "usage.notifications.enabled"
@@ -199,7 +233,16 @@ final class UsageViewModel: ObservableObject {
         client.onTokenActivity = { [weak self] activity in
             guard let self else { return }
             guard self.defaultClientEnabled else { return }
+            let previousSource = self.tokenActivityStore.snapshot
+            let profileID = self.currentProfileID
+            let suppressFeedback = self.consumeTokenActivityFeedbackSuppression(for: profileID)
             self.tokenActivity = self.tokenActivityStore.update(incoming: activity)
+            self.refreshHUDTokenActivitySummary(networkUpdate: TokenActivityNetworkUpdate(
+                previousSource: previousSource,
+                incoming: activity,
+                profileID: profileID,
+                suppressFeedback: suppressFeedback
+            ))
             self.tokenActivityState = .loaded
             self.tokenActivityErrorMessage = self.tokenActivityStore.errorMessage
         }
@@ -256,6 +299,8 @@ final class UsageViewModel: ObservableObject {
         notificationService.refreshAuthorization { [weak self] status in
             self?.notificationAuthorizationStatus = status
         }
+        refreshHUDTokenActivitySummary()
+        refreshStatusItemPresentation()
     }
 
     deinit {
@@ -281,6 +326,7 @@ final class UsageViewModel: ObservableObject {
             self.tokenActivityStore.loadAsynchronously { [weak self] in
                 guard let self else { return }
                 self.tokenActivity = self.tokenActivityStore.snapshot
+                self.refreshHUDTokenActivitySummary()
                 self.tokenActivityErrorMessage = self.tokenActivityStore.errorMessage
             }
             await withCheckedContinuation { continuation in
@@ -299,6 +345,7 @@ final class UsageViewModel: ObservableObject {
         localStoresLoaded = true
         defaultClientEnabled = true
         accountProfiles = profileStore.accountProfiles()
+        refreshHUDTokenActivitySummary()
         if let savedID = defaults.string(forKey: PreferenceKey.activeProfile),
            let id = UUID(uuidString: savedID),
            let profile = profileStore.profile(for: id) {
@@ -393,7 +440,11 @@ final class UsageViewModel: ObservableObject {
     }
 
     func setAccountScope(_ scope: AccountScope) {
+        guard accountScope != scope else { return }
         accountScope = scope
+        suppressNextTokenActivityFeedback = true
+        suppressedTokenActivityProfileID = currentProfileID
+        refreshHUDTokenActivitySummary()
         currentDate = Date()
     }
 
@@ -545,6 +596,7 @@ final class UsageViewModel: ObservableObject {
         managedAccountHealth[id] = nil
         guard profileStore.deleteProfile(id: id) else { return }
         accountProfiles = profileStore.accountProfiles()
+        refreshHUDTokenActivitySummary()
         if currentProfileID == id {
             currentProfileID = nil
             defaults.removeObject(forKey: PreferenceKey.activeProfile)
@@ -553,6 +605,7 @@ final class UsageViewModel: ObservableObject {
             } else {
                 snapshot = nil
                 tokenActivity = nil
+                refreshHUDTokenActivitySummary()
                 accountHealth = nil
             }
         }
@@ -834,14 +887,22 @@ final class UsageViewModel: ObservableObject {
         worker.onTokenActivity = { [weak self] _, activity in
             guard let self else { return }
             guard self.workerGenerations[id] == generation else { return }
-            self.managedTokenActivities[id] = activity
             let store = TokenActivityStore(fileURL: self.profileStore.tokenActivityURL(for: profile))
-            _ = store.update(incoming: activity)
+            let previousSource = store.snapshot
+            let suppressFeedback = self.consumeTokenActivityFeedbackSuppression(for: id)
+            let merged = store.update(incoming: activity)
+            self.managedTokenActivities[id] = merged
             if self.currentProfileID == id {
-                self.tokenActivity = activity
+                self.tokenActivity = merged
                 self.tokenActivityState = .loaded
                 self.tokenActivityErrorMessage = store.errorMessage
             }
+            self.refreshHUDTokenActivitySummary(networkUpdate: TokenActivityNetworkUpdate(
+                previousSource: previousSource,
+                incoming: activity,
+                profileID: id,
+                suppressFeedback: suppressFeedback
+            ))
         }
         worker.onAccountHealthState = { [weak self] _, state, message in
             guard let self else { return }
@@ -905,6 +966,7 @@ final class UsageViewModel: ObservableObject {
         if let snapshot = managedSnapshots[id] { applySnapshot(snapshot, to: self) }
         if let activity = managedTokenActivities[id] {
             tokenActivity = activity
+            refreshHUDTokenActivitySummary()
             tokenActivityState = .loaded
         }
         if let health = managedAccountHealth[id] {
@@ -937,6 +999,11 @@ final class UsageViewModel: ObservableObject {
         }
     }
 
+    var accountScopeSummary: AccountScopeSummary {
+        let profiles = profileStore.accountProfiles()
+        return AccountScopeSummary.make(profiles: profiles, quotaSummaries: profileQuotaSummaries())
+    }
+
     func profileQuotaPoints() -> [ProfileQuotaPoint] {
         profileStore.accountProfiles().flatMap { profile in
             let store = HistoryStore(fileURL: profileStore.historyURL(for: profile))
@@ -966,14 +1033,88 @@ final class UsageViewModel: ObservableObject {
         let stores = profiles.map { TokenActivityStore(fileURL: profileStore.tokenActivityURL(for: $0)) }
         let snapshots = stores.compactMap(\.snapshot)
         guard !snapshots.isEmpty else { return nil }
-        return TokenActivitySnapshot(
-            fetchedAt: snapshots.map(\.fetchedAt).max() ?? currentDate,
-            lifetimeTokens: snapshots.compactMap(\.lifetimeTokens).reduce(0, +),
-            peakDailyTokens: buckets.map(\.tokens).max(),
-            longestRunningTurnSec: snapshots.compactMap(\.longestRunningTurnSec).max(),
-            currentStreakDays: snapshots.compactMap(\.currentStreakDays).max(),
-            longestStreakDays: snapshots.compactMap(\.longestStreakDays).max(),
-            dailyUsageBuckets: buckets
+        return TokenActivityPresentation.aggregate(
+            snapshots: snapshots,
+            dailyBuckets: buckets,
+            fetchedAt: snapshots.map(\.fetchedAt).max() ?? currentDate
+        )
+    }
+
+    private func refreshHUDTokenActivitySummary(networkUpdate: TokenActivityNetworkUpdate? = nil) {
+        let previousSummary = hudTokenActivitySummary
+        let summary: TokenActivitySnapshot?
+        if accountScope == .current {
+            summary = tokenActivity.map(Self.rangeIndependentTokenSummary)
+        } else {
+            let snapshots = profileStore.accountProfiles().compactMap { profile -> TokenActivitySnapshot? in
+                if profile.id == currentProfileID, let tokenActivity { return tokenActivity }
+                if let cached = managedTokenActivities[profile.id] { return cached }
+                return TokenActivityStore(fileURL: profileStore.tokenActivityURL(for: profile)).snapshot
+            }
+            let aggregate = TokenActivityPresentation.aggregate(
+                snapshots: snapshots,
+                dailyBuckets: [],
+                fetchedAt: snapshots.map(\.fetchedAt).max() ?? currentDate
+            )
+            summary = aggregate.map(Self.rangeIndependentTokenSummary)
+        }
+        let nextMetrics = summary.map(TokenActivityPresentation.metrics(for:))
+        hudTokenActivitySummary = summary
+        hudTokenActivityFetchedAt = summary?.fetchedAt
+        if hudTokenActivityMetrics != nextMetrics {
+            hudTokenActivityMetrics = nextMetrics
+        }
+
+        // Only a current-profile network callback can publish visual feedback.
+        // Every other refresh path (cache hydration, startup, account/scope
+        // changes, chart range changes, and background profiles) silently
+        // reseeds the summary baseline.
+        hudTokenActivityFeedback = nil
+        guard let networkUpdate,
+              !networkUpdate.suppressFeedback,
+              accountScope == .current,
+              let profileID = networkUpdate.profileID,
+              profileID == currentProfileID,
+              let feedback = TokenActivityFeedbackPolicy.make(
+                  previousSource: networkUpdate.previousSource,
+                  previousSummary: previousSummary,
+                  currentSummary: summary,
+                  incoming: networkUpdate.incoming,
+                  generation: hudTokenActivityFeedbackGeneration &+ 1
+              ) else { return }
+
+        hudTokenActivityFeedbackGeneration &+= 1
+        hudTokenActivityFeedback = feedback
+        if tokenActivitySoundGate.consume(feedback: feedback, enabled: notificationSoundEnabled) {
+            // A qualifying callback produces exactly one short system chime;
+            // no per-digit sounds, notification requests, or audio loop.
+            playTokenActivitySound()
+        }
+    }
+
+    private func playTokenActivitySound() {
+        if let sound = NSSound(named: NSSound.Name(TokenActivitySoundPolicy.preferredSystemSoundName)),
+           sound.play() {
+            return
+        }
+        if let sound = NSSound(named: NSSound.Name(TokenActivitySoundPolicy.fallbackSystemSoundName)),
+           sound.play() {
+            return
+        }
+        // Named system sounds are normally present on macOS, but keep the
+        // final fallback safe on minimal/headless installations.
+        NSSound.beep()
+    }
+
+    private static func rangeIndependentTokenSummary(_ snapshot: TokenActivitySnapshot) -> TokenActivitySnapshot {
+        TokenActivitySnapshot(
+            fetchedAt: snapshot.fetchedAt,
+            lifetimeTokens: snapshot.lifetimeTokens,
+            peakDailyTokens: snapshot.peakDailyTokens,
+            longestRunningTurnSec: snapshot.longestRunningTurnSec,
+            currentStreakDays: snapshot.currentStreakDays,
+            longestStreakDays: snapshot.longestStreakDays,
+            dailyUsageBuckets: nil
         )
     }
 
@@ -1042,11 +1183,31 @@ final class UsageViewModel: ObservableObject {
     }
 
     var menuBarColor: Color {
+        switch statusItemColor {
+        case .secondary: return .secondary
+        case .red: return .red
+        case .orange: return .orange
+        case .green: return .green
+        }
+    }
+
+    private var statusItemColor: StatusItemColor {
         guard let percent = menuBarRemainingPercent else { return .secondary }
         if isStale { return .secondary }
         if percent < 20 { return .red }
         if percent < 50 { return .orange }
         return .green
+    }
+
+    private func refreshStatusItemPresentation() {
+        let source = StatusItemPresentationSource(
+            stackedTitle: menuBarStackedTitle,
+            tooltip: statusTooltip,
+            color: statusItemColor
+        )
+        let next = StatusItemPresentationPolicy.make(from: source)
+        guard next != statusItemPresentation else { return }
+        statusItemPresentation = next
     }
 
     var lastUpdatedText: String {
@@ -1076,8 +1237,14 @@ final class UsageViewModel: ObservableObject {
     }
 
     var tokenActivityIsStale: Bool {
-        guard let tokenActivity else { return false }
-        return currentDate.timeIntervalSince(tokenActivity.fetchedAt) > 15 * 60
+        let fetchedAt = accountScope == .all ? hudTokenActivityFetchedAt : tokenActivity?.fetchedAt
+        guard let fetchedAt else { return false }
+        return currentDate.timeIntervalSince(fetchedAt) > 15 * 60
+    }
+
+    var hudTokenActivityIsStale: Bool {
+        guard let fetchedAt = hudTokenActivityFetchedAt else { return false }
+        return currentDate.timeIntervalSince(fetchedAt) > 15 * 60
     }
 
     var selectedResetCredit: RateLimitResetCredit? {
@@ -1240,6 +1407,9 @@ final class UsageViewModel: ObservableObject {
         historySamples = historyStore.samples
         historyErrorMessage = historyStore.errorMessage
         tokenActivity = nil
+        suppressNextTokenActivityFeedback = true
+        suppressedTokenActivityProfileID = profile.id
+        refreshHUDTokenActivitySummary()
         tokenActivityState = .idle
         tokenActivityErrorMessage = nil
         snapshot = nil
@@ -1254,9 +1424,26 @@ final class UsageViewModel: ObservableObject {
         tokenActivityStore.loadAsynchronously { [weak self] in
             guard let self, self.currentProfileID == profile.id else { return }
             self.tokenActivity = self.tokenActivityStore.snapshot
+            self.refreshHUDTokenActivitySummary()
             self.tokenActivityState = self.tokenActivity == nil ? .idle : .loaded
             self.tokenActivityErrorMessage = self.tokenActivityStore.errorMessage
         }
+    }
+
+    private func consumeTokenActivityFeedbackSuppression(for profileID: UUID?) -> Bool {
+        guard suppressNextTokenActivityFeedback else { return false }
+        // A boundary suppression is consumed only by a callback for the
+        // target profile. Late callbacks from the old default client and
+        // background workers remain suppressed without consuming the target's
+        // one-shot boundary.
+        guard let profileID,
+              profileID == currentProfileID,
+              suppressedTokenActivityProfileID == nil || profileID == suppressedTokenActivityProfileID else {
+            return true
+        }
+        suppressNextTokenActivityFeedback = false
+        suppressedTokenActivityProfileID = nil
+        return true
     }
 
     private func migrateLegacyIfNeeded(to profile: AccountProfile) {
