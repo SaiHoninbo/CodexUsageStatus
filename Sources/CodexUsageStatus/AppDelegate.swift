@@ -11,13 +11,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var model: UsageViewModel!
     private var modelObservation: AnyCancellable?
     private var statusItemUpdateTask: Task<Void, Never>?
+    private var terminationReplyPending = false
     private var floatingHUD: FloatingHUDPanelController!
     private let popoverSelectionController = PopoverSelectionController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        model = UsageViewModel()
-
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.target = self
@@ -32,7 +31,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.cell?.truncatesLastVisibleLine = false
             button.alignment = .center
             button.toolTip = "Codex Usage Status"
+            button.attributedTitle = NSAttributedString(
+                string: "Codex\n—",
+                attributes: [
+                    .foregroundColor: NSColor.secondaryLabelColor,
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: 8.5, weight: .medium)
+                ]
+            )
         }
+
+        // Make the status item interactive immediately. Model/store/App
+        // Server construction is intentionally staged to the next run-loop
+        // turn so LaunchServices and menu-bar hit testing are responsive.
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            self?.bootstrapModel()
+        }
+    }
+
+    private func bootstrapModel() {
+        guard model == nil else { return }
+        model = UsageViewModel()
 
         popover = NSPopover()
         popover.behavior = .transient
@@ -74,6 +94,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model?.stop()
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !terminationReplyPending else { return .terminateNow }
+        terminationReplyPending = true
+        Task { @MainActor [weak self] in
+            await self?.model?.prepareForTermination()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationDidBecomeActive(_ notification: Notification) {
         model?.refresh()
     }
@@ -83,7 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showPopover(tab: UsagePopoverTab = .overview, toggle: Bool = false, sender: Any? = nil) {
-        guard let button = statusItem.button else { return }
+        guard let button = statusItem?.button, let popover, let model else { return }
         popoverSelectionController.select(tab)
         if toggle && popover.isShown {
             popover.performClose(sender)

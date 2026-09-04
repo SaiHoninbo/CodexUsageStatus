@@ -73,9 +73,13 @@ final class UsageViewModel: ObservableObject {
     private var updateCheckTimer: Timer?
     private var pendingUnidentifiedProfileBoundary = false
     private var defaultClientEnabled = true
-    private let maxConcurrentWorkers = 2
+    private let maxConcurrentWorkers = ManagedWorkerAdmissionPolicy.maxActiveAppServers
     private var isSchedulingWorkers = false
+    private var workerReplacementTasks: [UUID: Task<Void, Never>] = [:]
     private var isStopping = false
+    private var localStoresLoaded = false
+    private var startupTask: Task<Void, Never>?
+    private var defaultClientStopTask: Task<Void, Never>?
 
     private enum PreferenceKey {
         static let notificationsEnabled = "usage.notifications.enabled"
@@ -99,12 +103,12 @@ final class UsageViewModel: ObservableObject {
 
     init() {
         RetiredFeatureCleanup.run()
-        let store = HistoryStore()
+        let store = HistoryStore(loadOnInit: false, asynchronousPersistence: true)
         historyStore = store
         legacyHistoryURL = store.fileURL
         historySamples = store.samples
         historyErrorMessage = store.errorMessage
-        let activityStore = TokenActivityStore()
+        let activityStore = TokenActivityStore(loadOnInit: false, asynchronousPersistence: true)
         tokenActivityStore = activityStore
         legacyTokenActivityURL = activityStore.fileURL
         tokenActivity = activityStore.snapshot
@@ -123,8 +127,8 @@ final class UsageViewModel: ObservableObject {
         showTurnContentInNotifications = defaults.object(forKey: PreferenceKey.turnContent) as? Bool ?? false
         notifyOnAccountSwitch = defaults.object(forKey: PreferenceKey.accountSwitch) as? Bool ?? false
         floatingHUDEnabled = defaults.object(forKey: PreferenceKey.floatingHUDEnabled) as? Bool ?? true
-        profileStore = AccountProfileStore()
-        accountProfiles = profileStore.accountProfiles()
+        profileStore = AccountProfileStore(loadOnInit: false, asynchronousPersistence: true)
+        accountProfiles = []
         profileStoreErrorMessage = profileStore.errorMessage
         quotaRefreshIntervalSeconds = Self.clampQuotaInterval(defaults.object(forKey: PreferenceKey.quotaRefreshInterval) as? Int ?? 60)
         globalSyncIntervalSeconds = Self.clampAccountInterval(defaults.object(forKey: PreferenceKey.accountRefreshInterval) as? Int ?? 300)
@@ -139,14 +143,6 @@ final class UsageViewModel: ObservableObject {
         accountManagementService.onLoginOutput = { [weak self] profileID, output in
             self?.loginStates[profileID] = output
         }
-        if let savedID = defaults.string(forKey: PreferenceKey.activeProfile),
-           let id = UUID(uuidString: savedID),
-           let profile = profileStore.profile(for: id) {
-            currentProfileID = id
-            switchToProfile(profile)
-            defaultClientEnabled = !profile.isManaged
-        }
-
         client.onStateChange = { [weak self] state, message in
             guard let self else { return }
             guard self.defaultClientEnabled else { return }
@@ -265,20 +261,51 @@ final class UsageViewModel: ObservableObject {
     deinit {
         displayTimer?.invalidate()
         updateCheckTimer?.invalidate()
+        startupTask?.cancel()
     }
 
     func start() {
         isStopping = false
-        defaultClientEnabled = true
         loginItemManager.refresh()
         loginItemManager.registerIfNeeded()
-        historyStore.load()
-        syncHistoryState()
-        tokenActivityStore.load()
-        tokenActivity = tokenActivityStore.snapshot
-        tokenActivityErrorMessage = tokenActivityStore.errorMessage
         startDisplayTimer()
-        checkForUpdates()
+        // Update checks are deliberately deferred; they are network work and
+        // must never delay the first interactive status-item frame.
+        startupTask?.cancel()
+        startupTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.historyStore.loadAsynchronously { [weak self] in
+                guard let self else { return }
+                self.syncHistoryState()
+            }
+            self.tokenActivityStore.loadAsynchronously { [weak self] in
+                guard let self else { return }
+                self.tokenActivity = self.tokenActivityStore.snapshot
+                self.tokenActivityErrorMessage = self.tokenActivityStore.errorMessage
+            }
+            await withCheckedContinuation { continuation in
+                self.profileStore.loadAsynchronously { continuation.resume() }
+            }
+            guard !self.isStopping else { return }
+            self.finishStartupAfterLocalStores()
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled, !self.isStopping else { return }
+            self.checkForUpdates()
+        }
+    }
+
+    private func finishStartupAfterLocalStores() {
+        guard !localStoresLoaded else { return }
+        localStoresLoaded = true
+        defaultClientEnabled = true
+        accountProfiles = profileStore.accountProfiles()
+        if let savedID = defaults.string(forKey: PreferenceKey.activeProfile),
+           let id = UUID(uuidString: savedID),
+           let profile = profileStore.profile(for: id) {
+            currentProfileID = id
+            switchToProfile(profile)
+            defaultClientEnabled = !profile.isManaged
+        }
         startUpdateCheckTimer()
         if let profile = currentProfile, profile.isManaged {
             defaultClientEnabled = false
@@ -299,7 +326,26 @@ final class UsageViewModel: ObservableObject {
         client.stop()
         accountManagementService.stopAllLogins()
         for worker in managedWorkers.values { worker.stop() }
+        workerReplacementTasks.values.forEach { $0.cancel() }
+        workerReplacementTasks.removeAll()
         managedWorkers.removeAll()
+        startupTask?.cancel()
+        startupTask = nil
+        defaultClientStopTask?.cancel()
+        defaultClientStopTask = nil
+        Task { [historyStore, tokenActivityStore] in
+            await historyStore.flushPendingWrites()
+            await tokenActivityStore.flushPendingWrites()
+            await PersistenceWriteCoordinator.shared.flush()
+        }
+    }
+
+    /// Bounded termination hook used by AppDelegate's terminate-later reply.
+    /// All disk work happens off the main actor and is capped by the shared
+    /// coordinator timeout so shutdown cannot hang indefinitely.
+    func prepareForTermination() async {
+        stop()
+        await PersistenceWriteCoordinator.shared.flush(timeoutNanoseconds: TerminationFlushPolicy.timeoutNanoseconds)
     }
 
     func refresh() {
@@ -362,13 +408,26 @@ final class UsageViewModel: ObservableObject {
         resetCreditOperationState = .idle
         resetCreditMessage = "已切換到 \(profile.displayName)"
         defaultClientEnabled = !profile.isManaged
-        if profile.isManaged { client.stop() }
+        if profile.isManaged {
+            defaultClientEnabled = false
+            defaultClientStopTask?.cancel()
+            defaultClientStopTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.client.stopAndWait()
+                guard !self.isStopping, self.currentProfileID == id else { return }
+                self.defaultClientStopTask = nil
+                self.ensureManagedWorker(for: profile)
+                self.scheduleManagedWorkers(preferredID: id)
+            }
+        }
         if profile.isManaged { ensureManagedWorker(for: profile) }
         if let worker = managedWorkers[id] {
             applyManagedCachedData(for: id)
             if profileStore.hasCredentials(for: profile) {
-                scheduleManagedWorkers(preferredID: id)
-                if worker.isRunning { worker.refresh() }
+                if defaultClientStopTask == nil {
+                    scheduleManagedWorkers(preferredID: id)
+                    if worker.isRunning { worker.refresh() }
+                }
             }
         } else {
             client.refreshRateLimits()
@@ -623,22 +682,37 @@ final class UsageViewModel: ObservableObject {
 
     /// The sole admission point for managed workers.  It prioritizes the
     /// selected account, starts no more than `maxConcurrentWorkers`, and
-    /// leaves the remaining profiles explicitly queued for a later slot.
+    /// leaves the remaining profiles explicitly queued; at most one managed
+    /// App Server process belongs to the selected account at any time.
     private func scheduleManagedWorkers(preferredID: UUID? = nil) {
         guard !isSchedulingWorkers, !isStopping else { return }
         isSchedulingWorkers = true
         defer { isSchedulingWorkers = false }
 
         let eligible = profileStore.accountProfiles().filter {
-            $0.isManaged && $0.workerEnabled && profileStore.hasCredentials(for: $0)
+            $0.isManaged && $0.id == currentProfileID
+                && $0.workerEnabled && profileStore.hasCredentials(for: $0)
         }
         let eligibleIDs = Set(eligible.map(\.id))
         for profile in eligible { ensureManagedWorker(for: profile) }
 
         // Stop workers that are no longer eligible before allocating slots.
+        // Their child processes may still be handling SIGTERM, so defer new
+        // admission until each stopAndWait task has completed.
+        var waitingForWorkerExit = false
         for (id, worker) in managedWorkers where !eligibleIDs.contains(id) {
-            if worker.isRunning { worker.stop() }
+            guard worker.isRunning else { continue }
+            if workerReplacementTasks[id] == nil {
+                workerReplacementTasks[id] = Task { @MainActor [weak self, weak worker] in
+                    await worker?.stopAndWait()
+                    guard let self, !self.isStopping else { return }
+                    self.workerReplacementTasks[id] = nil
+                    self.scheduleManagedWorkers(preferredID: self.currentProfileID)
+                }
+            }
+            waitingForWorkerExit = true
         }
+        guard !waitingForWorkerExit else { return }
 
         let ordered = eligible.sorted { lhs, rhs in
             if lhs.id == preferredID { return true }
@@ -654,20 +728,32 @@ final class UsageViewModel: ObservableObject {
         if let preferredID, !runningIDs.contains(preferredID), runningIDs.count >= maxConcurrentWorkers {
             if let evictedID = runningIDs.first(where: { $0 != preferredID }),
                let worker = managedWorkers[evictedID] {
-                worker.stop()
+                guard workerReplacementTasks[evictedID] == nil else { return }
                 runningIDs.remove(evictedID)
                 workerStates[evictedID] = .disconnected
                 workerErrors[evictedID] = "等待同步槽位"
+                workerReplacementTasks[evictedID] = Task { @MainActor [weak self, weak worker] in
+                    await worker?.stopAndWait()
+                    guard let self, !self.isStopping else { return }
+                    self.workerReplacementTasks[evictedID] = nil
+                    self.scheduleManagedWorkers(preferredID: preferredID)
+                }
+                return
             }
         }
 
         for profile in ordered {
             guard let worker = managedWorkers[profile.id] else { continue }
+            guard workerReplacementTasks[profile.id] == nil else { continue }
             if worker.isRunning {
                 runningIDs.insert(profile.id)
                 continue
             }
-            guard runningIDs.count < maxConcurrentWorkers else {
+            guard ManagedWorkerAdmissionPolicy.admits(
+                isCurrentAccount: profile.id == currentProfileID,
+                activeCount: runningIDs.count,
+                replacementInFlight: workerReplacementTasks[profile.id] != nil
+            ) else {
                 workerStates[profile.id] = .disconnected
                 workerErrors[profile.id] = "等待同步槽位"
                 continue
@@ -1102,20 +1188,37 @@ final class UsageViewModel: ObservableObject {
         // then let the profile-scoped worker reload its own CODEX_HOME.
         if selection.profile.isManaged {
             defaultClientEnabled = false
-            client.stop()
             ensureManagedWorker(for: selection.profile)
-            if profileStore.hasCredentials(for: selection.profile) {
-                scheduleManagedWorkers(preferredID: selection.profile.id)
-                if managedWorkers[selection.profile.id]?.isRunning == true {
-                    managedWorkers[selection.profile.id]?.refresh()
+            defaultClientStopTask?.cancel()
+            let targetID = selection.profile.id
+            defaultClientStopTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.client.stopAndWait()
+                guard !self.isStopping, self.currentProfileID == targetID else { return }
+                self.defaultClientStopTask = nil
+                if self.profileStore.hasCredentials(for: selection.profile) {
+                    self.scheduleManagedWorkers(preferredID: selection.profile.id)
+                    if self.managedWorkers[selection.profile.id]?.isRunning == true {
+                        self.managedWorkers[selection.profile.id]?.refresh()
+                    }
                 }
             }
         } else {
             defaultClientEnabled = true
-            // Account/read can race the initial quota/activity responses. Re-read
-            // after switching so the new profile is never left blank until the
-            // next periodic refresh.
-            if needsProfileLoad {
+            let workersToStop = managedWorkers.values.filter(\.isRunning)
+            if !workersToStop.isEmpty {
+                defaultClientStopTask?.cancel()
+                let targetID = selection.profile.id
+                defaultClientStopTask = Task { @MainActor [weak self] in
+                    for worker in workersToStop { await worker.stopAndWait() }
+                    guard let self, !self.isStopping, self.currentProfileID == targetID else { return }
+                    self.defaultClientStopTask = nil
+                    self.client.refresh()
+                }
+            } else if needsProfileLoad {
+                // Account/read can race the initial quota/activity responses.
+                // Re-read after switching so the new profile is never left
+                // blank until the next periodic refresh.
                 client.refreshRateLimits()
                 client.refreshTokenActivity()
             }
@@ -1124,17 +1227,36 @@ final class UsageViewModel: ObservableObject {
 
     private func switchToProfile(_ profile: AccountProfile) {
         migrateLegacyIfNeeded(to: profile)
-        historyStore = HistoryStore(fileURL: profileStore.historyURL(for: profile))
-        tokenActivityStore = TokenActivityStore(fileURL: profileStore.tokenActivityURL(for: profile))
+        historyStore = HistoryStore(
+            fileURL: profileStore.historyURL(for: profile),
+            loadOnInit: false,
+            asynchronousPersistence: true
+        )
+        tokenActivityStore = TokenActivityStore(
+            fileURL: profileStore.tokenActivityURL(for: profile),
+            loadOnInit: false,
+            asynchronousPersistence: true
+        )
         historySamples = historyStore.samples
         historyErrorMessage = historyStore.errorMessage
-        tokenActivity = tokenActivityStore.snapshot
-        tokenActivityState = tokenActivity == nil ? .idle : .loaded
-        tokenActivityErrorMessage = tokenActivityStore.errorMessage
+        tokenActivity = nil
+        tokenActivityState = .idle
+        tokenActivityErrorMessage = nil
         snapshot = nil
         lastUpdated = nil
         resetCredits = nil
         profileStoreErrorMessage = profileStore.errorMessage ?? profileStoreErrorMessage
+
+        historyStore.loadAsynchronously { [weak self] in
+            guard let self, self.currentProfileID == profile.id else { return }
+            self.syncHistoryState()
+        }
+        tokenActivityStore.loadAsynchronously { [weak self] in
+            guard let self, self.currentProfileID == profile.id else { return }
+            self.tokenActivity = self.tokenActivityStore.snapshot
+            self.tokenActivityState = self.tokenActivity == nil ? .idle : .loaded
+            self.tokenActivityErrorMessage = self.tokenActivityStore.errorMessage
+        }
     }
 
     private func migrateLegacyIfNeeded(to profile: AccountProfile) {

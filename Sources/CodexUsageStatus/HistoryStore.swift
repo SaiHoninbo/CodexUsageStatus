@@ -32,23 +32,73 @@ final class HistoryStore: ObservableObject {
     let fileURL: URL
 
     private let fileManager: FileManager
+    private let loadOnInit: Bool
+    private let asynchronousPersistence: Bool
     private let retention: TimeInterval = 30 * 24 * 60 * 60
     private let minimumSampleInterval: TimeInterval = 5 * 60
 
-    init(fileManager: FileManager = .default, applicationSupportURL: URL? = nil) {
+    init(
+        fileManager: FileManager = .default,
+        applicationSupportURL: URL? = nil,
+        loadOnInit: Bool = true,
+        asynchronousPersistence: Bool = false
+    ) {
         self.fileManager = fileManager
+        self.loadOnInit = loadOnInit
+        self.asynchronousPersistence = asynchronousPersistence
         let baseURL = applicationSupportURL ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
         fileURL = baseURL
             .appendingPathComponent("com.openai.codex-usage-status", isDirectory: true)
             .appendingPathComponent("history.json")
-        load()
+        if loadOnInit { load() }
     }
 
-    init(fileManager: FileManager = .default, fileURL: URL) {
+    init(
+        fileManager: FileManager = .default,
+        fileURL: URL,
+        loadOnInit: Bool = true,
+        asynchronousPersistence: Bool = false
+    ) {
         self.fileManager = fileManager
         self.fileURL = fileURL
-        load()
+        self.loadOnInit = loadOnInit
+        self.asynchronousPersistence = asynchronousPersistence
+        if loadOnInit { load() }
+    }
+
+    /// Loads the persisted history off the main actor. The completion runs on
+    /// the caller's queue and receives only decoded presentation data.
+    func loadAsynchronously(now: Date = Date(), completion: (() -> Void)? = nil) {
+        let fileURL = self.fileURL
+        let fileManager = self.fileManager
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            var loaded: [HistorySample] = []
+            var loadError: String?
+            if fileManager.fileExists(atPath: fileURL.path) {
+                do {
+                    let data = try Data(contentsOf: fileURL)
+                    let decoder = JSONDecoder()
+                    decoder.dateDecodingStrategy = .secondsSince1970
+                    loaded = try decoder.decode([HistorySample].self, from: data).sorted { $0.receivedAt < $1.receivedAt }
+                } catch {
+                    loadError = "歷史資料無法讀取，已保留目前記憶體中的資料。"
+                }
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                guard loadError == nil else {
+                    self.errorMessage = loadError
+                    completion?()
+                    return
+                }
+                self.samples = loaded
+                self.errorMessage = nil
+                if self.purgeExpired(now: now) { self.persist() }
+                completion?()
+            }
+        }
     }
 
     func load(now: Date = Date()) {
@@ -103,6 +153,10 @@ final class HistoryStore: ObservableObject {
         persist()
     }
 
+    func flushPendingWrites() async {
+        await PersistenceWriteCoordinator.shared.flush()
+    }
+
     private func isDuplicate(_ lhs: HistorySample, _ rhs: HistorySample) -> Bool {
         lhs.limitId == rhs.limitId
             && lhs.primaryUsedPercent == rhs.primaryUsedPercent
@@ -121,6 +175,19 @@ final class HistoryStore: ObservableObject {
     }
 
     private func persist() {
+        if asynchronousPersistence {
+            do {
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .secondsSince1970
+                encoder.outputFormatting = [.sortedKeys]
+                let data = try encoder.encode(samples)
+                Task { await PersistenceWriteCoordinator.shared.enqueue(url: fileURL, data: data, fileManager: fileManager) }
+                errorMessage = nil
+            } catch {
+                errorMessage = "歷史資料無法保存：\(error.localizedDescription)"
+            }
+            return
+        }
         do {
             let directory = fileURL.deletingLastPathComponent()
             try fileManager.createDirectory(

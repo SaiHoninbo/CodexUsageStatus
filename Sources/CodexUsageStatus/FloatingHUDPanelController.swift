@@ -102,8 +102,11 @@ final class FloatingHUDPanelController: NSObject {
     private var refreshTimer: Timer?
     private var workspaceObserver: NSObjectProtocol?
     private var terminationObserver: NSObjectProtocol?
+    private var screenObserver: NSObjectProtocol?
+    private var spaceObserver: NSObjectProtocol?
     private var modelObservation: AnyCancellable?
     private var visibilityRefreshTask: Task<Void, Never>?
+    private var geometryRefreshTask: Task<Void, Never>?
     private let defaults = UserDefaults.standard
     private let bottomRightPositionKey = "ui.floatingHUD.bottomRightOffset"
     private let anchorPositionKey = "ui.floatingHUD.anchor"
@@ -231,28 +234,49 @@ final class FloatingHUDPanelController: NSObject {
             }
         }
 
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.requestVisibilityRefresh() }
+        }
+        spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.requestVisibilityRefresh() }
+        }
+
         modelObservation = model.objectWillChange.sink { [weak self] _ in
             // @Published emits before the value is assigned. Hop to the next
             // main-actor turn so the HUD sees the new preference/state.
             guard let self else { return }
-            self.requestVisibilityRefresh()
+            self.requestGeometryRefresh()
         }
 
         // Visibility/placement uses AX and CGWindowList, so it is deliberately
-        // sampled rather than reconciled once per second. Model publications
-        // are coalesced by requestVisibilityRefresh as well.
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+        // sampled as a slow safety fallback. Model publications only refresh
+        // cached geometry and never trigger a heavy system-window query.
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.requestVisibilityRefresh()
             }
         }
-        refreshVisibility()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            self?.refreshVisibility()
+        }
     }
 
     func stop() {
         cancelFocusLoss()
         visibilityRefreshTask?.cancel()
         visibilityRefreshTask = nil
+        geometryRefreshTask?.cancel()
+        geometryRefreshTask = nil
         refreshTimer?.invalidate()
         refreshTimer = nil
         if let workspaceObserver {
@@ -263,6 +287,10 @@ final class FloatingHUDPanelController: NSObject {
             NSWorkspace.shared.notificationCenter.removeObserver(terminationObserver)
         }
         terminationObserver = nil
+        if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
+        screenObserver = nil
+        if let spaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(spaceObserver) }
+        spaceObserver = nil
         modelObservation?.cancel()
         modelObservation = nil
         panel?.orderOut(nil)
@@ -580,6 +608,21 @@ final class FloatingHUDPanelController: NSObject {
                   let self,
                   expectedGeneration == self.positioningSessionGeneration else { return }
             self.refreshVisibility()
+        }
+    }
+
+    /// Cheap model-driven sizing path. It uses the last authoritative window
+    /// and screen frames already read by the event/fallback reconciler and
+    /// therefore avoids AX/CGWindowList work on every @Published emission.
+    private func requestGeometryRefresh() {
+        guard geometryRefreshTask == nil else { return }
+        geometryRefreshTask = Task { @MainActor [weak self] in
+            defer { self?.geometryRefreshTask = nil }
+            await Task.yield()
+            guard let self, !Task.isCancelled, !self.isUserDraggingHUD,
+                  let panel = self.panel else { return }
+            self.synchronizeQuotaRowCount(for: panel)
+            self.synchronizeCreditsVisibility(for: panel)
         }
     }
 

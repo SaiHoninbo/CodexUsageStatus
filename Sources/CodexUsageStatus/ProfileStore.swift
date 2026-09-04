@@ -131,19 +131,81 @@ final class AccountProfileStore: ObservableObject {
     let containerURL: URL
     let indexURL: URL
     private let fileManager: FileManager
+    private let asynchronousPersistence: Bool
     private let saltURL: URL
     private var salt: Data
     private var currentProfileID: UUID?
 
-    init(fileManager: FileManager = .default, applicationSupportURL: URL? = nil) {
+    init(
+        fileManager: FileManager = .default,
+        applicationSupportURL: URL? = nil,
+        loadOnInit: Bool = true,
+        asynchronousPersistence: Bool = false
+    ) {
         self.fileManager = fileManager
+        self.asynchronousPersistence = asynchronousPersistence
         let base = applicationSupportURL ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
         containerURL = base.appendingPathComponent("com.openai.codex-usage-status", isDirectory: true)
         indexURL = containerURL.appendingPathComponent("profiles.json")
         saltURL = containerURL.appendingPathComponent("profile-salt")
         salt = Data()
-        load()
+        if loadOnInit { load() }
+    }
+
+    /// Performs the legacy profile/index read away from the main actor. The
+    /// synchronous implementation remains available for deterministic tests
+    /// and migration callers; startup uses this entry point.
+    func loadAsynchronously(completion: (() -> Void)? = nil) {
+        let fileManager = self.fileManager
+        let containerURL = self.containerURL
+        let indexURL = self.indexURL
+        let saltURL = self.saltURL
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            var loadedSalt = Data()
+            var loadedProfiles: [AccountProfile] = []
+            var loadError: String?
+            do {
+                try fileManager.createDirectory(at: containerURL, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                if fileManager.fileExists(atPath: saltURL.path) {
+                    loadedSalt = try Data(contentsOf: saltURL)
+                    guard loadedSalt.count == 32 else {
+                        throw NSError(domain: "CodexUsageStatus.ProfileStore", code: 1, userInfo: [NSLocalizedDescriptionKey: "profile salt 長度無效"])
+                    }
+                    try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: saltURL.path)
+                } else {
+                    loadedSalt = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
+                    try loadedSalt.write(to: saltURL, options: [.atomic])
+                    try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: saltURL.path)
+                }
+                if fileManager.fileExists(atPath: indexURL.path) {
+                    let data = try Data(contentsOf: indexURL)
+                    let decoder = JSONDecoder()
+                    decoder.dateDecodingStrategy = .secondsSince1970
+                    do {
+                        if let envelope = try? decoder.decode(AccountProfileIndex.self, from: data) {
+                            loadedProfiles = envelope.profiles
+                        } else {
+                            loadedProfiles = try decoder.decode([AccountProfile].self, from: data)
+                        }
+                    } catch {
+                        let backup = indexURL.deletingPathExtension()
+                            .appendingPathExtension("corrupt.\(Int(Date().timeIntervalSince1970))")
+                        try? fileManager.moveItem(at: indexURL, to: backup)
+                        loadError = "帳號 profile 索引損壞，已保留副本：\(backup.lastPathComponent)"
+                    }
+                }
+            } catch {
+                loadError = "帳號 profile 索引無法讀取，將保留目前可用資料。"
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if !loadedSalt.isEmpty { self.salt = loadedSalt }
+                self.profiles = loadedProfiles
+                self.errorMessage = loadError
+                completion?()
+            }
+        }
     }
 
     func load() {
@@ -394,6 +456,20 @@ final class AccountProfileStore: ObservableObject {
     }
 
     private func persist() {
+        if asynchronousPersistence {
+            do {
+                let envelope = AccountProfileIndex(schemaVersion: 1, profiles: profiles)
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .secondsSince1970
+                encoder.outputFormatting = [.sortedKeys]
+                let data = try encoder.encode(envelope)
+                Task { await PersistenceWriteCoordinator.shared.enqueue(url: indexURL, data: data, fileManager: fileManager) }
+                errorMessage = nil
+            } catch {
+                errorMessage = "帳號 profile 索引無法保存：\(error.localizedDescription)"
+            }
+            return
+        }
         do {
             try fileManager.createDirectory(at: containerURL, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let encoder = JSONEncoder()

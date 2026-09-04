@@ -90,6 +90,11 @@ struct CodexUsageStatusTests {
             ("Codex prompt shortcuts", testCodexPromptShortcuts),
             ("temporary clipboard guards", testClipboardTemporaryOperationPolicy),
             ("retired feature cleanup", testRetiredFeatureCleanup)
+            ,("App Server retry policy", testAppServerRetryPolicy)
+            ,("refresh request coalescing", testRefreshRequestCoalescing)
+            ,("App Server replacement admission", testAppServerReplacementAdmission)
+            ,("managed worker admission", testManagedWorkerAdmission)
+            ,("bounded termination flush", testBoundedTerminationFlush)
         ]
 
         var failures = 0
@@ -109,7 +114,14 @@ struct CodexUsageStatusTests {
             failures += 1
             print("FAIL login lifecycle shutdown: \(error)")
         }
-        print("\(tests.count + 1 - failures)/\(tests.count + 1) tests passed")
+        do {
+            try await testPersistenceWriteCoordinator()
+            print("PASS persistence write coordinator")
+        } catch {
+            failures += 1
+            print("FAIL persistence write coordinator: \(error)")
+        }
+        print("\(tests.count + 2 - failures)/\(tests.count + 2) tests passed")
         if failures > 0 { exit(1) }
     }
 
@@ -1734,6 +1746,51 @@ struct CodexUsageStatusTests {
             now: Date(timeIntervalSince1970: 1_725_000_000)
         )
         try expect(FileManager.default.fileExists(atPath: failureFeedURL.path), "failed quarantine preserves the original feed file")
+    }
+
+    private static func testAppServerRetryPolicy() throws {
+        try expect(AppServerRetryPolicy.initializationWatchdogNanoseconds == 8_000_000_000, "initialize watchdog is 8 seconds")
+        try expect(AppServerRetryPolicy.delay(for: 0) == 1_000_000_000, "first retry is one second")
+        try expect(AppServerRetryPolicy.delay(for: 1) == 2_000_000_000, "second retry is two seconds")
+        try expect(AppServerRetryPolicy.delay(for: 2) == 4_000_000_000, "third retry is four seconds")
+        try expect(AppServerRetryPolicy.delay(for: 3) == nil, "automatic retries stop after three attempts")
+    }
+
+    private static func testRefreshRequestCoalescing() throws {
+        try expect(RefreshRequestCoalescer.shouldSchedule(isScheduled: false), "first refresh schedules")
+        try expect(!RefreshRequestCoalescer.shouldSchedule(isScheduled: true), "duplicate refresh is coalesced")
+    }
+
+    private static func testAppServerReplacementAdmission() throws {
+        try expect(AppServerReplacementAdmissionPolicy.canStartReplacement(oldProcessRunning: false, replacementInFlight: false), "replacement starts when idle")
+        try expect(!AppServerReplacementAdmissionPolicy.canStartReplacement(oldProcessRunning: true, replacementInFlight: false), "replacement waits for old process")
+        try expect(!AppServerReplacementAdmissionPolicy.canStartReplacement(oldProcessRunning: false, replacementInFlight: true), "replacement gate is single flight")
+    }
+
+    private static func testManagedWorkerAdmission() throws {
+        try expect(ManagedWorkerAdmissionPolicy.maxActiveAppServers == 1, "only one managed App Server is admitted")
+        try expect(ManagedWorkerAdmissionPolicy.admits(isCurrentAccount: true, activeCount: 0, replacementInFlight: false), "current account can start")
+        try expect(!ManagedWorkerAdmissionPolicy.admits(isCurrentAccount: false, activeCount: 0, replacementInFlight: false), "background account remains cache-only")
+        try expect(!ManagedWorkerAdmissionPolicy.admits(isCurrentAccount: true, activeCount: 1, replacementInFlight: false), "second process is rejected")
+        try expect(!ManagedWorkerAdmissionPolicy.admits(isCurrentAccount: true, activeCount: 0, replacementInFlight: true), "replacement gate prevents overlap")
+    }
+
+    private static func testBoundedTerminationFlush() throws {
+        try expect(TerminationFlushPolicy.timeoutNanoseconds == 500_000_000, "termination flush is bounded to 500ms")
+    }
+
+    private static func testPersistenceWriteCoordinator() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("codex-persistence-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("snapshot.json")
+        await PersistenceWriteCoordinator.shared.enqueue(url: file, data: Data("latest".utf8))
+        await PersistenceWriteCoordinator.shared.enqueue(url: file, data: Data("newest".utf8))
+        await PersistenceWriteCoordinator.shared.flush(timeoutNanoseconds: 2_000_000_000)
+        let persisted = try Data(contentsOf: file)
+        try expect(persisted == Data("newest".utf8), "coalesced write keeps newest payload")
+        await PersistenceWriteCoordinator.shared.enqueue(url: file, data: nil)
+        await PersistenceWriteCoordinator.shared.flush(timeoutNanoseconds: 2_000_000_000)
+        try expect(!FileManager.default.fileExists(atPath: file.path), "nil payload removes file")
     }
 
 

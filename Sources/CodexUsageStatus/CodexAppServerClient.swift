@@ -1,6 +1,36 @@
 import Foundation
 import OSLog
 
+enum AppServerRetryPolicy {
+    static let initializationWatchdogNanoseconds: UInt64 = 8_000_000_000
+    static let automaticRetryDelaysNanoseconds: [UInt64] = [
+        1_000_000_000, 2_000_000_000, 4_000_000_000
+    ]
+
+    static func delay(for attempt: Int) -> UInt64? {
+        guard automaticRetryDelaysNanoseconds.indices.contains(attempt) else { return nil }
+        return automaticRetryDelaysNanoseconds[attempt]
+    }
+}
+
+enum RefreshRequestCoalescer {
+    static func shouldSchedule(isScheduled: Bool) -> Bool { !isScheduled }
+}
+
+enum AppServerReplacementAdmissionPolicy {
+    static func canStartReplacement(oldProcessRunning: Bool, replacementInFlight: Bool) -> Bool {
+        !oldProcessRunning && !replacementInFlight
+    }
+}
+
+enum ManagedWorkerAdmissionPolicy {
+    static let maxActiveAppServers = 1
+
+    static func admits(isCurrentAccount: Bool, activeCount: Int, replacementInFlight: Bool) -> Bool {
+        isCurrentAccount && !replacementInFlight && activeCount < maxActiveAppServers
+    }
+}
+
 @MainActor
 final class CodexAppServerClient {
     var onStateChange: ((ConnectionState, String?) -> Void)?
@@ -42,7 +72,11 @@ final class CodexAppServerClient {
     private var accountRefreshTask: Task<Void, Never>?
     private var credentialWatchTask: Task<Void, Never>?
     private var resetTimeoutTask: Task<Void, Never>?
+    private var initializeWatchdogTask: Task<Void, Never>?
+    private var refreshRequestTask: Task<Void, Never>?
+    private var processReplacementTask: Task<Void, Never>?
     private var reconnectAttempt = 0
+    private var automaticRetryExhausted = false
     private var isStopping = false
     /// App Server requests are admitted only after the initialize handshake
     /// completes.  A running process alone is not sufficient: sending reads
@@ -78,16 +112,26 @@ final class CodexAppServerClient {
         accountRefreshTask?.cancel()
         credentialWatchTask?.cancel()
         resetTimeoutTask?.cancel()
+        initializeWatchdogTask?.cancel()
+        refreshRequestTask?.cancel()
+        processReplacementTask?.cancel()
         reconnectTask?.cancel()
     }
 
     func start() {
         isStopping = false
         reconnectAttempt = 0
+        automaticRetryExhausted = false
         observedCredentialSignature = credentialSignature()
         connect()
         resetTimeoutTask?.cancel()
         resetTimeoutTask = nil
+        initializeWatchdogTask?.cancel()
+        initializeWatchdogTask = nil
+        refreshRequestTask?.cancel()
+        refreshRequestTask = nil
+        processReplacementTask?.cancel()
+        processReplacementTask = nil
         startRefreshTasks()
     }
 
@@ -146,6 +190,13 @@ final class CodexAppServerClient {
     }
 
     func stop() {
+        stopImmediately()
+    }
+
+    /// Stops the App Server and waits for the child process to exit off the
+    /// main actor. Account switching uses this admission path so a replacement
+    /// can never overlap the old process, even while SIGTERM is being handled.
+    func stopAndWait() async {
         isStopping = true
         refreshTask?.cancel()
         refreshTask = nil
@@ -157,6 +208,39 @@ final class CodexAppServerClient {
         credentialWatchTask = nil
         resetTimeoutTask?.cancel()
         resetTimeoutTask = nil
+        initializeWatchdogTask?.cancel()
+        initializeWatchdogTask = nil
+        refreshRequestTask?.cancel()
+        refreshRequestTask = nil
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        pendingRequests.removeAll()
+        let oldProcess = process
+        detachProcess()
+        publish(.stopped, nil)
+        if let oldProcess {
+            await Task.detached(priority: .utility) { oldProcess.waitUntilExit() }.value
+        }
+    }
+
+    private func stopImmediately() {
+        isStopping = true
+        refreshTask?.cancel()
+        refreshTask = nil
+        usageRefreshTask?.cancel()
+        usageRefreshTask = nil
+        accountRefreshTask?.cancel()
+        accountRefreshTask = nil
+        credentialWatchTask?.cancel()
+        credentialWatchTask = nil
+        resetTimeoutTask?.cancel()
+        resetTimeoutTask = nil
+        initializeWatchdogTask?.cancel()
+        initializeWatchdogTask = nil
+        refreshRequestTask?.cancel()
+        refreshRequestTask = nil
+        processReplacementTask?.cancel()
+        processReplacementTask = nil
         reconnectTask?.cancel()
         pendingRequests.removeAll()
         detachProcess()
@@ -164,10 +248,19 @@ final class CodexAppServerClient {
     }
 
     func refresh() {
+        reconnectAttempt = 0
+        automaticRetryExhausted = false
         guard !checkCredentialChange() else { return }
-        refreshRateLimits()
-        refreshTokenActivity()
-        refreshAccount()
+        guard RefreshRequestCoalescer.shouldSchedule(isScheduled: refreshRequestTask != nil) else { return }
+        refreshRequestTask = Task { @MainActor [weak self] in
+            defer { self?.refreshRequestTask = nil }
+            await Task.yield()
+            guard let self, !Task.isCancelled, !self.isStopping else { return }
+            if self.process?.isRunning != true { self.connect(); return }
+            self.refreshRateLimits()
+            self.refreshTokenActivity()
+            self.refreshAccount()
+        }
     }
 
     func refreshRateLimits() {
@@ -240,7 +333,7 @@ final class CodexAppServerClient {
     }
 
     private func connect() {
-        guard !isStopping, process?.isRunning != true else { return }
+        guard !isStopping, process?.isRunning != true, processReplacementTask == nil else { return }
         guard let executable = resolveCodexExecutable() else {
             publish(.error, "找不到 Codex CLI。請確認 ChatGPT.app 已安裝，或設定 CODEX_CLI_PATH。")
             onTokenActivityState?(.error, "找不到 Codex CLI。")
@@ -316,6 +409,17 @@ final class CodexAppServerClient {
             ],
             kind: .initialize
         )
+        initializeWatchdogTask?.cancel()
+        initializeWatchdogTask = Task { @MainActor [weak self, weak process] in
+            try? await Task.sleep(nanoseconds: AppServerRetryPolicy.initializationWatchdogNanoseconds)
+            guard !Task.isCancelled, let self, !self.isStopping,
+                  !self.hasCompletedInitialization,
+                  self.process === process else { return }
+            self.pendingRequests.removeAll()
+            self.detachProcess()
+            self.publish(.error, "Codex App Server 初始化逾時，正在重試。")
+            self.scheduleReconnect()
+        }
     }
 
     private func sendNotification(method: String, params: Any? = nil) {
@@ -385,11 +489,23 @@ final class CodexAppServerClient {
 
         switch kind {
         case .initialize:
+            initializeWatchdogTask?.cancel()
+            initializeWatchdogTask = nil
             hasCompletedInitialization = true
+            reconnectAttempt = 0
+            automaticRetryExhausted = false
             sendNotification(method: "initialized")
             _ = sendRequest(method: "account/rateLimits/read", params: nil, kind: .rateLimitsRead)
-            _ = sendRequest(method: "account/usage/read", params: nil, kind: .usageRead)
-            _ = sendRequest(method: "account/read", params: ["refreshToken": false], kind: .accountRead)
+            // Quota is the first-paint-critical read. Slower metadata follows
+            // on subsequent turns so the shell/popover can become usable first.
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                guard let self, !self.isStopping, self.hasCompletedInitialization else { return }
+                _ = self.sendRequest(method: "account/usage/read", params: nil, kind: .usageRead)
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard !Task.isCancelled, !self.isStopping, self.hasCompletedInitialization else { return }
+                _ = self.sendRequest(method: "account/read", params: ["refreshToken": false], kind: .accountRead)
+            }
             publish(.connected, nil)
         case .rateLimitsRead:
             guard let result = message.result else {
@@ -455,7 +571,14 @@ final class CodexAppServerClient {
 
     private func handleError(_ message: String, for kind: PendingRequest) {
         switch kind {
-        case .initialize, .rateLimitsRead:
+        case .initialize:
+            initializeWatchdogTask?.cancel()
+            initializeWatchdogTask = nil
+            logger.error("App Server request failed")
+            publish(.error, message)
+            detachProcess()
+            scheduleReconnect()
+        case .rateLimitsRead:
             logger.error("App Server request failed")
             publish(.error, message)
         case .usageRead:
@@ -581,6 +704,7 @@ final class CodexAppServerClient {
     }
 
     private func restartAfterCredentialChange() {
+        guard processReplacementTask == nil else { return }
         latestSnapshot = nil
         latestAuthMode = nil
         latestAccountIdentityKey = nil
@@ -593,15 +717,33 @@ final class CodexAppServerClient {
         onAccountHealthState?(.loading, "偵測到登入帳號變更，正在重新同步…")
         onTokenActivityState?(.loading, "偵測到登入帳號變更，正在重新同步…")
         publish(.connecting, "偵測到登入帳號變更，正在重新同步…")
+        let oldProcess = process
         detachProcess()
-        connect()
+        guard let oldProcess, oldProcess.isRunning else {
+            connect()
+            return
+        }
+        processReplacementTask = Task { @MainActor [weak self] in
+            // waitUntilExit is blocking by design, but it runs on a utility
+            // task so the main actor remains available for the HUD/popover.
+            await Task.detached(priority: .utility) {
+                oldProcess.waitUntilExit()
+            }.value
+            guard let self, !self.isStopping else { return }
+            self.processReplacementTask = nil
+            self.connect()
+        }
     }
 
     private func scheduleReconnect() {
-        guard !isStopping, reconnectTask == nil, reconnectAttempt < 5 else { return }
+        guard !isStopping, reconnectTask == nil, !automaticRetryExhausted else { return }
         let attempt = reconnectAttempt
+        guard let delay = AppServerRetryPolicy.delay(for: attempt) else {
+            automaticRetryExhausted = true
+            publish(.error, "App Server 自動重試已停止，請按 Refresh。")
+            return
+        }
         reconnectAttempt += 1
-        let delay = UInt64(1 << min(attempt, 4)) * 1_000_000_000
         reconnectTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: delay)
             guard !Task.isCancelled else { return }

@@ -134,11 +134,20 @@ final class TokenActivityStore: ObservableObject {
 
     let fileURL: URL
     private let fileManager: FileManager
+    private let loadOnInit: Bool
+    private let asynchronousPersistence: Bool
     private let calendar: Calendar
     private let retentionDays = 30
 
-    init(fileManager: FileManager = .default, applicationSupportURL: URL? = nil) {
+    init(
+        fileManager: FileManager = .default,
+        applicationSupportURL: URL? = nil,
+        loadOnInit: Bool = true,
+        asynchronousPersistence: Bool = false
+    ) {
         self.fileManager = fileManager
+        self.loadOnInit = loadOnInit
+        self.asynchronousPersistence = asynchronousPersistence
         var utc = Calendar(identifier: .gregorian)
         utc.timeZone = TimeZone(secondsFromGMT: 0)!
         calendar = utc
@@ -147,16 +156,55 @@ final class TokenActivityStore: ObservableObject {
         fileURL = base
             .appendingPathComponent("com.openai.codex-usage-status", isDirectory: true)
             .appendingPathComponent("token-activity.json")
-        load()
+        if loadOnInit { load() }
     }
 
-    init(fileManager: FileManager = .default, fileURL: URL) {
+    init(
+        fileManager: FileManager = .default,
+        fileURL: URL,
+        loadOnInit: Bool = true,
+        asynchronousPersistence: Bool = false
+    ) {
         self.fileManager = fileManager
+        self.loadOnInit = loadOnInit
+        self.asynchronousPersistence = asynchronousPersistence
         var utc = Calendar(identifier: .gregorian)
         utc.timeZone = TimeZone(secondsFromGMT: 0)!
         self.calendar = utc
         self.fileURL = fileURL
-        load()
+        if loadOnInit { load() }
+    }
+
+    func loadAsynchronously(now: Date = Date(), completion: (() -> Void)? = nil) {
+        let fileURL = self.fileURL
+        let fileManager = self.fileManager
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            var loaded: TokenActivitySnapshot?
+            var loadError: String?
+            if fileManager.fileExists(atPath: fileURL.path) {
+                do {
+                    let data = try Data(contentsOf: fileURL)
+                    let decoder = JSONDecoder()
+                    decoder.dateDecodingStrategy = .secondsSince1970
+                    loaded = try decoder.decode(TokenActivitySnapshot.self, from: data)
+                } catch {
+                    loadError = "Token Activity 資料無法讀取，已保留目前記憶體中的資料。"
+                }
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                guard loadError == nil else {
+                    self.errorMessage = loadError
+                    completion?()
+                    return
+                }
+                if let loaded { self.snapshot = self.prune(loaded, now: now) }
+                self.errorMessage = nil
+                if let loaded, self.snapshot != loaded { self.persist() }
+                completion?()
+            }
+        }
     }
 
     func load(now: Date = Date()) {
@@ -201,14 +249,15 @@ final class TokenActivityStore: ObservableObject {
 
     func clear() {
         snapshot = nil
-        do {
-            if fileManager.fileExists(atPath: fileURL.path) {
-                try fileManager.removeItem(at: fileURL)
-            }
+        if asynchronousPersistence {
+            Task { await PersistenceWriteCoordinator.shared.enqueue(url: fileURL, data: nil, fileManager: fileManager) }
             errorMessage = nil
-        } catch {
-            errorMessage = "Token Activity 無法清除：\(error.localizedDescription)"
+            return
         }
+        do {
+            if fileManager.fileExists(atPath: fileURL.path) { try fileManager.removeItem(at: fileURL) }
+            errorMessage = nil
+        } catch { errorMessage = "Token Activity 無法清除：\(error.localizedDescription)" }
     }
 
     private func prune(_ value: TokenActivitySnapshot, now: Date) -> TokenActivitySnapshot {
@@ -231,6 +280,19 @@ final class TokenActivityStore: ObservableObject {
     }
 
     private func persist() {
+        if asynchronousPersistence {
+            do {
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .secondsSince1970
+                encoder.outputFormatting = [.sortedKeys]
+                let data = try snapshot.map(encoder.encode)
+                Task { await PersistenceWriteCoordinator.shared.enqueue(url: fileURL, data: data, fileManager: fileManager) }
+                errorMessage = nil
+            } catch {
+                errorMessage = "Token Activity 無法保存：\(error.localizedDescription)"
+            }
+            return
+        }
         do {
             let directory = fileURL.deletingLastPathComponent()
             try fileManager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -249,6 +311,10 @@ final class TokenActivityStore: ObservableObject {
         } catch {
             errorMessage = "Token Activity 無法保存：\(error.localizedDescription)"
         }
+    }
+
+    func flushPendingWrites() async {
+        await PersistenceWriteCoordinator.shared.flush()
     }
 
     private static func dateString(_ date: Date) -> String {

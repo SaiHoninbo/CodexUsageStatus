@@ -14,6 +14,7 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/AccountModels.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/ProfileStore.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/CodexCLIResolver.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/CodexAppServerClient.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/AccountManagementService.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/AccountProfileDisplay.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/ThresholdPolicy.swift" \
@@ -34,6 +35,7 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDUpdateBadgePolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDColorPalette.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/RetiredFeatureCleanup.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/PersistenceWriteCoordinator.swift" \
   "$ROOT_DIR/Tests/CodexUsageStatusTests/TestRunner.swift" \
   -o "$BUILD_DIR/CodexUsageStatusTests"
 

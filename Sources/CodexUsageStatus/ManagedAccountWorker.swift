@@ -51,6 +51,7 @@ final class ManagedAccountWorker: Identifiable {
 
     func start() { client.start() }
     func stop() { client.stop() }
+    func stopAndWait() async { await client.stopAndWait() }
     func refresh() { client.refresh() }
     func refreshRateLimits() { client.refreshRateLimits() }
     func refreshTokenActivity() { client.refreshTokenActivity() }
