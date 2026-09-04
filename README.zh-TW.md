@@ -62,6 +62,10 @@ Codex Usage Status 是 macOS 選單列用量 HUD，用來監控本機 Codex App 
 - HUD 任意位置按右鍵可開啟原生操作選單（重新整理、帳號範圍、更新頻率、剪貼簿、更新檢查與位置重設）
 - GitHub Releases 更新檢查
 
+Popover 固定收斂為三個分頁：「概覽」顯示目前配額與快速操作；「歷史」顯示
+quota 與 Token Activity 趨勢；「設定」集中 HUD、通知、帳號管理、同步與更新。
+App 不執行直接 Git client，也不再輪詢第三方 Feed。
+
 選單列主文字固定以目前作用中帳號的 quota 為主，例如 `Codex 78%`。Token Activity 與 reset credit 詳情會留在 popover，不會取代最重要的 quota 摘要。
 
 ## 帳號與隱私邊界
@@ -150,12 +154,3 @@ outputs/CodexUsageStatus.app.zip
 本專案採用 MIT License，詳見 [LICENSE](LICENSE)。
 
 安全與隱私邊界請參考 [SECURITY.md](SECURITY.md)。
-## 外部重置公告
-
-App 可選擇追蹤使用者提供的 RSS／Atom Feed，將可能的重置時間以「僅供參考」
-公告顯示在 HUD 與「公告」分頁。用量與正式重置時間仍完全以 App Server 為準，
-Feed 推測不會覆寫 `UsageSnapshot` 或用量歷史；功能預設關閉，可手動或定期更新。
-
-本 App 不使用 X API、不讀取瀏覽器 Cookie，也不建立或管理 X token。完整 HTTPS
-Feed URL 會保存在 owner-only Application Support；若供應商將 credential 放在 URL
-query 中，該值會隨 URL 保存，但不會寫入 log、通知、錯誤訊息或 analytics。

@@ -46,15 +46,7 @@ final class UsageViewModel: ObservableObject {
     @Published private(set) var notifyOnAccountSwitch: Bool
     @Published private(set) var floatingHUDEnabled: Bool
     @Published private(set) var updateState: AppUpdateState = .idle
-    @Published private(set) var feedTrackingState: FeedTrackingState = .disabled
-    @Published private(set) var feedErrorMessage: String?
-    @Published private(set) var announcementEvents: [AnnouncementEvent] = []
-    @Published private(set) var feedURL: URL?
-    @Published private(set) var feedEnabled: Bool
-    @Published private(set) var feedCadence: FeedPollingCadence
-    var feedPredictionsByPostID: [String: ResetPrediction] { feedTrackingService.envelope.predictionsByPostID }
     @Published var historyRange: HistoryRange = .week
-    @Published var announcementRange: HistoryRange = .week
     @Published var tokenActivityRange: TokenActivityRange = .week
     @Published var accountScope: AccountScope = .current
 
@@ -76,14 +68,14 @@ final class UsageViewModel: ObservableObject {
     private let turnNotificationService = TurnNotificationService()
     private let updateService = AppUpdateService()
     private let updateNotificationService = AppUpdateNotificationService()
-    private let feedTrackingService: FeedTrackingService
-    private let feedNotificationService = FeedNotificationService()
     private let defaults = UserDefaults.standard
     private var displayTimer: Timer?
     private var updateCheckTimer: Timer?
     private var pendingUnidentifiedProfileBoundary = false
     private var defaultClientEnabled = true
     private let maxConcurrentWorkers = 2
+    private var isSchedulingWorkers = false
+    private var isStopping = false
 
     private enum PreferenceKey {
         static let notificationsEnabled = "usage.notifications.enabled"
@@ -106,6 +98,7 @@ final class UsageViewModel: ObservableObject {
     }
 
     init() {
+        RetiredFeatureCleanup.run()
         let store = HistoryStore()
         historyStore = store
         legacyHistoryURL = store.fileURL
@@ -130,20 +123,9 @@ final class UsageViewModel: ObservableObject {
         showTurnContentInNotifications = defaults.object(forKey: PreferenceKey.turnContent) as? Bool ?? false
         notifyOnAccountSwitch = defaults.object(forKey: PreferenceKey.accountSwitch) as? Bool ?? false
         floatingHUDEnabled = defaults.object(forKey: PreferenceKey.floatingHUDEnabled) as? Bool ?? true
-        feedEnabled = defaults.object(forKey: "feed.enabled") as? Bool ?? false
-        feedCadence = FeedPollingCadence(rawValue: defaults.object(forKey: "feed.cadence") as? Int ?? FeedPollingCadence.hour.rawValue) ?? .hour
-        if let raw = defaults.string(forKey: "feed.url") { feedURL = URL(string: raw) } else { feedURL = nil }
-        feedTrackingService = FeedTrackingService()
-        feedTrackingService.notificationService = feedNotificationService
         profileStore = AccountProfileStore()
         accountProfiles = profileStore.accountProfiles()
         profileStoreErrorMessage = profileStore.errorMessage
-        feedTrackingService.onStateChange = { [weak self] state, message in
-            Task { @MainActor [weak self] in self?.feedTrackingState = state; self?.feedErrorMessage = message }
-        }
-        feedTrackingService.onEventsChange = { [weak self] events in
-            Task { @MainActor [weak self] in self?.announcementEvents = events }
-        }
         quotaRefreshIntervalSeconds = Self.clampQuotaInterval(defaults.object(forKey: PreferenceKey.quotaRefreshInterval) as? Int ?? 60)
         globalSyncIntervalSeconds = Self.clampAccountInterval(defaults.object(forKey: PreferenceKey.accountRefreshInterval) as? Int ?? 300)
         tokenActivityRefreshIntervalSeconds = Self.clampTokenInterval(defaults.object(forKey: PreferenceKey.tokenActivityRefreshInterval) as? Int ?? 900)
@@ -154,10 +136,6 @@ final class UsageViewModel: ObservableObject {
             account: globalSyncIntervalSeconds,
             credentialWatch: credentialWatchIntervalSeconds
         )
-        feedTrackingService.notificationsAllowed = { [weak self] in
-            guard let self else { return false }
-            return self.notificationsEnabled && (self.notificationAuthorizationStatus == .authorized || self.notificationAuthorizationStatus == .provisional)
-        }
         accountManagementService.onLoginOutput = { [weak self] profileID, output in
             self?.loginStates[profileID] = output
         }
@@ -194,8 +172,6 @@ final class UsageViewModel: ObservableObject {
             self.currentDate = Date()
             self.errorMessage = nil
             self.resetCredits = snapshot.rateLimitResetCredits
-            let officialResetDates = [snapshot.primary?.resetsAt, snapshot.secondary?.resetsAt, snapshot.gptReserveWeekly?.resetsAt].compactMap { $0 }.map { Date(timeIntervalSince1970: TimeInterval($0)) }
-            self.feedTrackingService.corroborate(officialResetDates: officialResetDates)
             if let selected = self.selectedResetCreditID,
                !(snapshot.rateLimitResetCredits?.availableCredits.contains(where: { $0.id == selected }) ?? false) {
                 self.selectedResetCreditID = nil
@@ -292,6 +268,7 @@ final class UsageViewModel: ObservableObject {
     }
 
     func start() {
+        isStopping = false
         defaultClientEnabled = true
         loginItemManager.refresh()
         loginItemManager.registerIfNeeded()
@@ -303,13 +280,9 @@ final class UsageViewModel: ObservableObject {
         startDisplayTimer()
         checkForUpdates()
         startUpdateCheckTimer()
-        feedTrackingService.start(enabled: feedEnabled, cadence: feedCadence, feedURL: feedURL)
         if let profile = currentProfile, profile.isManaged {
             defaultClientEnabled = false
             ensureManagedWorker(for: profile)
-            if profileStore.hasCredentials(for: profile) {
-                managedWorkers[profile.id]?.start()
-            }
         } else {
             client.start()
         }
@@ -317,12 +290,12 @@ final class UsageViewModel: ObservableObject {
     }
 
     func stop() {
+        isStopping = true
         defaultClientEnabled = false
         displayTimer?.invalidate()
         displayTimer = nil
         updateCheckTimer?.invalidate()
         updateCheckTimer = nil
-        feedTrackingService.stop()
         client.stop()
         accountManagementService.stopAllLogins()
         for worker in managedWorkers.values { worker.stop() }
@@ -394,8 +367,8 @@ final class UsageViewModel: ObservableObject {
         if let worker = managedWorkers[id] {
             applyManagedCachedData(for: id)
             if profileStore.hasCredentials(for: profile) {
-                worker.start()
-                worker.refresh()
+                scheduleManagedWorkers(preferredID: id)
+                if worker.isRunning { worker.refresh() }
             }
         } else {
             client.refreshRateLimits()
@@ -416,8 +389,8 @@ final class UsageViewModel: ObservableObject {
         resetCreditOperationState = .idle
         resetCreditMessage = "已建立 \(profile.displayName)"
         if profileStore.hasCredentials(for: profile) {
-            managedWorkers[profile.id]?.start()
-            managedWorkers[profile.id]?.refresh()
+            scheduleManagedWorkers(preferredID: profile.id)
+            if managedWorkers[profile.id]?.isRunning == true { managedWorkers[profile.id]?.refresh() }
         }
         return profile
     }
@@ -439,8 +412,8 @@ final class UsageViewModel: ObservableObject {
                 self.loginStates[profileID] = "登入完成，正在同步…"
                 self.profileStore.setWorkerEnabled(true, for: profileID)
                 self.ensureManagedWorker(for: profile)
-                self.managedWorkers[profileID]?.start()
-                self.managedWorkers[profileID]?.refresh()
+                self.scheduleManagedWorkers(preferredID: profileID)
+                if self.managedWorkers[profileID]?.isRunning == true { self.managedWorkers[profileID]?.refresh() }
             case .failure(let error):
                 self.loginStates[profileID] = error.localizedDescription
             }
@@ -461,8 +434,8 @@ final class UsageViewModel: ObservableObject {
             try profileStore.importCodexHome(from: source, into: profile)
             loginStates[profile.id] = "已匯入 profile，正在同步…"
             ensureManagedWorker(for: profile)
-            managedWorkers[profile.id]?.start()
-            managedWorkers[profile.id]?.refresh()
+            scheduleManagedWorkers(preferredID: profile.id)
+            if managedWorkers[profile.id]?.isRunning == true { managedWorkers[profile.id]?.refresh() }
         } catch {
             loginStates[profile.id] = error.localizedDescription
         }
@@ -475,35 +448,39 @@ final class UsageViewModel: ObservableObject {
         for profile in profileStore.accountProfiles() where profile.isManaged {
             profileStore.setSyncInterval(globalSyncIntervalSeconds, for: profile.id)
         }
-        restartManagedWorkersForScheduleChange()
+        updateManagedWorkerIntervalsAndSchedule()
     }
 
     func setQuotaRefreshInterval(_ seconds: Int) {
         quotaRefreshIntervalSeconds = Self.clampQuotaInterval(seconds)
         defaults.set(quotaRefreshIntervalSeconds, forKey: PreferenceKey.quotaRefreshInterval)
         client.updateIntervals(quota: quotaRefreshIntervalSeconds)
-        restartManagedWorkersForScheduleChange()
+        updateManagedWorkerIntervalsAndSchedule()
     }
 
     func setTokenActivityRefreshInterval(_ seconds: Int) {
         tokenActivityRefreshIntervalSeconds = Self.clampTokenInterval(seconds)
         defaults.set(tokenActivityRefreshIntervalSeconds, forKey: PreferenceKey.tokenActivityRefreshInterval)
         client.updateIntervals(usage: tokenActivityRefreshIntervalSeconds)
-        restartManagedWorkersForScheduleChange()
+        updateManagedWorkerIntervalsAndSchedule()
     }
 
     func setCredentialWatchInterval(_ seconds: Int) {
         credentialWatchIntervalSeconds = Self.clampCredentialWatchInterval(seconds)
         defaults.set(credentialWatchIntervalSeconds, forKey: PreferenceKey.credentialWatchInterval)
         client.updateIntervals(credentialWatch: credentialWatchIntervalSeconds)
-        restartManagedWorkersForScheduleChange()
+        updateManagedWorkerIntervalsAndSchedule()
     }
 
     func removeProfile(id: UUID) {
         accountManagementService.stopLogin(profileID: id)
+        // Invalidate the callback generation before stopping the worker. The
+        // stop transition is synchronous; clearing it first prevents the
+        // scheduler from recreating a profile that is in the middle of being
+        // deleted.
+        workerGenerations[id] = nil
         managedWorkers[id]?.stop()
         managedWorkers[id] = nil
-        workerGenerations[id] = nil
         managedSnapshots[id] = nil
         managedTokenActivities[id] = nil
         managedAccountHealth[id] = nil
@@ -520,6 +497,7 @@ final class UsageViewModel: ObservableObject {
                 accountHealth = nil
             }
         }
+        scheduleManagedWorkers(preferredID: currentProfileID)
     }
 
     func setTurnSuccessNotifications(_ enabled: Bool) { notifyOnTurnSuccess = enabled; defaults.set(enabled, forKey: PreferenceKey.turnSuccess) }
@@ -530,10 +508,6 @@ final class UsageViewModel: ObservableObject {
     func setTurnContentInNotifications(_ enabled: Bool) { showTurnContentInNotifications = enabled; defaults.set(enabled, forKey: PreferenceKey.turnContent) }
     func setAccountSwitchNotifications(_ enabled: Bool) { notifyOnAccountSwitch = enabled; defaults.set(enabled, forKey: PreferenceKey.accountSwitch) }
     func setFloatingHUDEnabled(_ enabled: Bool) { floatingHUDEnabled = enabled; defaults.set(enabled, forKey: PreferenceKey.floatingHUDEnabled) }
-    func setFeedEnabled(_ enabled: Bool) { feedEnabled = enabled; defaults.set(enabled, forKey: "feed.enabled"); feedTrackingService.start(enabled: feedEnabled, cadence: feedCadence, feedURL: feedURL) }
-    func setFeedURL(_ url: URL?) { feedURL = url; defaults.set(url?.absoluteString, forKey: "feed.url"); feedTrackingService.start(enabled: feedEnabled, cadence: feedCadence, feedURL: feedURL) }
-    func setFeedCadence(_ cadence: FeedPollingCadence) { feedCadence = cadence; defaults.set(cadence.rawValue, forKey: "feed.cadence"); feedTrackingService.start(enabled: feedEnabled, cadence: feedCadence, feedURL: feedURL) }
-    func refreshFeed() { feedTrackingService.fetch() }
 
     func selectResetCredit(id: String?) {
         guard let id,
@@ -627,27 +601,80 @@ final class UsageViewModel: ObservableObject {
     }
 
     private func startManagedWorkers() {
-        let candidates = profileStore.accountProfiles().filter { $0.isManaged && $0.workerEnabled && profileStore.hasCredentials(for: $0) }
-        for profile in candidates.prefix(maxConcurrentWorkers) {
-            ensureManagedWorker(for: profile)
-            managedWorkers[profile.id]?.start()
-        }
-        for profile in candidates.dropFirst(maxConcurrentWorkers) {
-            workerStates[profile.id] = .disconnected
-            workerErrors[profile.id] = "等待同步槽位"
-        }
+        scheduleManagedWorkers(preferredID: currentProfileID)
     }
 
-    private func restartManagedWorkersForScheduleChange() {
+    /// Updates existing App Server polling schedules in place and then lets
+    /// the central scheduler fill at most two process slots. Changing an
+    /// interval must never recreate every worker (or briefly start all
+    /// profiles) on the main actor.
+    private func updateManagedWorkerIntervalsAndSchedule() {
         for profile in profileStore.accountProfiles() where profile.isManaged {
-            managedWorkers[profile.id]?.stop()
-            workerGenerations[profile.id] = nil
-            managedWorkers[profile.id] = nil
-            let refreshedProfile = profileStore.profile(for: profile.id) ?? profile
-            ensureManagedWorker(for: refreshedProfile)
-            if refreshedProfile.workerEnabled, profileStore.hasCredentials(for: refreshedProfile) {
-                managedWorkers[profile.id]?.start()
+            ensureManagedWorker(for: profile)
+            managedWorkers[profile.id]?.updateIntervals(
+                quota: quotaRefreshIntervalSeconds,
+                usage: tokenActivityRefreshIntervalSeconds,
+                account: globalSyncIntervalSeconds,
+                credentialWatch: credentialWatchIntervalSeconds
+            )
+        }
+        scheduleManagedWorkers(preferredID: currentProfileID)
+    }
+
+    /// The sole admission point for managed workers.  It prioritizes the
+    /// selected account, starts no more than `maxConcurrentWorkers`, and
+    /// leaves the remaining profiles explicitly queued for a later slot.
+    private func scheduleManagedWorkers(preferredID: UUID? = nil) {
+        guard !isSchedulingWorkers, !isStopping else { return }
+        isSchedulingWorkers = true
+        defer { isSchedulingWorkers = false }
+
+        let eligible = profileStore.accountProfiles().filter {
+            $0.isManaged && $0.workerEnabled && profileStore.hasCredentials(for: $0)
+        }
+        let eligibleIDs = Set(eligible.map(\.id))
+        for profile in eligible { ensureManagedWorker(for: profile) }
+
+        // Stop workers that are no longer eligible before allocating slots.
+        for (id, worker) in managedWorkers where !eligibleIDs.contains(id) {
+            if worker.isRunning { worker.stop() }
+        }
+
+        let ordered = eligible.sorted { lhs, rhs in
+            if lhs.id == preferredID { return true }
+            if rhs.id == preferredID { return false }
+            return lhs.lastSeen > rhs.lastSeen
+        }
+        var runningIDs = Set(managedWorkers.compactMap { id, worker in
+            eligibleIDs.contains(id) && worker.isRunning ? id : nil
+        })
+
+        // Selecting an account is an explicit priority request. Reclaim one
+        // non-selected slot rather than allowing a third process to start.
+        if let preferredID, !runningIDs.contains(preferredID), runningIDs.count >= maxConcurrentWorkers {
+            if let evictedID = runningIDs.first(where: { $0 != preferredID }),
+               let worker = managedWorkers[evictedID] {
+                worker.stop()
+                runningIDs.remove(evictedID)
+                workerStates[evictedID] = .disconnected
+                workerErrors[evictedID] = "等待同步槽位"
             }
+        }
+
+        for profile in ordered {
+            guard let worker = managedWorkers[profile.id] else { continue }
+            if worker.isRunning {
+                runningIDs.insert(profile.id)
+                continue
+            }
+            guard runningIDs.count < maxConcurrentWorkers else {
+                workerStates[profile.id] = .disconnected
+                workerErrors[profile.id] = "等待同步槽位"
+                continue
+            }
+            workerErrors[profile.id] = nil
+            worker.start()
+            runningIDs.insert(profile.id)
         }
     }
 
@@ -676,6 +703,13 @@ final class UsageViewModel: ObservableObject {
             self.workerStates[id] = state
             if let message, !message.isEmpty { self.workerErrors[id] = message }
             else if state == .connected { self.workerErrors[id] = nil }
+            // A background profile can release a slot just as readily as the
+            // selected profile. Re-run the central scheduler before the
+            // current-profile projection guard so another queued worker can
+            // claim that slot immediately.
+            if state == .stopped || state == .offline || state == .error {
+                self.scheduleManagedWorkers(preferredID: self.currentProfileID)
+            }
             guard self.currentProfileID == id else { return }
             self.connectionState = state
             if let message, !message.isEmpty { self.errorMessage = message }
@@ -801,8 +835,6 @@ final class UsageViewModel: ObservableObject {
         currentDate = Date()
         errorMessage = nil
         resetCredits = snapshot.rateLimitResetCredits
-        let officialResetDates = [snapshot.primary?.resetsAt, snapshot.secondary?.resetsAt, snapshot.gptReserveWeekly?.resetsAt].compactMap { $0 }.map { Date(timeIntervalSince1970: TimeInterval($0)) }
-        feedTrackingService.corroborate(officialResetDates: officialResetDates)
         historyStore = HistoryStore(fileURL: profileStore.historyURL(for: profile))
         _ = historyStore.record(snapshot: snapshot, connectionState: .connected, now: snapshot.receivedAt)
         syncHistoryState()
@@ -1073,8 +1105,10 @@ final class UsageViewModel: ObservableObject {
             client.stop()
             ensureManagedWorker(for: selection.profile)
             if profileStore.hasCredentials(for: selection.profile) {
-                managedWorkers[selection.profile.id]?.start()
-                managedWorkers[selection.profile.id]?.refresh()
+                scheduleManagedWorkers(preferredID: selection.profile.id)
+                if managedWorkers[selection.profile.id]?.isRunning == true {
+                    managedWorkers[selection.profile.id]?.refresh()
+                }
             }
         } else {
             defaultClientEnabled = true

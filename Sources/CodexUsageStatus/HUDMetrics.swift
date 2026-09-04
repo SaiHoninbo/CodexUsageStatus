@@ -8,10 +8,12 @@ struct HUDMetrics: Equatable {
     let scaleLevel: HUDScaleLevel
 
     // The current smallest C-layout HUD is the user's 100% reference.
-    // Larger/smaller levels are derived from this 416x240 base as a single
+    // Larger/smaller levels are derived from this compact 416x196.8 base as a single
     // proportional layout, rather than treating the old 520x260 draft as
     // the standard.
-    static let canonicalPanelSize = CGSize(width: 416, height: 240)
+    // The direct Git footer was retired in V2. Removing its vertical budget
+    // keeps the panel tight instead of leaving an empty band below actions.
+    static let canonicalPanelSize = CGSize(width: 416, height: 196.8)
     static let canonicalOuterPadding: CGFloat = 14.4
     static let canonicalHeaderHeight: CGFloat = 24
     static let canonicalHeaderGap: CGFloat = 8
@@ -23,15 +25,11 @@ struct HUDMetrics: Equatable {
     static let canonicalQuotaGap: CGFloat = 6.4
     static let canonicalSectionGap: CGFloat = 11.2
     static let canonicalActionHeight: CGFloat = 38.4
-    static let canonicalFooterHeight: CGFloat = 32
     // Credits is a non-progress balance row between the quota stack and
     // command controls. Its dividers and breathing room are included in this
     // token so AppKit and SwiftUI keep one shared height contract.
     static let canonicalCreditsSectionHeight: CGFloat = 56
     static let canonicalActionSpacing: CGFloat = 8
-    static let canonicalFooterSpacing: CGFloat = 9.6
-    static let canonicalFooterHorizontalPaddingMultiplier: CGFloat = 0.65
-    static let canonicalFooterButtonSpacing: CGFloat = 4
     static let canonicalCornerRadius: CGFloat = 19.2
 
     init(scaleLevel: HUDScaleLevel = .standard) {
@@ -53,21 +51,15 @@ struct HUDMetrics: Equatable {
     /// grow only by the quota column delta, so no empty placeholder row is
     /// reserved in the HUD.
     func panelSize(quotaRowCount: Int, includesCredits: Bool = false) -> CGSize {
-        panelSize(quotaRowCount: quotaRowCount, includesCredits: includesCredits, hasAnnouncement: false)
-    }
-
-    func panelSize(quotaRowCount: Int, includesCredits: Bool, hasAnnouncement: Bool) -> CGSize {
         let count = max(1, quotaRowCount)
         let canonicalHeight = Self.canonicalPanelSize.height
         let quotaDelta = quotaColumnHeight(for: count) - quotaColumnHeight(for: Self.canonicalQuotaRowCount)
         let creditsDelta = includesCredits ? creditsSectionHeight + sectionGap : 0
-        let announcementDelta = hasAnnouncement ? announcementHeight : 0
         return CGSize(
             width: Self.canonicalPanelSize.width * factor,
-            height: canonicalHeight * factor + quotaDelta + creditsDelta + announcementDelta
+            height: canonicalHeight * factor + quotaDelta + creditsDelta
         )
     }
-    var announcementHeight: CGFloat { 84 * factor }
     var outerPadding: CGFloat { Self.canonicalOuterPadding * factor }
     var headerHeight: CGFloat { Self.canonicalHeaderHeight * factor }
     var headerGap: CGFloat { Self.canonicalHeaderGap * factor }
@@ -78,24 +70,10 @@ struct HUDMetrics: Equatable {
     var quotaGap: CGFloat { Self.canonicalQuotaGap * factor }
     var sectionGap: CGFloat { Self.canonicalSectionGap * factor }
     var actionHeight: CGFloat { Self.canonicalActionHeight * factor }
-    var footerHeight: CGFloat { Self.canonicalFooterHeight * factor }
     var creditsSectionHeight: CGFloat { Self.canonicalCreditsSectionHeight * factor }
     var creditsRowHeight: CGFloat { max(32, creditsSectionHeight - (sectionGap * 0.85)) }
     var actionSpacing: CGFloat { Self.canonicalActionSpacing * factor }
-    var footerSpacing: CGFloat { Self.canonicalFooterSpacing * factor }
-    var footerHorizontalPadding: CGFloat {
-        footerSpacing * Self.canonicalFooterHorizontalPaddingMultiplier
-    }
-    var footerButtonSpacing: CGFloat { Self.canonicalFooterButtonSpacing * factor }
     var cornerRadius: CGFloat { Self.canonicalCornerRadius * factor }
-    var footerButtonWidth: CGFloat {
-        // Keep the leading breathing room while allowing the trailing
-        // Commit Push button to reach the footer capsule's right edge.
-        max(0, (contentWidth - footerHorizontalPadding - (footerButtonSpacing * 2)) / 3)
-    }
-    var footerControlsWidth: CGFloat {
-        footerButtonWidth * 3 + (footerButtonSpacing * 2)
-    }
     var contentWidth: CGFloat {
         max(0, panelSize.width - (outerPadding * 2))
     }
@@ -118,6 +96,6 @@ struct HUDMetrics: Equatable {
     }
 
     func verticalContentHeight(for rowCount: Int) -> CGFloat {
-        headerHeight + headerGap + quotaColumnHeight(for: rowCount) + sectionGap + actionHeight + sectionGap + footerHeight
+        headerHeight + headerGap + quotaColumnHeight(for: rowCount) + sectionGap + actionHeight
     }
 }

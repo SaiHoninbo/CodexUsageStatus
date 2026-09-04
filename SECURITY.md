@@ -49,18 +49,3 @@ relaunches an app bundle. Maintainers must publish release assets with a formal
 signing identity and inspect the ZIP inventory before distribution; assets must
 not include source archives, tests, credentials, token activity, history, or
 AppleDouble files.
-## User-configured Feed boundary
-
-Optional reset announcements fetch a user-configured third-party HTTPS RSS or
-Atom endpoint. Redirect hosts are revalidated, private/loopback/link-local
-addresses are rejected by an initial DNS preflight, XML external entities are
-disabled, and response bodies are capped at 2 MiB with a 20-second timeout.
-This is a preflight hostname policy; the URLSession transport does not claim
-connection-level DNS/IP pinning against DNS rebinding.
-
-Feed state is persisted in owner-only Application Support using atomic JSON
-writes and corruption quarantine. The full configured URL is retained because
-it is user configuration; query credentials, if present, are never emitted to
-logs, notifications, errors, or analytics. Feed content is untrusted plain
-text and is advisory only. It cannot change official quota state, reset times,
-history, or notification delegate ownership.

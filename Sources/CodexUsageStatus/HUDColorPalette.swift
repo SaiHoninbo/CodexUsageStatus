@@ -14,8 +14,5 @@ enum HUDColorPalette {
     static let credits = Color.teal
     static let submitAction = Color.blue
     static let executeAction = Color.green
-    static let commit = Color.orange
-    static let push = Color.blue
-    static let commitPush = Color.green
     static let update = Color.orange
 }

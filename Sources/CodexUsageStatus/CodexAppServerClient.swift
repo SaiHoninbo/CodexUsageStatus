@@ -44,6 +44,11 @@ final class CodexAppServerClient {
     private var resetTimeoutTask: Task<Void, Never>?
     private var reconnectAttempt = 0
     private var isStopping = false
+    /// App Server requests are admitted only after the initialize handshake
+    /// completes.  A running process alone is not sufficient: sending reads
+    /// while initialize is pending can race account-boundary state and leave
+    /// duplicate or stale responses in the UI.
+    private var hasCompletedInitialization = false
     private var latestSnapshot: UsageSnapshot?
     private var latestAuthMode: String?
     private var latestAccountIdentityKey: String?
@@ -167,6 +172,7 @@ final class CodexAppServerClient {
 
     func refreshRateLimits() {
         guard !checkCredentialChange() else { return }
+        guard hasCompletedInitialization else { return }
         guard process?.isRunning == true else {
             if !isStopping { connect() }
             return
@@ -179,6 +185,7 @@ final class CodexAppServerClient {
 
     func refreshTokenActivity() {
         guard !checkCredentialChange() else { return }
+        guard hasCompletedInitialization else { return }
         guard process?.isRunning == true else {
             if !isStopping { connect() }
             return
@@ -192,6 +199,7 @@ final class CodexAppServerClient {
 
     func refreshAccount() {
         guard !checkCredentialChange() else { return }
+        guard hasCompletedInitialization else { return }
         guard process?.isRunning == true else {
             if !isStopping { connect() }
             return
@@ -210,6 +218,10 @@ final class CodexAppServerClient {
         }
         guard process?.isRunning == true else {
             onResetCreditResult?(.error("App Server 尚未連線，請先 Refresh。"))
+            return
+        }
+        guard hasCompletedInitialization else {
+            onResetCreditResult?(.error("App Server 正在初始化，請稍候再試。"))
             return
         }
         guard !pendingRequests.values.contains(where: {
@@ -236,6 +248,7 @@ final class CodexAppServerClient {
         }
 
         detachProcess()
+        hasCompletedInitialization = false
         publish(.connecting, nil)
         lineBuffer = JSONLineBuffer()
 
@@ -372,6 +385,7 @@ final class CodexAppServerClient {
 
         switch kind {
         case .initialize:
+            hasCompletedInitialization = true
             sendNotification(method: "initialized")
             _ = sendRequest(method: "account/rateLimits/read", params: nil, kind: .rateLimitsRead)
             _ = sendRequest(method: "account/usage/read", params: nil, kind: .usageRead)
@@ -602,6 +616,7 @@ final class CodexAppServerClient {
 
     private func detachProcess() {
         processGeneration = UUID()
+        hasCompletedInitialization = false
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
         process?.terminationHandler = nil

@@ -55,8 +55,18 @@ final class ManagedAccountWorker: Identifiable {
     func refreshRateLimits() { client.refreshRateLimits() }
     func refreshTokenActivity() { client.refreshTokenActivity() }
     func refreshAccount() { client.refreshAccount() }
-    func updateIntervals(quota: Int? = nil, usage: Int? = nil, credentialWatch: Int? = nil) {
-        client.updateIntervals(quota: quota, usage: usage, credentialWatch: credentialWatch)
+    func updateIntervals(
+        quota: Int? = nil,
+        usage: Int? = nil,
+        account: Int? = nil,
+        credentialWatch: Int? = nil
+    ) {
+        client.updateIntervals(
+            quota: quota,
+            usage: usage,
+            account: account,
+            credentialWatch: credentialWatch
+        )
     }
     func consumeResetCredit(creditID: String) { client.consumeResetCredit(creditID: creditID) }
 }
