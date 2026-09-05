@@ -179,6 +179,8 @@ final class FloatingHUDPanelController: NSObject {
             openReleasePage: { [weak self] in self?.model.openUpdateReleasePage() }
         )
         let hostingView = NSHostingView(rootView: rootView)
+        let darkAppearance = NSAppearance(named: .darkAqua)
+        hostingView.appearance = darkAppearance
         let newPanel = DraggableHUDPanel(
             contentRect: NSRect(origin: .zero, size: layoutState.size),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -199,6 +201,7 @@ final class FloatingHUDPanelController: NSObject {
         newPanel.level = .floating
         newPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         newPanel.backgroundColor = .clear
+        newPanel.appearance = darkAppearance
         newPanel.isOpaque = false
         newPanel.hasShadow = false
         newPanel.hidesOnDeactivate = false
@@ -1251,10 +1254,21 @@ private struct HUDQuotaRow: View {
     var body: some View {
         ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(Color.black.opacity(isUpdating ? 0.18 : 0.24))
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(accent.opacity(isUpdating ? 0.32 : 0.58))
-                .frame(width: width * fillFraction)
+                .fill(HUDColorPalette.elevatedSurface)
+
+            // Keep the quota readable at a glance without turning the HUD
+            // into a pair of saturated dashboard bars. The accent is a thin
+            // progress rail and a semantic outline; the percentage remains
+            // the primary value in the content row below.
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
+                Capsule(style: .continuous)
+                    .fill(accent.opacity(isUpdating ? 0.34 : 0.86))
+                    .frame(width: max(6, (width - (height * 0.56)) * fillFraction), height: max(1.5, 2.2 * scaleFactor))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, height * 0.28)
+                    .padding(.bottom, max(2, height * 0.12))
+            }
 
             HStack(spacing: max(5, height * 0.18)) {
                 Image(systemName: systemImage)
@@ -1288,8 +1302,8 @@ private struct HUDQuotaRow: View {
         .overlay {
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .stroke(
-                    accent.opacity(isUpdating ? 0.24 : 0.32),
-                    lineWidth: 0.6 * scaleFactor
+                    accent.opacity(isUpdating ? 0.28 : 0.52),
+                    lineWidth: max(0.6, 0.8 * scaleFactor)
                 )
         }
         .accessibilityElement(children: .ignore)
@@ -1366,7 +1380,7 @@ private struct HUDCreditsRow: View {
 
     private var divider: some View {
         Rectangle()
-            .fill(Color.black.opacity(0.14))
+            .fill(HUDColorPalette.divider)
             .frame(width: width, height: max(0.6, 0.8 * scaleFactor))
     }
 }
@@ -1398,16 +1412,16 @@ private struct HUDTokenActivitySummaryView: View, Equatable {
         VStack(spacing: 0) {
             metricRow(Array(metrics.prefix(3)))
             Rectangle()
-                .fill(Color.black.opacity(0.12))
+                .fill(HUDColorPalette.divider)
                 .frame(height: max(0.5, 0.7 * scaleFactor))
             metricRow(Array(metrics.suffix(2)))
         }
         .padding(.horizontal, max(6, 8 * scaleFactor))
         .frame(width: width, height: height)
-        .background(Color.white.opacity(0.34), in: RoundedRectangle(cornerRadius: max(7, height * 0.18), style: .continuous))
+        .background(HUDColorPalette.elevatedSurface, in: RoundedRectangle(cornerRadius: max(7, height * 0.18), style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: max(7, height * 0.18), style: .continuous)
-                .stroke(isStale ? Color.orange.opacity(0.42) : Color.black.opacity(0.14), lineWidth: max(0.6, 0.8 * scaleFactor))
+                .stroke(isStale ? HUDColorPalette.warning.opacity(0.62) : HUDColorPalette.token.opacity(0.32), lineWidth: max(0.6, 0.8 * scaleFactor))
         }
         .opacity(isStale ? 0.88 : 1)
         .accessibilityElement(children: .combine)
@@ -1421,7 +1435,7 @@ private struct HUDTokenActivitySummaryView: View, Equatable {
             ForEach(Array(rowMetrics.enumerated()), id: \.offset) { index, metric in
                 if index > 0 {
                     Rectangle()
-                        .fill(Color.black.opacity(0.12))
+                        .fill(HUDColorPalette.divider)
                         .frame(width: max(0.5, 0.7 * scaleFactor))
                         .padding(.vertical, max(4, 5 * scaleFactor))
                 }
@@ -1602,9 +1616,9 @@ private struct HUDActionCard: View {
     private var backgroundColor: Color {
         switch fillStyle {
         case .neutral:
-            return isHovered ? Color.black.opacity(0.10) : Color.clear
+            return isHovered ? HUDColorPalette.controlSurface : HUDColorPalette.elevatedSurface
         case .filled(let background, _):
-            return background.opacity(isHovered ? 0.94 : 0.84)
+            return background.opacity(isHovered ? 0.28 : 0.16)
         }
     }
 
@@ -1633,8 +1647,11 @@ private struct HUDActionCard: View {
         .frame(width: width, height: height)
         .background(backgroundColor, in: shape)
         .overlay {
-            if case .neutral = fillStyle {
-                shape.stroke(Color.black.opacity(0.22), lineWidth: 0.8 * scaleFactor)
+            switch fillStyle {
+            case .neutral:
+                shape.stroke(HUDColorPalette.border, lineWidth: 0.8 * scaleFactor)
+            case .filled(let background, _):
+                shape.stroke(background.opacity(isHovered ? 0.78 : 0.5), lineWidth: 0.8 * scaleFactor)
             }
         }
         .contentShape(shape)
@@ -1674,7 +1691,7 @@ private struct HUDUpdateBadge: View {
     private var iconColor: Color {
         switch state {
         case .available: return HUDColorPalette.update
-        case .error: return .red
+        case .error: return HUDColorPalette.error
         default: return HUDColorPalette.secondaryText
         }
     }
@@ -1734,8 +1751,8 @@ private struct HUDUpdateBadge: View {
         }
         .buttonStyle(.plain)
         .disabled(!isActionable)
-        .background(Color.white.opacity(0.44), in: Capsule())
-        .overlay { Capsule().stroke(Color.black.opacity(0.12), lineWidth: 0.6) }
+        .background(HUDColorPalette.controlSurface, in: Capsule())
+        .overlay { Capsule().stroke(HUDColorPalette.border, lineWidth: 0.6) }
         .help(isActionable ? (state.isAvailable ? "開啟更新詳情" : "重新檢查更新") : accessibilityValue)
         .accessibilityLabel(title)
         .accessibilityValue(accessibilityValue)
@@ -1754,12 +1771,12 @@ private struct HUDPlanBadge: View {
     }
 
     private var tint: Color {
-        if normalizedPlan.contains("pro") { return Color.purple }
-        if normalizedPlan.contains("plus") { return Color.blue }
-        if normalizedPlan.contains("business") { return Color.orange }
-        if normalizedPlan.contains("team") { return Color.teal }
-        if normalizedPlan.contains("enterprise") { return Color.indigo }
-        if normalizedPlan.contains("free") { return Color.gray }
+        if normalizedPlan.contains("pro") { return HUDColorPalette.verificationAction }
+        if normalizedPlan.contains("plus") { return HUDColorPalette.sevenDay }
+        if normalizedPlan.contains("business") { return HUDColorPalette.fiveHour }
+        if normalizedPlan.contains("team") { return HUDColorPalette.token }
+        if normalizedPlan.contains("enterprise") { return HUDColorPalette.token }
+        if normalizedPlan.contains("free") { return HUDColorPalette.secondaryText }
         return HUDColorPalette.secondaryText
     }
 
@@ -1895,7 +1912,7 @@ private struct CodexFloatingHUDView: View {
         .contextMenu {
             contextMenuContent
         }
-        .preferredColorScheme(.light)
+        .preferredColorScheme(.dark)
         .onChange(of: model.updateState) { _, newState in
             presentUpdateFeedback(for: newState)
         }
@@ -2081,17 +2098,6 @@ private struct CodexFloatingHUDView: View {
         let displayedCredits = presentation.quota?.credits
         let shouldShowCredits = displayedCredits?.isDisplayable == true
         VStack(alignment: .leading, spacing: 0) {
-            HUDTokenActivitySummaryView(
-                summaryMetrics: presentation.tokenMetrics,
-                feedback: presentation.tokenActivityFeedback,
-                width: metrics.contentWidth,
-                height: metrics.tokenSummaryHeight,
-                scaleFactor: metrics.factor,
-                isStale: presentation.tokenActivityIsStale,
-                reduceMotion: presentation.reduceMotion
-            )
-            .equatable()
-            Color.clear.frame(height: metrics.tokenSummaryGap)
             hudHeader(presentation: presentation, metrics: metrics)
             Color.clear.frame(height: metrics.headerGap)
             quotaStack(presentation: presentation, width: metrics.contentWidth, height: metrics.quotaRowHeight, gap: metrics.quotaGap)
@@ -2106,6 +2112,17 @@ private struct CodexFloatingHUDView: View {
                 )
                 Color.clear.frame(height: metrics.sectionGap)
             }
+            HUDTokenActivitySummaryView(
+                summaryMetrics: presentation.tokenMetrics,
+                feedback: presentation.tokenActivityFeedback,
+                width: metrics.contentWidth,
+                height: metrics.tokenSummaryHeight,
+                scaleFactor: metrics.factor,
+                isStale: presentation.tokenActivityIsStale,
+                reduceMotion: presentation.reduceMotion
+            )
+            .equatable()
+            Color.clear.frame(height: metrics.tokenSummaryGap)
             actionCardsRow(presentation: presentation, metrics: metrics)
             Color.clear.frame(height: metrics.workflowActionGap)
             workflowShortcutsRow(presentation: presentation, metrics: metrics)
@@ -2276,7 +2293,7 @@ private struct CodexFloatingHUDView: View {
             if let decreaseAmount = presentation.decreaseAmount {
                 Text("−\(decreaseAmount)%")
                     .font(.system(size: 9, weight: .bold, design: .rounded))
-                    .foregroundStyle(.red)
+                    .foregroundStyle(HUDColorPalette.error)
                     .offset(x: 1, y: -3)
                     .zIndex(1)
             }

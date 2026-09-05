@@ -1814,8 +1814,8 @@ struct CodexUsageStatusTests {
     private static func testPopoverPresentationAppearancePolicy() throws {
         let appearance = PopoverPresentationPolicy.makeAppearance()
         try expect(
-            appearance.bestMatch(from: [.aqua, .darkAqua]) == .aqua,
-            "popover opens with the stable light appearance"
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua,
+            "popover opens with the stable dark appearance"
         )
         try expect(
             PopoverPresentationPolicy.reappliesAfterPopoverDidShow,
@@ -1824,7 +1824,7 @@ struct CodexUsageStatusTests {
         let popover = NSPopover()
         PopoverPresentationPolicy.apply(to: popover)
         try expect(
-            popover.appearance?.name == .aqua,
+            popover.appearance?.name == .darkAqua,
             "popover appearance is pinned directly on the popover"
         )
         try expect(

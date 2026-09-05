@@ -1,11 +1,12 @@
 import AppKit
 
 /// Keeps the details popover visually stable while an accessory app is not
-/// active.  Without an explicit appearance, AppKit's popover material follows
-/// the window active state: pinning the light appearance keeps the surface and
-/// text contrast stable from the first click through subsequent presentations.
+/// active. Without an explicit appearance, AppKit's popover material follows
+/// the window active state: pinning the dark appearance keeps the graphite
+/// glass surface and text contrast stable from the first click through
+/// subsequent presentations.
 enum PopoverPresentationPolicy {
-    static let preferredAppearanceName: NSAppearance.Name = .aqua
+    static let preferredAppearanceName: NSAppearance.Name = .darkAqua
     static let reappliesAfterPopoverDidShow = true
     /// Status-item apps are normally inactive when their menu extra is clicked.
     /// Activating only for a user-requested popover presentation makes AppKit
@@ -39,8 +40,8 @@ enum PopoverPresentationPolicy {
     }
 
     static func makeAppearance() -> NSAppearance {
-        // .aqua is provided by every supported macOS release and keeps the
-        // details surface readable with the fixed-light HUD palette.
+        // .darkAqua is provided by every supported macOS release and keeps the
+        // details surface readable with the fixed-dark HUD palette.
         NSAppearance(named: preferredAppearanceName)!
     }
 
