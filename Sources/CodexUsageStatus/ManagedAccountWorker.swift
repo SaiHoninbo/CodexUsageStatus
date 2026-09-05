@@ -20,8 +20,9 @@ final class ManagedAccountWorker: Identifiable {
     init(
         profile: AccountProfile,
         codexHomeURL: URL,
-        quotaRefreshIntervalSeconds: Int = 60,
-        usageRefreshIntervalSeconds: Int = 15 * 60,
+        quotaRefreshIntervalSeconds: Int = RefreshCadenceDefaults.quotaSeconds,
+        usageRefreshIntervalSeconds: Int = RefreshCadenceDefaults.tokenActivitySeconds,
+        accountRefreshIntervalSeconds: Int = RefreshCadenceDefaults.accountSeconds,
         credentialWatchIntervalSeconds: Int = 15
     ) {
         self.profile = profile
@@ -30,7 +31,7 @@ final class ManagedAccountWorker: Identifiable {
             codexHomeURL: codexHomeURL,
             quotaRefreshIntervalSeconds: quotaRefreshIntervalSeconds,
             usageRefreshIntervalSeconds: usageRefreshIntervalSeconds,
-            accountRefreshIntervalSeconds: profile.syncIntervalSeconds,
+            accountRefreshIntervalSeconds: accountRefreshIntervalSeconds,
             credentialWatchIntervalSeconds: credentialWatchIntervalSeconds
         )
         let id = profile.id

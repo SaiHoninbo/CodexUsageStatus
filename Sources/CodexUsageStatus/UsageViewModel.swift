@@ -47,9 +47,9 @@ final class UsageViewModel: ObservableObject {
     @Published private(set) var workerStates: [UUID: ConnectionState] = [:]
     @Published private(set) var workerErrors: [UUID: String] = [:]
     @Published private(set) var loginStates: [UUID: String] = [:]
-    @Published private(set) var quotaRefreshIntervalSeconds: Int = 60
-    @Published private(set) var globalSyncIntervalSeconds: Int = 300
-    @Published private(set) var tokenActivityRefreshIntervalSeconds: Int = 900
+    @Published private(set) var quotaRefreshIntervalSeconds: Int = RefreshCadenceDefaults.quotaSeconds
+    @Published private(set) var globalSyncIntervalSeconds: Int = RefreshCadenceDefaults.accountSeconds
+    @Published private(set) var tokenActivityRefreshIntervalSeconds: Int = RefreshCadenceDefaults.tokenActivitySeconds
     @Published private(set) var credentialWatchIntervalSeconds: Int = 15
     @Published private(set) var activeTurn: TurnActivitySnapshot = .idle {
         didSet { refreshStatusItemPresentation() }
@@ -170,9 +170,15 @@ final class UsageViewModel: ObservableObject {
         profileStore = AccountProfileStore(loadOnInit: false, asynchronousPersistence: true)
         accountProfiles = []
         profileStoreErrorMessage = profileStore.errorMessage
-        quotaRefreshIntervalSeconds = Self.clampQuotaInterval(defaults.object(forKey: PreferenceKey.quotaRefreshInterval) as? Int ?? 60)
-        globalSyncIntervalSeconds = Self.clampAccountInterval(defaults.object(forKey: PreferenceKey.accountRefreshInterval) as? Int ?? 300)
-        tokenActivityRefreshIntervalSeconds = Self.clampTokenInterval(defaults.object(forKey: PreferenceKey.tokenActivityRefreshInterval) as? Int ?? 900)
+        quotaRefreshIntervalSeconds = Self.clampQuotaInterval(
+            defaults.object(forKey: PreferenceKey.quotaRefreshInterval) as? Int ?? RefreshCadenceDefaults.quotaSeconds
+        )
+        globalSyncIntervalSeconds = Self.clampAccountInterval(
+            defaults.object(forKey: PreferenceKey.accountRefreshInterval) as? Int ?? RefreshCadenceDefaults.accountSeconds
+        )
+        tokenActivityRefreshIntervalSeconds = Self.clampTokenInterval(
+            defaults.object(forKey: PreferenceKey.tokenActivityRefreshInterval) as? Int ?? RefreshCadenceDefaults.tokenActivitySeconds
+        )
         credentialWatchIntervalSeconds = Self.clampCredentialWatchInterval(defaults.object(forKey: PreferenceKey.credentialWatchInterval) as? Int ?? 15)
         client.updateIntervals(
             quota: quotaRefreshIntervalSeconds,
@@ -850,6 +856,7 @@ final class UsageViewModel: ObservableObject {
             codexHomeURL: profileStore.codexHomeURL(for: profile),
             quotaRefreshIntervalSeconds: quotaRefreshIntervalSeconds,
             usageRefreshIntervalSeconds: tokenActivityRefreshIntervalSeconds,
+            accountRefreshIntervalSeconds: globalSyncIntervalSeconds,
             credentialWatchIntervalSeconds: credentialWatchIntervalSeconds
         )
         let generation = UUID()

@@ -30,7 +30,7 @@ struct AccountProfile: Codable, Equatable, Identifiable {
         isUnidentified: Bool = false,
         isManaged: Bool = false,
         workerEnabled: Bool = true,
-        syncIntervalSeconds: Int = 300
+        syncIntervalSeconds: Int = RefreshCadenceDefaults.accountSeconds
     ) {
         self.id = id
         self.fingerprint = fingerprint
@@ -62,7 +62,10 @@ struct AccountProfile: Codable, Equatable, Identifiable {
         isUnidentified = try container.decodeIfPresent(Bool.self, forKey: .isUnidentified) ?? fingerprint.hasPrefix("unknown-")
         isManaged = try container.decodeIfPresent(Bool.self, forKey: .isManaged) ?? false
         workerEnabled = try container.decodeIfPresent(Bool.self, forKey: .workerEnabled) ?? true
-        syncIntervalSeconds = max(60, min(3600, try container.decodeIfPresent(Int.self, forKey: .syncIntervalSeconds) ?? 300))
+        syncIntervalSeconds = max(
+            60,
+            min(3600, try container.decodeIfPresent(Int.self, forKey: .syncIntervalSeconds) ?? RefreshCadenceDefaults.accountSeconds)
+        )
     }
 
     static func isGenericDisplayName(_ name: String) -> Bool {

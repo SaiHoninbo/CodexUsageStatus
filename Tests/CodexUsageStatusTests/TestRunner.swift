@@ -99,6 +99,7 @@ struct CodexUsageStatusTests {
             ("retired feature cleanup", testRetiredFeatureCleanup)
             ,("App Server retry policy", testAppServerRetryPolicy)
             ,("refresh request coalescing", testRefreshRequestCoalescing)
+            ,("refresh cadence defaults", testRefreshCadenceDefaults)
             ,("account refresh dependency policy", testAccountRefreshDependencyPolicy)
             ,("App Server replacement admission", testAppServerReplacementAdmission)
             ,("managed worker admission", testManagedWorkerAdmission)
@@ -2217,6 +2218,20 @@ struct CodexUsageStatusTests {
     private static func testRefreshRequestCoalescing() throws {
         try expect(RefreshRequestCoalescer.shouldSchedule(isScheduled: false), "first refresh schedules")
         try expect(!RefreshRequestCoalescer.shouldSchedule(isScheduled: true), "duplicate refresh is coalesced")
+    }
+
+    private static func testRefreshCadenceDefaults() throws {
+        try expect(RefreshCadenceDefaults.quotaSeconds == 60, "quota default remains one minute")
+        try expect(RefreshCadenceDefaults.tokenActivitySeconds == 900, "Token Activity default remains fifteen minutes")
+        try expect(RefreshCadenceDefaults.accountSeconds == 1_800, "account default is thirty minutes")
+        let profile = AccountProfile(
+            id: UUID(),
+            fingerprint: "cadence-default",
+            displayName: "Cadence",
+            accountType: "chatgpt",
+            lastSeen: Date()
+        )
+        try expect(profile.syncIntervalSeconds == 1_800, "new managed profiles inherit the account default")
     }
 
     private static func testAccountRefreshDependencyPolicy() throws {

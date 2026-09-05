@@ -1,6 +1,12 @@
 import Foundation
 import OSLog
 
+enum RefreshCadenceDefaults {
+    static let quotaSeconds = 60
+    static let tokenActivitySeconds = 15 * 60
+    static let accountSeconds = 30 * 60
+}
+
 enum AppServerRetryPolicy {
     static let initializationWatchdogNanoseconds: UInt64 = 8_000_000_000
     static let automaticRetryDelaysNanoseconds: [UInt64] = [
@@ -109,9 +115,9 @@ final class CodexAppServerClient {
 
     init(
         codexHomeURL: URL? = nil,
-        quotaRefreshIntervalSeconds: Int = 60,
-        usageRefreshIntervalSeconds: Int = 15 * 60,
-        accountRefreshIntervalSeconds: Int = 5 * 60,
+        quotaRefreshIntervalSeconds: Int = RefreshCadenceDefaults.quotaSeconds,
+        usageRefreshIntervalSeconds: Int = RefreshCadenceDefaults.tokenActivitySeconds,
+        accountRefreshIntervalSeconds: Int = RefreshCadenceDefaults.accountSeconds,
         credentialWatchIntervalSeconds: Int = 15
     ) {
         self.codexHomeURL = codexHomeURL
@@ -172,7 +178,7 @@ final class CodexAppServerClient {
         refreshTask?.cancel()
         refreshTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: (self?.quotaRefreshIntervalSeconds ?? 60) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: (self?.quotaRefreshIntervalSeconds ?? UInt64(RefreshCadenceDefaults.quotaSeconds)) * 1_000_000_000)
                 guard !Task.isCancelled else { return }
                 self?.refreshRateLimits()
             }
@@ -181,7 +187,7 @@ final class CodexAppServerClient {
         accountRefreshTask?.cancel()
         usageRefreshTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: (self?.usageRefreshIntervalSeconds ?? 15 * 60) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: (self?.usageRefreshIntervalSeconds ?? UInt64(RefreshCadenceDefaults.tokenActivitySeconds)) * 1_000_000_000)
                 guard !Task.isCancelled else { return }
                 self?.refreshTokenActivity()
             }
@@ -189,7 +195,7 @@ final class CodexAppServerClient {
         accountRefreshTask?.cancel()
         accountRefreshTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: (self?.accountRefreshIntervalSeconds ?? 5 * 60) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: (self?.accountRefreshIntervalSeconds ?? UInt64(RefreshCadenceDefaults.accountSeconds)) * 1_000_000_000)
                 guard !Task.isCancelled else { return }
                 self?.refreshAccount()
             }
