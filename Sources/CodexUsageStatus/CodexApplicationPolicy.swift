@@ -14,6 +14,26 @@ enum CodexApplicationPolicy {
     // publisher-bound instead of trusting a spoofable bundle identifier.
     static let officialPublisherTeamIdentifier = "2DC432GLL2"
 
+    /// Identity of a live Codex process whose publisher-bound trust check has
+    /// already succeeded. The process identity fields keep the cache bounded
+    /// to one running process; a new launch must pass Security.framework
+    /// validation again.
+    struct TrustedApplicationIdentity: Equatable {
+        let processIdentifier: pid_t
+        let launchDate: Date
+        let bundleURL: URL
+
+        func matches(
+            processIdentifier: pid_t,
+            launchDate: Date,
+            bundleURL: URL
+        ) -> Bool {
+            self.processIdentifier == processIdentifier
+                && self.launchDate == launchDate
+                && self.bundleURL == bundleURL
+        }
+    }
+
     static func isCodexApplication(
         bundleIdentifier: String?,
         localizedName: String? = nil,

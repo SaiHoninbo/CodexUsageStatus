@@ -2003,6 +2003,34 @@ struct CodexUsageStatusTests {
             "missing bundle identity must fail closed"
         )
 
+        let launchDate = Date(timeIntervalSince1970: 123)
+        let bundleURL = URL(fileURLWithPath: "/Applications/Codex.app", isDirectory: true)
+        let identity = CodexApplicationPolicy.TrustedApplicationIdentity(
+            processIdentifier: 42,
+            launchDate: launchDate,
+            bundleURL: bundleURL
+        )
+        try expect(
+            identity.matches(processIdentifier: 42, launchDate: launchDate, bundleURL: bundleURL),
+            "trusted identity reuses only the same live process"
+        )
+        try expect(
+            !identity.matches(processIdentifier: 43, launchDate: launchDate, bundleURL: bundleURL),
+            "trusted identity rejects a different process"
+        )
+        try expect(
+            !identity.matches(processIdentifier: 42, launchDate: Date(timeIntervalSince1970: 124), bundleURL: bundleURL),
+            "trusted identity rejects a different launch"
+        )
+        try expect(
+            !identity.matches(
+                processIdentifier: 42,
+                launchDate: launchDate,
+                bundleURL: URL(fileURLWithPath: "/Applications/Other.app", isDirectory: true)
+            ),
+            "trusted identity rejects a different bundle"
+        )
+
         // Runtime publisher proof: an ad-hoc bundle that spoofs the native
         // identifier must still be rejected by the Security.framework gate.
         let fakeBundle = FileManager.default.temporaryDirectory

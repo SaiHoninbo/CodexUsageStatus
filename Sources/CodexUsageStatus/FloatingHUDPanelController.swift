@@ -113,6 +113,7 @@ final class FloatingHUDPanelController: NSObject {
     private var lastCodexWindowFrame: NSRect?
     private var lastCodexVisibleFrame: NSRect?
     private var lastCodexProcessID: pid_t?
+    private var trustedCodexApplicationIdentity: CodexApplicationPolicy.TrustedApplicationIdentity?
     private var lastPositionedCodexWindowFrame: NSRect?
     private var lastPositionedVisibleFrame: NSRect?
     private var lastPositionedProcessID: pid_t?
@@ -629,7 +630,35 @@ final class FloatingHUDPanelController: NSObject {
     }
 
     private func isCodexApplication(_ application: NSRunningApplication) -> Bool {
-        CodexApplicationPolicy.isCodexApplication(application)
+        guard CodexApplicationPolicy.isCodexApplication(bundleIdentifier: application.bundleIdentifier),
+              let bundleURL = application.bundleURL else {
+            trustedCodexApplicationIdentity = nil
+            return false
+        }
+
+        let processIdentifier = application.processIdentifier
+        guard let launchDate = application.launchDate else {
+            trustedCodexApplicationIdentity = nil
+            return CodexApplicationPolicy.isTrustedBundle(at: bundleURL)
+        }
+        if let trustedCodexApplicationIdentity,
+           trustedCodexApplicationIdentity.matches(
+               processIdentifier: processIdentifier,
+               launchDate: launchDate,
+               bundleURL: bundleURL
+           ) {
+            return true
+        }
+
+        let isTrusted = CodexApplicationPolicy.isTrustedBundle(at: bundleURL)
+        trustedCodexApplicationIdentity = isTrusted
+            ? CodexApplicationPolicy.TrustedApplicationIdentity(
+                processIdentifier: processIdentifier,
+                launchDate: launchDate,
+                bundleURL: bundleURL
+            )
+            : nil
+        return isTrusted
     }
 
     private func invalidatePendingVisibilityCallbacks() {
@@ -666,6 +695,7 @@ final class FloatingHUDPanelController: NSObject {
         lastPositionedPanelSize = nil
         if clearProcessID {
             lastCodexProcessID = nil
+            trustedCodexApplicationIdentity = nil
         }
     }
 
