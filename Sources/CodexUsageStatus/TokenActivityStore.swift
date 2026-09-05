@@ -57,6 +57,17 @@ struct TokenActivitySnapshot: Codable, Equatable {
     let currentStreakDays: Int64?
     let longestStreakDays: Int64?
     let dailyUsageBuckets: [DailyTokenUsage]?
+
+    /// `fetchedAt` is freshness metadata.  Persistence and UI publication are
+    /// keyed to the actual token summary/bucket payload instead.
+    func hasSameContent(as other: TokenActivitySnapshot) -> Bool {
+        lifetimeTokens == other.lifetimeTokens
+            && peakDailyTokens == other.peakDailyTokens
+            && longestRunningTurnSec == other.longestRunningTurnSec
+            && currentStreakDays == other.currentStreakDays
+            && longestStreakDays == other.longestStreakDays
+            && dailyUsageBuckets == other.dailyUsageBuckets
+    }
 }
 
 enum TokenActivityCodec {
@@ -131,6 +142,9 @@ enum TokenActivityCodec {
 final class TokenActivityStore: ObservableObject {
     @Published private(set) var snapshot: TokenActivitySnapshot?
     @Published private(set) var errorMessage: String?
+    /// Set by the last `update` call so the view model can avoid publishing
+    /// unchanged network payloads while still retaining its normal API.
+    private(set) var lastUpdateChanged = false
 
     let fileURL: URL
     private let fileManager: FileManager
@@ -235,6 +249,17 @@ final class TokenActivityStore: ObservableObject {
             dailyUsageBuckets: incoming.dailyUsageBuckets ?? old?.dailyUsageBuckets
         )
         let retained = prune(merged, now: now)
+        guard let old else {
+            lastUpdateChanged = true
+            snapshot = retained
+            persist()
+            return retained
+        }
+        guard !old.hasSameContent(as: retained) else {
+            lastUpdateChanged = false
+            return old
+        }
+        lastUpdateChanged = true
         snapshot = retained
         persist()
         return retained

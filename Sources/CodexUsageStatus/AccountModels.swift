@@ -38,6 +38,13 @@ struct AccountHealthSnapshot: Equatable {
         let updated = AccountIdentity(accountType: identity.accountType, authMode: authMode, planType: identity.planType, email: identity.email, requiresOpenAIAuth: identity.requiresOpenAIAuth)
         return AccountHealthSnapshot(identity: updated, receivedAt: receivedAt, connectionState: connectionState)
     }
+
+    /// Account reads also refresh their timestamp on every poll.  Identity and
+    /// connection state are the downstream-relevant fields; an unchanged
+    /// account must not re-drive profile and SwiftUI projections.
+    func hasSameContent(as other: AccountHealthSnapshot) -> Bool {
+        identity == other.identity && connectionState == other.connectionState
+    }
 }
 
 enum AccountDataCodec {

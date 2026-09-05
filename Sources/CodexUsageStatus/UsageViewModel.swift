@@ -89,6 +89,11 @@ final class UsageViewModel: ObservableObject {
     private let defaults = UserDefaults.standard
     private var displayTimer: Timer?
     private var hudTokenActivityFetchedAt: Date?
+    /// Latest successful fetch timestamps are kept separate from semantic
+    /// snapshots so freshness can move forward without publishing unchanged
+    /// quota/token payloads.
+    private var tokenActivityLastFetchedAt: Date?
+    private var managedTokenActivityLastFetchedAt: [UUID: Date] = [:]
     private var hudTokenActivitySummary: TokenActivitySnapshot?
     private var hudTokenActivityFeedbackGeneration: UInt64 = 0
     private var tokenActivitySoundGate = TokenActivitySoundGate()
@@ -146,6 +151,7 @@ final class UsageViewModel: ObservableObject {
         tokenActivityStore = activityStore
         legacyTokenActivityURL = activityStore.fileURL
         tokenActivity = activityStore.snapshot
+        tokenActivityLastFetchedAt = activityStore.snapshot?.fetchedAt
         tokenActivityState = activityStore.snapshot == nil ? .idle : .loaded
         tokenActivityErrorMessage = activityStore.errorMessage
         notificationsEnabled = defaults.object(forKey: PreferenceKey.notificationsEnabled) as? Bool ?? true
@@ -180,11 +186,11 @@ final class UsageViewModel: ObservableObject {
         client.onStateChange = { [weak self] state, message in
             guard let self else { return }
             guard self.defaultClientEnabled else { return }
-            self.connectionState = state
-            if state == .offline { self.accountHealthState = .offline }
+            if self.connectionState != state { self.connectionState = state }
+            if state == .offline, self.accountHealthState != .offline { self.accountHealthState = .offline }
             if let message, !message.isEmpty {
-                self.errorMessage = message
-            } else if state == .connected {
+                if self.errorMessage != message { self.errorMessage = message }
+            } else if state == .connected, self.errorMessage != nil {
                 self.errorMessage = nil
             }
 
@@ -197,17 +203,23 @@ final class UsageViewModel: ObservableObject {
             guard let self else { return }
             guard self.defaultClientEnabled else { return }
             guard !self.pendingUnidentifiedProfileBoundary else { return }
-            self.snapshot = snapshot
+            let semanticChange = self.snapshot.map { !$0.hasSameContent(as: snapshot) } ?? true
+            // Freshness metadata remains published so stale badges and HUD
+            // visibility stay correct; the semantic quota projections,
+            // history persistence, and notifications below are change-gated.
             self.lastUpdated = snapshot.receivedAt
             self.currentDate = Date()
             self.errorMessage = nil
+            guard semanticChange else { return }
+            self.snapshot = snapshot
             self.resetCredits = snapshot.rateLimitResetCredits
             if let selected = self.selectedResetCreditID,
                !(snapshot.rateLimitResetCredits?.availableCredits.contains(where: { $0.id == selected }) ?? false) {
                 self.selectedResetCreditID = nil
             }
             // A valid snapshot callback is live even though the client publishes
-            // .connected immediately after invoking this callback.
+            // .connected immediately after invoking this callback.  History is
+            // written only after the semantic quota payload changes.
             self.historyStore.record(snapshot: snapshot, connectionState: .connected, now: snapshot.receivedAt)
             self.syncHistoryState()
             guard self.notificationsEnabled,
@@ -227,8 +239,8 @@ final class UsageViewModel: ObservableObject {
         client.onTokenActivityState = { [weak self] state, message in
             guard let self else { return }
             guard self.defaultClientEnabled else { return }
-            self.tokenActivityState = state
-            self.tokenActivityErrorMessage = message
+            if self.tokenActivityState != state { self.tokenActivityState = state }
+            if self.tokenActivityErrorMessage != message { self.tokenActivityErrorMessage = message }
         }
         client.onTokenActivity = { [weak self] activity in
             guard let self else { return }
@@ -236,7 +248,15 @@ final class UsageViewModel: ObservableObject {
             let previousSource = self.tokenActivityStore.snapshot
             let profileID = self.currentProfileID
             let suppressFeedback = self.consumeTokenActivityFeedbackSuppression(for: profileID)
-            self.tokenActivity = self.tokenActivityStore.update(incoming: activity)
+            self.tokenActivityLastFetchedAt = activity.fetchedAt
+            self.refreshHUDTokenActivityFetchedAt()
+            let merged = self.tokenActivityStore.update(incoming: activity)
+            guard self.tokenActivityStore.lastUpdateChanged else {
+                if self.tokenActivityState != .loaded { self.tokenActivityState = .loaded }
+                self.tokenActivityErrorMessage = self.tokenActivityStore.errorMessage
+                return
+            }
+            self.tokenActivity = merged
             self.refreshHUDTokenActivitySummary(networkUpdate: TokenActivityNetworkUpdate(
                 previousSource: previousSource,
                 incoming: activity,
@@ -249,8 +269,8 @@ final class UsageViewModel: ObservableObject {
         client.onAccountHealthState = { [weak self] state, message in
             guard let self else { return }
             guard self.defaultClientEnabled else { return }
-            self.accountHealthState = state
-            self.accountHealthErrorMessage = message
+            if self.accountHealthState != state { self.accountHealthState = state }
+            if self.accountHealthErrorMessage != message { self.accountHealthErrorMessage = message }
         }
         client.onAccountHealth = { [weak self] health in
             guard let self else { return }
@@ -263,6 +283,10 @@ final class UsageViewModel: ObservableObject {
             self.pendingUnidentifiedProfileBoundary = true
             self.snapshot = nil
             self.lastUpdated = nil
+            self.tokenActivity = nil
+            self.tokenActivityLastFetchedAt = nil
+            self.refreshHUDTokenActivitySummary()
+            self.tokenActivityState = .idle
             self.resetCredits = nil
             self.selectedResetCreditID = nil
             self.resetCreditOperationState = .idle
@@ -326,6 +350,7 @@ final class UsageViewModel: ObservableObject {
             self.tokenActivityStore.loadAsynchronously { [weak self] in
                 guard let self else { return }
                 self.tokenActivity = self.tokenActivityStore.snapshot
+                self.tokenActivityLastFetchedAt = self.tokenActivityStore.snapshot?.fetchedAt
                 self.refreshHUDTokenActivitySummary()
                 self.tokenActivityErrorMessage = self.tokenActivityStore.errorMessage
             }
@@ -593,6 +618,7 @@ final class UsageViewModel: ObservableObject {
         managedWorkers[id] = nil
         managedSnapshots[id] = nil
         managedTokenActivities[id] = nil
+        managedTokenActivityLastFetchedAt[id] = nil
         managedAccountHealth[id] = nil
         guard profileStore.deleteProfile(id: id) else { return }
         accountProfiles = profileStore.accountProfiles()
@@ -839,9 +865,12 @@ final class UsageViewModel: ObservableObject {
         worker.onStateChange = { [weak self] _, state, message in
             guard let self else { return }
             guard self.workerGenerations[id] == generation else { return }
-            self.workerStates[id] = state
-            if let message, !message.isEmpty { self.workerErrors[id] = message }
-            else if state == .connected { self.workerErrors[id] = nil }
+            if self.workerStates[id] != state { self.workerStates[id] = state }
+            if let message, !message.isEmpty {
+                if self.workerErrors[id] != message { self.workerErrors[id] = message }
+            } else if state == .connected, self.workerErrors[id] != nil {
+                self.workerErrors[id] = nil
+            }
             // A background profile can release a slot just as readily as the
             // selected profile. Re-run the central scheduler before the
             // current-profile projection guard so another queued worker can
@@ -850,18 +879,23 @@ final class UsageViewModel: ObservableObject {
                 self.scheduleManagedWorkers(preferredID: self.currentProfileID)
             }
             guard self.currentProfileID == id else { return }
-            self.connectionState = state
-            if let message, !message.isEmpty { self.errorMessage = message }
-            if state == .offline || state == .error { self.accountHealthState = .offline }
+            if self.connectionState != state { self.connectionState = state }
+            if let message, !message.isEmpty, self.errorMessage != message { self.errorMessage = message }
+            if (state == .offline || state == .error), self.accountHealthState != .offline {
+                self.accountHealthState = .offline
+            }
         }
         worker.onSnapshot = { [weak self] _, snapshot in
             guard let self else { return }
             guard self.workerGenerations[id] == generation else { return }
+            let semanticChange = self.managedSnapshots[id].map { !$0.hasSameContent(as: snapshot) } ?? true
             self.managedSnapshots[id] = snapshot
-            let store = HistoryStore(fileURL: self.profileStore.historyURL(for: profile))
-            _ = store.record(snapshot: snapshot, connectionState: .connected, now: snapshot.receivedAt)
+            if semanticChange {
+                let store = HistoryStore(fileURL: self.profileStore.historyURL(for: profile))
+                _ = store.record(snapshot: snapshot, connectionState: .connected, now: snapshot.receivedAt)
+            }
             if self.currentProfileID == id {
-                self.applySnapshot(snapshot, to: self)
+                guard self.applySnapshot(snapshot, to: self) else { return }
                 guard self.notificationsEnabled,
                       self.notificationAuthorizationStatus == .authorized || self.notificationAuthorizationStatus == .provisional,
                       self.connectionState != .offline,
@@ -881,8 +915,8 @@ final class UsageViewModel: ObservableObject {
             guard let self else { return }
             guard self.workerGenerations[id] == generation else { return }
             guard self.currentProfileID == id else { return }
-            self.tokenActivityState = state
-            self.tokenActivityErrorMessage = message
+            if self.tokenActivityState != state { self.tokenActivityState = state }
+            if self.tokenActivityErrorMessage != message { self.tokenActivityErrorMessage = message }
         }
         worker.onTokenActivity = { [weak self] _, activity in
             guard let self else { return }
@@ -890,7 +924,15 @@ final class UsageViewModel: ObservableObject {
             let store = TokenActivityStore(fileURL: self.profileStore.tokenActivityURL(for: profile))
             let previousSource = store.snapshot
             let suppressFeedback = self.consumeTokenActivityFeedbackSuppression(for: id)
+            self.managedTokenActivityLastFetchedAt[id] = activity.fetchedAt
+            self.refreshHUDTokenActivityFetchedAt()
             let merged = store.update(incoming: activity)
+            guard store.lastUpdateChanged else {
+                if self.currentProfileID == id, self.tokenActivityState != .loaded {
+                    self.tokenActivityState = .loaded
+                }
+                return
+            }
             self.managedTokenActivities[id] = merged
             if self.currentProfileID == id {
                 self.tokenActivity = merged
@@ -908,13 +950,21 @@ final class UsageViewModel: ObservableObject {
             guard let self else { return }
             guard self.workerGenerations[id] == generation else { return }
             guard self.currentProfileID == id else { return }
-            self.accountHealthState = state
-            self.accountHealthErrorMessage = message
+            if self.accountHealthState != state { self.accountHealthState = state }
+            if self.accountHealthErrorMessage != message { self.accountHealthErrorMessage = message }
         }
         worker.onAccountHealth = { [weak self] _, health in
             guard let self else { return }
             guard self.workerGenerations[id] == generation else { return }
+            let semanticChange = self.managedAccountHealth[id].map { !$0.hasSameContent(as: health) } ?? true
             self.managedAccountHealth[id] = health
+            guard semanticChange else {
+                if self.currentProfileID == id {
+                    if self.accountHealthState != .loaded { self.accountHealthState = .loaded }
+                    self.accountHealthErrorMessage = nil
+                }
+                return
+            }
             self.profileStore.updateProfile(id, authMode: health.identity.authMode, accountType: health.identity.accountType)
             self.accountProfiles = self.profileStore.accountProfiles()
             if self.currentProfileID == id {
@@ -924,10 +974,22 @@ final class UsageViewModel: ObservableObject {
             }
         }
         worker.onAccountBoundary = { [weak self] _ in
-            guard let self, self.currentProfileID == id else { return }
+            guard let self else { return }
             guard self.workerGenerations[id] == generation else { return }
+            // A managed CODEX_HOME can be re-authenticated in place.  Drop
+            // every profile-scoped cache at that boundary so switching away
+            // and back cannot resurrect the previous identity's payload.
+            self.managedSnapshots[id] = nil
+            self.managedTokenActivities[id] = nil
+            self.managedTokenActivityLastFetchedAt[id] = nil
+            self.managedAccountHealth[id] = nil
+            guard self.currentProfileID == id else { return }
             self.snapshot = nil
             self.lastUpdated = nil
+            self.tokenActivity = nil
+            self.tokenActivityLastFetchedAt = nil
+            self.refreshHUDTokenActivitySummary()
+            self.tokenActivityState = .idle
             self.resetCredits = nil
             self.selectedResetCreditID = nil
             self.activeTurn = .unknownSnapshot()
@@ -966,6 +1028,7 @@ final class UsageViewModel: ObservableObject {
         if let snapshot = managedSnapshots[id] { applySnapshot(snapshot, to: self) }
         if let activity = managedTokenActivities[id] {
             tokenActivity = activity
+            tokenActivityLastFetchedAt = managedTokenActivityLastFetchedAt[id] ?? activity.fetchedAt
             refreshHUDTokenActivitySummary()
             tokenActivityState = .loaded
         }
@@ -976,16 +1039,20 @@ final class UsageViewModel: ObservableObject {
         connectionState = workerStates[id] ?? .disconnected
     }
 
-    private func applySnapshot(_ snapshot: UsageSnapshot, to _: UsageViewModel) {
-        guard let profile = currentProfile else { return }
-        self.snapshot = snapshot
+    @discardableResult
+    private func applySnapshot(_ snapshot: UsageSnapshot, to _: UsageViewModel) -> Bool {
+        guard let profile = currentProfile else { return false }
+        let semanticChange = self.snapshot.map { !$0.hasSameContent(as: snapshot) } ?? true
         lastUpdated = snapshot.receivedAt
         currentDate = Date()
         errorMessage = nil
+        guard semanticChange else { return false }
+        self.snapshot = snapshot
         resetCredits = snapshot.rateLimitResetCredits
         historyStore = HistoryStore(fileURL: profileStore.historyURL(for: profile))
         _ = historyStore.record(snapshot: snapshot, connectionState: .connected, now: snapshot.receivedAt)
         syncHistoryState()
+        return true
     }
 
     func visibleHistorySamples() -> [HistorySample] {
@@ -1040,6 +1107,13 @@ final class UsageViewModel: ObservableObject {
         )
     }
 
+    /// The latest successful fetch is intentionally separate from the
+    /// semantic Token Activity payload.  This keeps the stale indicator honest
+    /// without making an unchanged 15-minute response redraw the whole page.
+    var tokenActivityFetchedAt: Date? {
+        accountScope == .all ? hudTokenActivityFetchedAt : (tokenActivityLastFetchedAt ?? tokenActivity?.fetchedAt)
+    }
+
     private func refreshHUDTokenActivitySummary(networkUpdate: TokenActivityNetworkUpdate? = nil) {
         let previousSummary = hudTokenActivitySummary
         let summary: TokenActivitySnapshot?
@@ -1060,7 +1134,7 @@ final class UsageViewModel: ObservableObject {
         }
         let nextMetrics = summary.map(TokenActivityPresentation.metrics(for:))
         hudTokenActivitySummary = summary
-        hudTokenActivityFetchedAt = summary?.fetchedAt
+        refreshHUDTokenActivityFetchedAt(fallback: summary?.fetchedAt)
         if hudTokenActivityMetrics != nextMetrics {
             hudTokenActivityMetrics = nextMetrics
         }
@@ -1069,7 +1143,7 @@ final class UsageViewModel: ObservableObject {
         // Every other refresh path (cache hydration, startup, account/scope
         // changes, chart range changes, and background profiles) silently
         // reseeds the summary baseline.
-        hudTokenActivityFeedback = nil
+        if hudTokenActivityFeedback != nil { hudTokenActivityFeedback = nil }
         guard let networkUpdate,
               !networkUpdate.suppressFeedback,
               accountScope == .current,
@@ -1090,6 +1164,18 @@ final class UsageViewModel: ObservableObject {
             // no per-digit sounds, notification requests, or audio loop.
             playTokenActivitySound()
         }
+    }
+
+    private func refreshHUDTokenActivityFetchedAt(fallback: Date? = nil) {
+        if accountScope == .current {
+            hudTokenActivityFetchedAt = tokenActivityLastFetchedAt ?? fallback ?? tokenActivity?.fetchedAt
+            return
+        }
+        let fetchedDates = profileStore.accountProfiles().compactMap { profile in
+            managedTokenActivityLastFetchedAt[profile.id]
+                ?? managedTokenActivities[profile.id]?.fetchedAt
+        }
+        hudTokenActivityFetchedAt = fetchedDates.max() ?? fallback
     }
 
     private func playTokenActivitySound() {
@@ -1237,7 +1323,7 @@ final class UsageViewModel: ObservableObject {
     }
 
     var tokenActivityIsStale: Bool {
-        let fetchedAt = accountScope == .all ? hudTokenActivityFetchedAt : tokenActivity?.fetchedAt
+        let fetchedAt = tokenActivityFetchedAt
         guard let fetchedAt else { return false }
         return currentDate.timeIntervalSince(fetchedAt) > 15 * 60
     }
@@ -1326,6 +1412,14 @@ final class UsageViewModel: ObservableObject {
     }
 
     private func handleAccountHealth(_ health: AccountHealthSnapshot) {
+        if !pendingUnidentifiedProfileBoundary,
+           let existing = accountHealth,
+           existing.hasSameContent(as: health),
+           currentProfileID != nil {
+            if accountHealthState != .loaded { accountHealthState = .loaded }
+            if accountHealthErrorMessage != nil { accountHealthErrorMessage = nil }
+            return
+        }
         let forceNewUnidentified = pendingUnidentifiedProfileBoundary && health.identity.email == nil
         pendingUnidentifiedProfileBoundary = false
         let selection = profileStore.select(identity: health.identity, forceNewUnidentified: forceNewUnidentified)
@@ -1407,11 +1501,15 @@ final class UsageViewModel: ObservableObject {
         historySamples = historyStore.samples
         historyErrorMessage = historyStore.errorMessage
         tokenActivity = nil
+        tokenActivityLastFetchedAt = nil
         suppressNextTokenActivityFeedback = true
         suppressedTokenActivityProfileID = profile.id
         refreshHUDTokenActivitySummary()
         tokenActivityState = .idle
         tokenActivityErrorMessage = nil
+        accountHealth = nil
+        accountHealthState = .loading
+        accountHealthErrorMessage = nil
         snapshot = nil
         lastUpdated = nil
         resetCredits = nil
@@ -1424,6 +1522,7 @@ final class UsageViewModel: ObservableObject {
         tokenActivityStore.loadAsynchronously { [weak self] in
             guard let self, self.currentProfileID == profile.id else { return }
             self.tokenActivity = self.tokenActivityStore.snapshot
+            self.tokenActivityLastFetchedAt = self.tokenActivityStore.snapshot?.fetchedAt
             self.refreshHUDTokenActivitySummary()
             self.tokenActivityState = self.tokenActivity == nil ? .idle : .loaded
             self.tokenActivityErrorMessage = self.tokenActivityStore.errorMessage

@@ -207,6 +207,24 @@ struct UsageSnapshot: Equatable {
     var fallbackRemainingPercent: Int? {
         primary?.remainingPercent ?? secondary?.remainingPercent
     }
+
+    /// Network responses carry a fresh timestamp even when the quota payload
+    /// is unchanged.  The timestamp is freshness metadata, not a new
+    /// authoritative quota value, so cadence gates compare this semantic
+    /// payload separately from `receivedAt`.
+    func hasSameContent(as other: UsageSnapshot) -> Bool {
+        limitId == other.limitId
+            && limitName == other.limitName
+            && planType == other.planType
+            && primary == other.primary
+            && secondary == other.secondary
+            && gptReserveWeekly == other.gptReserveWeekly
+            && individualLimit == other.individualLimit
+            && rateLimitReachedType == other.rateLimitReachedType
+            && spendControlReached == other.spendControlReached
+            && rateLimitResetCredits == other.rateLimitResetCredits
+            && credits == other.credits
+    }
 }
 
 struct RateLimitWindowPatch: Equatable {

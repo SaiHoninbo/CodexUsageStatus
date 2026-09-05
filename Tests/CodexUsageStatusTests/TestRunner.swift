@@ -73,6 +73,7 @@ struct CodexUsageStatusTests {
             ("status item presentation projection", testStatusItemPresentationProjection),
             ("HUD presentation boundary", testHUDPresentationBoundary),
             ("token activity store replacement and retention", testTokenActivityStoreReplacementAndRetention),
+            ("token activity semantic dedupe", testTokenActivitySemanticDedupe),
             ("corrupt token activity preserves memory", testCorruptTokenActivityPreservesMemory),
             ("reset credit decoding and sparse preservation", testResetCreditDecoding),
             ("reset credit consume request", testResetCreditConsumeRequest),
@@ -98,6 +99,7 @@ struct CodexUsageStatusTests {
             ("retired feature cleanup", testRetiredFeatureCleanup)
             ,("App Server retry policy", testAppServerRetryPolicy)
             ,("refresh request coalescing", testRefreshRequestCoalescing)
+            ,("account refresh dependency policy", testAccountRefreshDependencyPolicy)
             ,("App Server replacement admission", testAppServerReplacementAdmission)
             ,("managed worker admission", testManagedWorkerAdmission)
             ,("bounded termination flush", testBoundedTerminationFlush)
@@ -1466,6 +1468,51 @@ struct CodexUsageStatusTests {
         try expect(store.errorMessage != nil, "corrupt token file reports error")
     }
 
+    private static func testTokenActivitySemanticDedupe() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("codex-token-dedupe-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = TokenActivityStore(applicationSupportURL: base)
+        let firstDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let content = TokenActivitySnapshot(
+            fetchedAt: firstDate,
+            lifetimeTokens: 100,
+            peakDailyTokens: 50,
+            longestRunningTurnSec: 30,
+            currentStreakDays: 1,
+            longestStreakDays: 2,
+            dailyUsageBuckets: [DailyTokenUsage(startDate: "2026-08-15", tokens: 100)]
+        )
+        _ = store.update(incoming: content, now: firstDate)
+        try expect(store.lastUpdateChanged, "first token payload changes the store")
+
+        let unchanged = TokenActivitySnapshot(
+            fetchedAt: firstDate.addingTimeInterval(900),
+            lifetimeTokens: 100,
+            peakDailyTokens: 50,
+            longestRunningTurnSec: 30,
+            currentStreakDays: 1,
+            longestStreakDays: 2,
+            dailyUsageBuckets: [DailyTokenUsage(startDate: "2026-08-15", tokens: 100)]
+        )
+        _ = store.update(incoming: unchanged, now: firstDate.addingTimeInterval(900))
+        try expect(!store.lastUpdateChanged, "timestamp-only token refresh is not a semantic change")
+        try expect(store.snapshot?.fetchedAt == firstDate, "unchanged token refresh does not replace authoritative payload")
+
+        var changed = unchanged
+        changed = TokenActivitySnapshot(
+            fetchedAt: changed.fetchedAt,
+            lifetimeTokens: 101,
+            peakDailyTokens: changed.peakDailyTokens,
+            longestRunningTurnSec: changed.longestRunningTurnSec,
+            currentStreakDays: changed.currentStreakDays,
+            longestStreakDays: changed.longestStreakDays,
+            dailyUsageBuckets: changed.dailyUsageBuckets
+        )
+        _ = store.update(incoming: changed, now: firstDate.addingTimeInterval(901))
+        try expect(store.lastUpdateChanged, "token payload change is published for persistence")
+        try expect(store.snapshot?.lifetimeTokens == 101, "changed token value replaces the payload")
+    }
+
     private static func testResetCreditDecoding() throws {
         let snapshot = try UsageDataCodec.decodeFullSnapshot(from: [
             "rateLimits": ["limitId": "codex", "primary": ["usedPercent": 10]],
@@ -2170,6 +2217,29 @@ struct CodexUsageStatusTests {
     private static func testRefreshRequestCoalescing() throws {
         try expect(RefreshRequestCoalescer.shouldSchedule(isScheduled: false), "first refresh schedules")
         try expect(!RefreshRequestCoalescer.shouldSchedule(isScheduled: true), "duplicate refresh is coalesced")
+    }
+
+    private static func testAccountRefreshDependencyPolicy() throws {
+        try expect(AccountRefreshDependencyPolicy.shouldRefreshDependentData(
+            previousIdentityKey: nil,
+            currentIdentityKey: "email|one@example.com",
+            hasCurrentSnapshot: false
+        ), "initial account read fans out to dependent data")
+        try expect(AccountRefreshDependencyPolicy.shouldRefreshDependentData(
+            previousIdentityKey: "email|one@example.com",
+            currentIdentityKey: "email|two@example.com",
+            hasCurrentSnapshot: true
+        ), "identity change fans out to dependent data")
+        try expect(!AccountRefreshDependencyPolicy.shouldRefreshDependentData(
+            previousIdentityKey: "email|one@example.com",
+            currentIdentityKey: "email|one@example.com",
+            hasCurrentSnapshot: true
+        ), "steady-state account poll stays independent")
+        try expect(AccountRefreshDependencyPolicy.shouldRefreshDependentData(
+            previousIdentityKey: "email|one@example.com",
+            currentIdentityKey: "email|one@example.com",
+            hasCurrentSnapshot: false
+        ), "missing quota snapshot allows recovery fan-out")
     }
 
     private static func testAppServerReplacementAdmission() throws {

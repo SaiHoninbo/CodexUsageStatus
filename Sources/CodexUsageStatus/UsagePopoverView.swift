@@ -118,7 +118,6 @@ struct UsagePopoverView: View {
             quotaSummarySection
             overviewTurnActivity
             resetCreditSection
-            updateSection
             quickActions
         }
     }
@@ -135,6 +134,7 @@ struct UsagePopoverView: View {
             accountManagementSection
             settingsSection
             syncSettingsSection
+            updateSection
             metadataSection
             actions
         }
@@ -568,7 +568,7 @@ struct UsagePopoverView: View {
     private var tokenActivitySection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("帳號歷史摘要")
+                Text("Token 歷史摘要")
                     .font(.headline)
                 Spacer()
                 Text(model.tokenActivityState.displayName)
@@ -609,7 +609,7 @@ struct UsagePopoverView: View {
                     .chartYAxis { AxisMarks(position: .leading) }
                     .frame(height: 130)
                 }
-                Text("最後抓取：\(activity.fetchedAt.formatted(date: .abbreviated, time: .shortened))\(model.tokenActivityIsStale ? " · 資料較舊" : "")")
+                Text("最後抓取：\(model.tokenActivityFetchedAt?.formatted(date: .abbreviated, time: .shortened) ?? "未知")\(model.tokenActivityIsStale ? " · 資料較舊" : "")")
                     .font(.caption2)
                     .foregroundStyle(model.tokenActivityIsStale ? .orange : .secondary)
             } else {

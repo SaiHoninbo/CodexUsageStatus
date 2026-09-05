@@ -17,6 +17,21 @@ enum RefreshRequestCoalescer {
     static func shouldSchedule(isScheduled: Bool) -> Bool { !isScheduled }
 }
 
+enum AccountRefreshDependencyPolicy {
+    /// An account poll only fans out to quota/token reads at startup, after an
+    /// identity transition, or when the current quota snapshot is absent.
+    /// Steady-state account health polling remains independent.
+    static func shouldRefreshDependentData(
+        previousIdentityKey: String?,
+        currentIdentityKey: String?,
+        hasCurrentSnapshot: Bool
+    ) -> Bool {
+        previousIdentityKey == nil
+            || previousIdentityKey != currentIdentityKey
+            || !hasCurrentSnapshot
+    }
+}
+
 enum AppServerReplacementAdmissionPolicy {
     static func canStartReplacement(oldProcessRunning: Bool, replacementInFlight: Bool) -> Bool {
         !oldProcessRunning && !replacementInFlight
@@ -543,21 +558,29 @@ final class CodexAppServerClient {
                 handleError("account/read 回應缺少 result", for: kind)
                 return
             }
-            // A switch notification can race the initial quota/activity reads.
-            // Drop those responses and start fresh reads after the account
-            // profile has been selected, so old-account data cannot win.
-            invalidatePendingDataReads()
             do {
                 let account = try AccountDataCodec.decode(from: result, receivedAt: Date()).applying(authMode: latestAuthMode)
                 let identityKey = accountIdentityKey(account.identity)
+                let shouldRefreshDependentData = AccountRefreshDependencyPolicy.shouldRefreshDependentData(
+                    previousIdentityKey: latestAccountIdentityKey,
+                    currentIdentityKey: identityKey,
+                    hasCurrentSnapshot: latestSnapshot != nil
+                )
+                // A switch notification can race the initial quota/activity
+                // reads.  Only that boundary/recovery path drops pending data
+                // responses; a steady-state account poll must not cancel a
+                // legitimate quota or Token Activity request in flight.
+                if shouldRefreshDependentData { invalidatePendingDataReads() }
                 if let previousKey = latestAccountIdentityKey, previousKey != identityKey {
                     latestSnapshot = nil
                 }
                 latestAccountIdentityKey = identityKey
                 onAccountHealth?(account)
                 onAccountHealthState?(.loaded, nil)
-                _ = sendRequest(method: "account/rateLimits/read", params: nil, kind: .rateLimitsRead)
-                _ = sendRequest(method: "account/usage/read", params: nil, kind: .usageRead)
+                if shouldRefreshDependentData {
+                    _ = sendRequest(method: "account/rateLimits/read", params: nil, kind: .rateLimitsRead)
+                    _ = sendRequest(method: "account/usage/read", params: nil, kind: .usageRead)
+                }
             } catch {
                 logger.error("Account health decode failed")
                 onAccountHealthState?(.error, "帳號資料回應格式無法解析。")
