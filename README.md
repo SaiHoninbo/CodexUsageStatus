@@ -112,8 +112,8 @@ Build the macOS executable with Swift Package Manager:
 swift build --disable-sandbox -c release
 ```
 
-For a public or distributable package, use the packaging script instead. It
-omits release debug information that could otherwise contain local build paths:
+For a local canonical package archive, use the packaging script. It omits
+release debug information that could otherwise contain local build paths:
 
 ```bash
 ./script/build_and_run.sh package
@@ -124,6 +124,26 @@ The packaging script creates an ad-hoc signed app, validates the bundle, and wri
 ```text
 outputs/CodexUsageStatus.app.zip
 ```
+
+The default `package` mode is a local packaging convenience and its ad-hoc
+signature is not a formal public release. For a public release, maintainers
+must use the existing release-signing path by setting
+`CODEX_RELEASE_MODE=1` together with an explicit
+`CODEX_RELEASE_SIGNING_IDENTITY`; the script refuses to silently fall back to
+ad-hoc signing in that mode. Publishing the resulting ZIP to a GitHub Release
+is a separate explicit maintainer action.
+
+For disposable runtime or UI evidence, use the `candidate` mode instead:
+
+```bash
+./script/build_and_run.sh candidate
+```
+
+`candidate` builds and ad-hoc signs a temporary app bundle beneath `/private/tmp`,
+verifies its signature, prints the exact `.app` path, and does not launch the
+app. It never writes `outputs/CodexUsageStatus.app.zip`; that repository artifact
+is created only by the explicit `package` mode. A candidate is not a release
+artifact and may be removed after verification.
 
 Run the core checks with:
 

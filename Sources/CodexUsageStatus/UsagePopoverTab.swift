@@ -27,6 +27,19 @@ enum UsagePopoverTab: String, CaseIterable, Identifiable {
     }
 }
 
+/// The application Settings command has one product destination: the
+/// Settings tab inside the existing status-item popover. Keeping this route
+/// value-semantic makes command wiring testable without creating AppKit
+/// windows in the core harness.
+enum ProductSettingsRoute {
+    static let targetTab: UsagePopoverTab = .settings
+
+    static func destination(from currentTab: UsagePopoverTab) -> UsagePopoverTab {
+        _ = currentTab
+        return targetTab
+    }
+}
+
 @MainActor
 final class PopoverSelectionController: ObservableObject {
     @Published var selectedTab: UsagePopoverTab = .overview

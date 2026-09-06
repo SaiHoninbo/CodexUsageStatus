@@ -45,7 +45,15 @@ account identifiers and local paths before submitting.
 
 The app's update checker reads latest-release metadata and opens the official
 GitHub Release page. It never downloads, extracts, executes, replaces, or
-relaunches an app bundle. Maintainers must publish release assets with a formal
-signing identity and inspect the ZIP inventory before distribution; assets must
-not include source archives, tests, credentials, token activity, history, or
-AppleDouble files.
+relaunches an app bundle.
+
+The `candidate` mode is disposable runtime evidence under `/private/tmp`; it is
+ad-hoc signed and is never a release artifact. The default local `package` mode
+creates the repository's canonical `outputs/CodexUsageStatus.app.zip`, but its
+ad-hoc signature is only suitable for local packaging and testing. Before public
+distribution, maintainers must use the existing release-signing path with
+`CODEX_RELEASE_MODE=1` and an explicit `CODEX_RELEASE_SIGNING_IDENTITY`; that
+mode must not silently fall back to ad-hoc signing. Publishing the resulting ZIP
+to GitHub Releases is a separate explicit action. Formal release assets must be
+inspected before distribution and must not include source archives, tests,
+credentials, token activity, history, or AppleDouble files.

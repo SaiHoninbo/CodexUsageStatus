@@ -113,17 +113,36 @@ App 不會自行下載、解壓、替換或重新啟動自己；安裝由使用�
 swift build --disable-sandbox -c release
 ```
 
-若要產生公開或可分發的安裝包，請改用打包腳本。腳本會移除可能包含本機建置路徑的 release debug 資訊：
+若要產生本機 canonical package archive，請使用打包腳本。腳本會移除可能包含本機建置路徑的 release debug 資訊：
 
 ```bash
 ./script/build_and_run.sh package
 ```
 
-打包腳本會建立 ad-hoc signed App、驗證 bundle，並將唯一正式產出寫入：
+打包腳本會建立 ad-hoc signed App、驗證 bundle，並將唯一的 repository
+canonical artifact 寫入：
 
 ```text
 outputs/CodexUsageStatus.app.zip
 ```
+
+預設的 `package` mode 是本機打包便利流程，使用的 ad-hoc signature
+不代表正式公開 Release。正式公開 Release 必須使用既有的 release signing
+流程，設定 `CODEX_RELEASE_MODE=1` 與明確的
+`CODEX_RELEASE_SIGNING_IDENTITY`；在這個 mode 下腳本拒絕靜默退回
+ad-hoc signing。將產出的 ZIP 發布到 GitHub Release，仍是維護者另外明確
+執行的動作。
+
+若要產生一次性的 runtime 或 UI 驗證版本，請使用 `candidate` mode：
+
+```bash
+./script/build_and_run.sh candidate
+```
+
+`candidate` 會在 `/private/tmp` 下建立暫存 App bundle、執行 ad-hoc signing
+與簽章驗證、印出確切的 `.app` 路徑，但不會自動啟動 App。它永遠不會寫入
+`outputs/CodexUsageStatus.app.zip`；該 repository canonical artifact 只有明確執行
+`package` mode 才會產生。Candidate 不是 release artifact，驗證完成後即可移除。
 
 執行核心測試：
 

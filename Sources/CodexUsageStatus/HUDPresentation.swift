@@ -56,8 +56,15 @@ struct HUDPresentation: Equatable {
     let isQuotaUpdating: Bool
     let isCodexFocused: Bool
     let quotaRowCount: Int
-    let hasCredits: Bool
+    /// The single account-information-row visibility decision shared by the
+    /// SwiftUI tree and the AppKit panel geometry. A known zero Reset Credit
+    /// count is still information and therefore keeps this row visible.
+    let showsAccountInfoRow: Bool
+    let resetCreditCount: Int?
+    let resetCreditNextExpiryAt: Int64?
+    let resetCreditCountdownText: String?
     let scaleLevel: HUDScaleLevel
+    let isPasteInFlight: Bool
     let isPasteAndSubmitInFlight: Bool
     let isPromptShortcutInFlight: Bool
     let clipboardOperationInFlight: Bool
@@ -74,6 +81,66 @@ struct HUDPresentation: Equatable {
     /// in the value so toggling the accessibility setting invalidates the
     /// Equatable visual boundary immediately.
     let reduceMotion: Bool
+}
+
+/// Credits and Reset Credits are independently optional. This policy is the
+/// only place that decides whether their shared HUD row exists; downstream
+/// layout code consumes the resulting boolean without reinterpreting data.
+enum HUDAccountInfoVisibilityPolicy {
+    static func showsRow(credits: CreditsBalance?, resetCreditCount: Int?) -> Bool {
+        credits?.isDisplayable == true || resetCreditCount != nil
+    }
+}
+
+struct HUDResetCreditPresentation: Equatable {
+    let count: Int
+    let nextExpiryAt: Int64?
+
+    static func make(from resetCredits: RateLimitResetCredits?, now: Date) -> HUDResetCreditPresentation? {
+        guard let resetCredits else { return nil }
+        return HUDResetCreditPresentation(
+            count: resetCredits.availableCount,
+            nextExpiryAt: HUDResetCreditCountdownPolicy.nearestFutureExpiry(
+                in: resetCredits.availableCredits,
+                now: now
+            )
+        )
+    }
+}
+
+/// Pure shared countdown semantics for the HUD and Popover. This policy does
+/// no scheduling and causes no transport work; callers reuse the model's
+/// existing minute-level `currentDate` publication.
+enum HUDResetCreditCountdownPolicy {
+    static func nearestFutureExpiry(
+        in credits: [RateLimitResetCredit],
+        now: Date
+    ) -> Int64? {
+        let nowTimestamp = Int64(now.timeIntervalSince1970)
+        return credits
+            .filter(\.isAvailable)
+            .compactMap(\.expiresAt)
+            .filter { $0 > nowTimestamp }
+            .min()
+    }
+
+    static func text(expiresAt: Int64?, now: Date) -> String {
+        guard let expiresAt else { return "到期未知" }
+        let remainingSeconds = TimeInterval(expiresAt) - now.timeIntervalSince1970
+        guard remainingSeconds > 0 else { return "已過期" }
+        guard remainingSeconds >= 3_600 else { return "剩不到 1 小時" }
+
+        let totalHours = Int(remainingSeconds / 3_600)
+        let days = totalHours / 24
+        let hours = totalHours % 24
+        return "剩 \(days) 天 \(hours) 小時"
+    }
+}
+
+enum HUDPasteActionPolicy {
+    static func canStart(isInFlight: Bool, isCodexFocused: Bool) -> Bool {
+        !isInFlight && isCodexFocused
+    }
 }
 
 enum StatusItemPresentationPolicy {
@@ -210,6 +277,60 @@ struct TokenOdometerSlot: Equatable, Identifiable {
     }
 }
 
+/// A deterministic, value-semantic plan for one changed numeric slot. The
+/// plan deliberately lives beside the existing slot model so the reel motion
+/// remains testable without SwiftUI or any runtime/network state.
+struct TokenOdometerReelPlan: Equatable {
+    static let staggerStep = 0.02
+    static let maxStaggerDelay = 0.08
+
+    let startDigit: Int
+    let finalDigit: Int
+    let forwardSequence: [Int]
+    let stepCount: Int
+    let startDelay: Double
+
+    var finalLandingIndex: Int { stepCount }
+
+    /// Builds one complete forward revolution plus the shortest forward path
+    /// to the new digit. Returning nil is intentional for unchanged digits,
+    /// separators, and newly appearing leading digits without a numeric
+    /// predecessor.
+    static func make(
+        previousCharacter: Character?,
+        currentCharacter: Character,
+        startDelay: Double = 0
+    ) -> TokenOdometerReelPlan? {
+        guard let previousDigit = previousCharacter?.wholeNumberValue,
+              let finalDigit = currentCharacter.wholeNumberValue,
+              (0...9).contains(previousDigit),
+              (0...9).contains(finalDigit),
+              previousDigit != finalDigit else {
+            return nil
+        }
+
+        let forwardDelta = (finalDigit - previousDigit + 10) % 10
+        let stepCount = 10 + forwardDelta
+        let sequence = (0...stepCount).map { step in
+            (previousDigit + step) % 10
+        }
+
+        return TokenOdometerReelPlan(
+            startDigit: previousDigit,
+            finalDigit: finalDigit,
+            forwardSequence: sequence,
+            stepCount: stepCount,
+            startDelay: min(max(0, startDelay), maxStaggerDelay)
+        )
+    }
+
+    /// Rightmost changed digits start first. The delay is intentionally small
+    /// and bounded so the whole feedback remains a compact utility animation.
+    static func startDelay(forChangedRankFromRight rank: Int) -> Double {
+        min(Double(max(0, rank)) * staggerStep, maxStaggerDelay)
+    }
+}
+
 /// Split the formatted lifetime value into stable slots so only changed
 /// digits receive a numeric transition. Separators and leading positions keep
 /// their identity, which prevents the compact HUD from shifting during a
@@ -324,5 +445,109 @@ struct AccountScopeSummary: Equatable {
             staleAccounts: stale,
             unidentifiedAccounts: profiles.filter(\.isUnidentified).count
         )
+    }
+}
+
+/// Truthful presentation states for the compact All Accounts overview.
+/// `currentLive` is reserved for the selected profile's connected in-memory
+/// snapshot; cached samples from every other profile are never promoted to
+/// Live, even when their timestamp is recent.
+enum AllAccountsUsageRowState: String, Equatable {
+    case currentLive
+    case cached
+    case stale
+    case unavailable
+
+    var displayName: String {
+        switch self {
+        case .currentLive: return "Live"
+        case .cached: return "快取"
+        case .stale: return "資料較舊"
+        case .unavailable: return "尚無資料"
+        }
+    }
+}
+
+/// Non-persistent, value-semantic projection for one All Accounts row.
+/// Account identity remains supplied by `AccountProfileDisplay`, while quota
+/// and freshness come from the profile-scoped history sample.
+struct AllAccountsUsageRowPresentation: Identifiable, Equatable {
+    let profileID: UUID
+    let title: String
+    let subtitle: String
+    let remainingPercent: Int?
+    let freshnessText: String
+    let state: AllAccountsUsageRowState
+    let isCurrent: Bool
+    let isWarning: Bool
+
+    var id: UUID { profileID }
+
+    static func orderedProfiles(_ profiles: [AccountProfile], currentProfileID: UUID?) -> [AccountProfile] {
+        guard let currentProfileID,
+              let current = profiles.first(where: { $0.id == currentProfileID }) else {
+            return profiles
+        }
+        return [current] + profiles.filter { $0.id != currentProfileID }
+    }
+
+    static func make(
+        profile: AccountProfile,
+        display: AccountProfileDisplay,
+        summary: ProfileQuotaSummary?,
+        currentProfileID: UUID?,
+        currentConnectionState: ConnectionState,
+        currentSnapshotAvailable: Bool,
+        currentSnapshotIsStale: Bool,
+        currentRemainingPercent: Int?,
+        now: Date
+    ) -> Self {
+        let isCurrent = profile.id == currentProfileID
+        let isCurrentLive = isCurrent
+            && currentConnectionState == .connected
+            && currentSnapshotAvailable
+            && !currentSnapshotIsStale
+        let state: AllAccountsUsageRowState
+        if isCurrentLive {
+            state = .currentLive
+        } else if summary?.latestSample != nil {
+            state = summary?.isStale(at: now) == true ? .stale : .cached
+        } else {
+            state = .unavailable
+        }
+
+        let percent = isCurrentLive
+            ? (currentRemainingPercent ?? summary?.primaryRemainingPercent)
+            : summary?.primaryRemainingPercent
+        let freshnessText: String
+        if state == .unavailable {
+            freshnessText = state.displayName
+        } else {
+            freshnessText = "\(state.displayName) · \(ageText(since: summary?.latestSample?.receivedAt, now: now))"
+        }
+
+        return Self(
+            profileID: profile.id,
+            title: display.title,
+            subtitle: display.subtitle,
+            remainingPercent: clamp(percent),
+            freshnessText: freshnessText,
+            state: state,
+            isCurrent: isCurrent,
+            isWarning: display.isWarning
+        )
+    }
+
+    private static func clamp(_ value: Int?) -> Int? {
+        value.map { max(0, min(100, $0)) }
+    }
+
+    private static func ageText(since date: Date?, now: Date) -> String {
+        guard let date else { return "尚無資料" }
+        let seconds = max(0, Int(now.timeIntervalSince(date)))
+        if seconds < 60 { return "剛剛" }
+        if seconds < 3600 { return "\(max(1, seconds / 60)) 分鐘前" }
+        if seconds < 86400 { return "\(max(1, seconds / 3600)) 小時前" }
+        return "\(max(1, seconds / 86400)) 天前"
     }
 }

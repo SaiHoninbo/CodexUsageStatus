@@ -22,7 +22,7 @@ App 不會把 credentials 放進 app bundle、history、Token Activity、profile
 - 「全部帳號」只作為 overview；quota 會逐帳號列出，不會相加。
 - Token Activity 可按日期聚合。
 - 每個帳號使用自己的 App Server 與 CODEX_HOME。
-- 帳號背景同步預設每 5 分鐘，可在「同步設定」中調整；Quota、Token Activity 與帳號切換偵測也可分別設定。
+- 帳號背景同步預設每 30 分鐘，可在「同步設定」中調整；Quota、Token Activity 與帳號切換偵測也可分別設定。
 - 同步並行數受限，避免大量帳號同時刷新造成認證衝突。
 
 切換不會改動系統 ~/.codex，也不會重啟其他 profile 的 worker。現有 Codex／ChatGPT 工作流程不會被這個工具強制換帳號。
@@ -42,7 +42,7 @@ App 不會把 credentials 放進 app bundle、history、Token Activity、profile
 popover 的「同步設定」可分別調整：
 
 - Quota／Primary／Secondary：預設每 60 秒，可設定 30 秒至 60 分鐘。
-- 目前帳號身份：預設每 5 分鐘，可設定 1 至 60 分鐘。
+- 目前帳號身份：預設每 30 分鐘，可設定 1 至 60 分鐘。
 - Token Activity：預設每 15 分鐘，可設定 5 分鐘至 2 小時。
 - 帳號切換偵測：預設每 15 秒，可設定 5 至 120 秒。
 

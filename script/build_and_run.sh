@@ -6,12 +6,36 @@ APP_NAME="CodexUsageStatus"
 BUNDLE_ID="com.openai.codex-usage-status"
 MIN_SYSTEM_VERSION="14.0"
 
+case "$MODE" in
+  package)
+    SHOULD_STOP_PROCESS=0
+    SHOULD_PACKAGE=1
+    ;;
+  candidate)
+    SHOULD_STOP_PROCESS=0
+    SHOULD_PACKAGE=0
+    ;;
+  run|--logs|logs|--telemetry|telemetry|--verify|verify)
+    SHOULD_STOP_PROCESS=1
+    SHOULD_PACKAGE=0
+    ;;
+  --debug|debug)
+    SHOULD_STOP_PROCESS=1
+    SHOULD_PACKAGE=0
+    ;;
+  *)
+    echo "usage: $0 [package|candidate|run|--debug|--logs|--telemetry|--verify]" >&2
+    exit 2
+    ;;
+esac
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STAGE_DIR="$(mktemp -d -t codex-usage-status-stage.XXXXXX)"
+STAGE_DIR="$(mktemp -d /private/tmp/codex-usage-status-stage.XXXXXX)"
 # `run` and `--verify` launch the bundle asynchronously.  Do not delete the
 # temporary bundle when those modes return, or macOS may still be loading its
-# executable/resources.  Package mode is the only path whose consumer is the
-# finished ZIP, so it can safely clean its staging directory on exit.
+# executable/resources.  Candidate mode also intentionally leaves its bundle
+# available for later runtime evidence. Package mode is the only path whose
+# consumer is the finished ZIP, so it can safely clean its staging directory.
 if [[ "$MODE" == "package" ]]; then
   trap 'rm -rf "$STAGE_DIR"' EXIT
 fi
@@ -30,7 +54,9 @@ ICON_FILE="$ROOT_DIR/Resources/AppIcon.icns"
 ## omit DWARF entirely rather than publishing machine-specific paths.
 SWIFT_RELEASE_ARGS=( -Xswiftc -gnone )
 
-pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+if [[ "$SHOULD_STOP_PROCESS" == 1 ]]; then
+  pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+fi
 
 swift build --disable-sandbox -c release "${SWIFT_RELEASE_ARGS[@]}"
 BUILD_BINARY="$(swift build --disable-sandbox --show-bin-path -c release "${SWIFT_RELEASE_ARGS[@]}")/$APP_NAME"
@@ -78,9 +104,9 @@ cat > "$INFO_PLIST" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>2.4.67</string>
+  <string>2.4.68</string>
   <key>CFBundleVersion</key>
-  <string>87</string>
+  <string>88</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
   <key>LSUIElement</key>
@@ -105,8 +131,11 @@ else
   codesign --force --deep --sign - "$APP_BUNDLE"
 fi
 codesign --verify --deep --strict --verbose=4 "$APP_BUNDLE"
-mkdir -p "$OUTPUT_DIR"
-COPYFILE_DISABLE=1 ditto --norsrc -c -k --keepParent "$APP_BUNDLE" "$OUTPUT_ZIP"
+
+if [[ "$SHOULD_PACKAGE" == 1 ]]; then
+  mkdir -p "$OUTPUT_DIR"
+  COPYFILE_DISABLE=1 ditto --norsrc -c -k --keepParent "$APP_BUNDLE" "$OUTPUT_ZIP"
+fi
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"
@@ -115,6 +144,10 @@ open_app() {
 case "$MODE" in
   package)
     echo "Packaged $OUTPUT_ZIP"
+    ;;
+  candidate)
+    echo "Candidate app: $APP_BUNDLE"
+    echo "Candidate is disposable, temporary-only, and was not launched."
     ;;
   run)
     open_app
@@ -135,9 +168,5 @@ case "$MODE" in
     open_app
     sleep 2
     pgrep -x "$APP_NAME" >/dev/null
-    ;;
-  *)
-    echo "usage: $0 [package|run|--debug|--logs|--telemetry|--verify]" >&2
-    exit 2
     ;;
 esac

@@ -32,6 +32,7 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/UsagePopoverTab.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/AppVersion.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/PopoverPresentationPolicy.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/InteractiveHostingView.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/AppUpdateService.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDUpdateBadgePolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDColorPalette.swift" \

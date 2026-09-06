@@ -8,6 +8,10 @@ import AppKit
 enum PopoverPresentationPolicy {
     static let preferredAppearanceName: NSAppearance.Name = .darkAqua
     static let reappliesAfterPopoverDidShow = true
+    /// Controls first-click delivery at the SwiftUI hosting boundary.  The
+    /// popover and HUD both use a hosting view that accepts the initial
+    /// mouse-down while inactive; activation/focus policy remains separate.
+    static let acceptsFirstMouse = true
     /// Status-item apps are normally inactive when their menu extra is clicked.
     /// Activating only for a user-requested popover presentation makes AppKit
     /// resolve the popover's active material on the first click.

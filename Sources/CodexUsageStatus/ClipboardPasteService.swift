@@ -14,11 +14,14 @@ enum ClipboardPasteService {
         activeTemporaryOperationToken != nil
     }
 
-    static func pasteToCodex(processID: pid_t?) {
+    static func pasteToCodex(
+        processID: pid_t?,
+        completion: @escaping (Bool) -> Void = { _ in }
+    ) {
         performPaste(
             processID: processID,
             submitAfterPaste: false,
-            completion: nil
+            completion: completion
         )
     }
 
@@ -405,7 +408,13 @@ enum ClipboardPasteService {
             return
         }
 
-        guard submitAfterPaste else { return }
+        guard submitAfterPaste else {
+            // The Cmd-V event has been posted and the accepted action can now
+            // clear its local acknowledgement state. The focus/safety checks
+            // above remain unchanged and still gate the event itself.
+            completion?(true)
+            return
+        }
 
         // Cmd-V is asynchronous for rich content such as an image. Leave a
         // small settling window before sending Return, and re-check focus so

@@ -7,13 +7,10 @@ import Foundation
 struct HUDMetrics: Equatable {
     let scaleLevel: HUDScaleLevel
 
-    // The current C-layout HUD is derived from one compact 416x256.4 base.
-    // Every scale level preserves this complete geometry contract, including
-    // the token summary, quota stack, optional Credits row, and two action
-    // rows. The retired direct Git footer has no reserved vertical budget.
-    // 52pt leaves two readable metric baselines plus the separator at the
-    // smallest 0.64 scale without letting either row clip into its neighbor.
-    static let canonicalTokenSummaryHeight: CGFloat = 52
+    // The current C-layout HUD keeps its 416pt compatibility width. The Token
+    // Activity area is now the hero: its stable reel cells and 2x2 secondary
+    // grid need more vertical room than the retired two-line summary.
+    static let canonicalTokenSummaryHeight: CGFloat = 78
     static let canonicalTokenSummaryGap: CGFloat = 5
     static let canonicalPanelWidth: CGFloat = 416
     static let canonicalOuterPadding: CGFloat = 11
@@ -29,13 +26,13 @@ struct HUDMetrics: Equatable {
     static let canonicalActionHeight: CGFloat = 38.4
     static let canonicalWorkflowActionHeight: CGFloat = 28
     static let canonicalWorkflowActionGap: CGFloat = 5
-    // Credits is a non-progress balance row between the quota stack and
-    // command controls. Its dividers and breathing room are included in this
-    // token so AppKit and SwiftUI keep one shared height contract.
+    // Credits and Reset Credits share a non-progress account-information row.
+    // Its dividers and breathing room are included so AppKit and SwiftUI keep
+    // one shared height contract.
     // Reserve enough room for the two fractional divider strokes even at the
     // smallest .64 scale. The row itself may stay at its 32pt readability
     // floor without bleeding into the following section gap.
-    static let canonicalCreditsSectionHeight: CGFloat = 52
+    static let canonicalAccountInfoSectionHeight: CGFloat = 52
     static let canonicalActionSpacing: CGFloat = 8
     static let canonicalCornerRadius: CGFloat = 15.2
     static let canonicalPanelSize = CGSize(
@@ -71,14 +68,14 @@ struct HUDMetrics: Equatable {
     /// the compatibility default; accounts with one or three windows shrink or
     /// grow only by the quota column delta, so no empty placeholder row is
     /// reserved in the HUD.
-    func panelSize(quotaRowCount: Int, includesCredits: Bool = false) -> CGSize {
+    func panelSize(quotaRowCount: Int, includesAccountInfoRow: Bool = false) -> CGSize {
         let count = max(1, quotaRowCount)
         let canonicalHeight = Self.canonicalPanelSize.height
         let quotaDelta = quotaColumnHeight(for: count) - quotaColumnHeight(for: Self.canonicalQuotaRowCount)
-        let creditsDelta = includesCredits ? creditsSectionHeight + sectionGap : 0
+        let accountInfoDelta = includesAccountInfoRow ? accountInfoSectionHeight + sectionGap : 0
         return CGSize(
             width: Self.canonicalPanelSize.width * factor,
-            height: canonicalHeight * factor + quotaDelta + creditsDelta
+            height: canonicalHeight * factor + quotaDelta + accountInfoDelta
         )
     }
     var outerPadding: CGFloat { Self.canonicalOuterPadding * factor }
@@ -95,8 +92,8 @@ struct HUDMetrics: Equatable {
     var tokenSummaryHeight: CGFloat { Self.canonicalTokenSummaryHeight * factor }
     var tokenSummaryGap: CGFloat { Self.canonicalTokenSummaryGap * factor }
     var workflowActionGap: CGFloat { Self.canonicalWorkflowActionGap * factor }
-    var creditsSectionHeight: CGFloat { Self.canonicalCreditsSectionHeight * factor }
-    var creditsRowHeight: CGFloat { max(32, creditsSectionHeight - (sectionGap * 0.85)) }
+    var accountInfoSectionHeight: CGFloat { Self.canonicalAccountInfoSectionHeight * factor }
+    var accountInfoRowHeight: CGFloat { max(32, accountInfoSectionHeight - (sectionGap * 0.85)) }
     var actionSpacing: CGFloat { Self.canonicalActionSpacing * factor }
     var cornerRadius: CGFloat { Self.canonicalCornerRadius * factor }
     var contentWidth: CGFloat {
@@ -120,14 +117,14 @@ struct HUDMetrics: Equatable {
         verticalContentHeight(for: Self.canonicalQuotaRowCount)
     }
 
-    func verticalContentHeight(for rowCount: Int, includesCredits: Bool = false) -> CGFloat {
+    func verticalContentHeight(for rowCount: Int, includesAccountInfoRow: Bool = false) -> CGFloat {
         tokenSummaryHeight
             + tokenSummaryGap
             + headerHeight
             + headerGap
             + quotaColumnHeight(for: rowCount)
             + sectionGap
-            + (includesCredits ? creditsSectionHeight + sectionGap : 0)
+            + (includesAccountInfoRow ? accountInfoSectionHeight + sectionGap : 0)
             + actionHeight
             + workflowActionGap
             + workflowActionHeight

@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import AppKit
+import SwiftUI
 import Darwin
 
 enum HarnessError: Error, CustomStringConvertible {
@@ -77,9 +78,11 @@ struct CodexUsageStatusTests {
             ("corrupt token activity preserves memory", testCorruptTokenActivityPreservesMemory),
             ("reset credit decoding and sparse preservation", testResetCreditDecoding),
             ("reset credit consume request", testResetCreditConsumeRequest),
+            ("HUD reset credit presentation", testHUDResetCreditPresentation),
             ("account health decoding", testAccountHealthDecoding),
             ("account profile display formatting", testAccountProfileDisplayFormatting),
             ("account scope summary", testAccountScopeSummary),
+            ("all-account usage rows", testAllAccountsUsageRows),
             ("turn activity event decoding", testTurnActivityDecoding),
             ("account profiles isolate email", testAccountProfilesIsolateEmail),
             ("account read disables refresh token", testAccountReadDisablesRefreshToken),
@@ -89,6 +92,8 @@ struct CodexUsageStatusTests {
             ("update version comparison", testUpdateVersionComparison),
             ("HUD context menu policy", testHUDContextMenuPolicy),
             ("usage popover tabs and app version", testUsagePopoverTabsAndAppVersion),
+            ("first click event delivery", testFirstClickEventDelivery),
+            ("HUD paste acknowledgement policy", testHUDPasteAcknowledgementPolicy),
             ("popover presentation appearance policy", testPopoverPresentationAppearancePolicy),
             ("HUD scale levels", testHUDScaleLevels),
             ("HUD C metrics", testHUDMetrics),
@@ -1304,10 +1309,55 @@ struct CodexUsageStatusTests {
         try expect(formattedSlots == TokenActivityPresentation.tokenCount(increased.lifetimeTokens), "odometer final value exactly matches the formatted lifetime")
         try expect(slots.contains(where: { $0.isChangedDigit }), "odometer identifies changed numeric slots")
         try expect(slots.contains(where: { $0.currentCharacter == "," && !$0.isChangedDigit }), "odometer keeps separators stable")
+
+        func reelPlan(_ previous: Character, _ current: Character, delay: Double = 0) -> TokenOdometerReelPlan? {
+            TokenOdometerReelPlan.make(
+                previousCharacter: previous,
+                currentCharacter: current,
+                startDelay: delay
+            )
+        }
+
+        let fourToFive = reelPlan("4", "5")
+        try expect(fourToFive?.startDigit == 4 && fourToFive?.finalDigit == 5, "4 to 5 reel keeps forward endpoints")
+        try expect(fourToFive?.stepCount == 11 && fourToFive?.forwardSequence.last == 5, "4 to 5 performs one full revolution before landing")
+
+        let nineToZero = reelPlan("9", "0")
+        let nineToZeroSequence = nineToZero?.forwardSequence ?? []
+        let nineToZeroMovesForward = zip(nineToZeroSequence, nineToZeroSequence.dropFirst())
+            .allSatisfy { ($0 + 1) % 10 == $1 }
+        try expect(nineToZero?.stepCount == 11 && nineToZero?.finalDigit == 0, "9 to 0 wraps with a forward reel")
+        try expect(nineToZeroMovesForward, "9 to 0 never reverses direction")
+
+        let eightToThree = reelPlan("8", "3")
+        try expect(eightToThree?.stepCount == 15 && eightToThree?.forwardSequence.last == 3, "8 to 3 uses the bounded forward wrap")
+        try expect(reelPlan("5", "5") == nil, "unchanged digits do not receive a reel plan")
+        try expect(reelPlan(",", "0") == nil, "separators do not receive a reel plan")
+
+        let carrySlots = TokenOdometerPresentation.slots(previous: 1_999, current: 2_000)
+        let carryPlans = carrySlots.compactMap {
+            reelPlan($0.previousCharacter ?? " ", $0.currentCharacter)
+        }
+        try expect(carryPlans.count == 4, "carry updates give every changed numeric slot a reel plan")
+        try expect(
+            carrySlots.filter { $0.currentCharacter == "," }.allSatisfy { !$0.isChangedDigit },
+            "carry commas remain outside the reel"
+        )
+
+        let leadingSlots = TokenOdometerPresentation.slots(previous: 999, current: 1_000)
+        let leadingDigit = leadingSlots.first { $0.previousCharacter == " " && $0.currentCharacter == "1" }
+        try expect(leadingDigit != nil && !leadingDigit!.isChangedDigit, "new leading digits do not fabricate a reel")
+        let leadingFormatted = leadingSlots.map { String($0.currentCharacter) }.joined().replacingOccurrences(of: " ", with: "")
+        try expect(leadingFormatted == TokenActivityPresentation.tokenCount(1_000), "leading digit growth preserves the final formatted value")
+
+        try expect(TokenOdometerReelPlan.startDelay(forChangedRankFromRight: 0) == 0, "rightmost changed digit starts immediately")
+        try expect(TokenOdometerReelPlan.startDelay(forChangedRankFromRight: 4) == 0.08, "reel stagger stays within the 0.08 second bound")
+        try expect(TokenOdometerReelPlan.startDelay(forChangedRankFromRight: 12) == 0.08, "large stagger ranks clamp deterministically")
+        try expect(reelPlan("1", "2", delay: 0.4)?.startDelay == 0.08, "individual reel delay is clamped")
         try expect(TokenActivityFeedbackAnimation.duration(reduceMotion: false) == 0.6, "normal roll duration is bounded")
         try expect(TokenActivityFeedbackAnimation.duration(reduceMotion: true) == 0.18, "Reduce Motion uses a short crossfade duration")
-        let standardSize = HUDMetrics(scaleLevel: .standard).panelSize(quotaRowCount: 2, includesCredits: false)
-        let afterFeedbackSize = HUDMetrics(scaleLevel: .standard).panelSize(quotaRowCount: 2, includesCredits: false)
+        let standardSize = HUDMetrics(scaleLevel: .standard).panelSize(quotaRowCount: 2, includesAccountInfoRow: false)
+        let afterFeedbackSize = HUDMetrics(scaleLevel: .standard).panelSize(quotaRowCount: 2, includesAccountInfoRow: false)
         try expect(standardSize == afterFeedbackSize, "token feedback does not change HUD geometry")
     }
 
@@ -1386,8 +1436,12 @@ struct CodexUsageStatusTests {
                 isQuotaUpdating: false,
                 isCodexFocused: true,
                 quotaRowCount: 2,
-                hasCredits: false,
+                showsAccountInfoRow: false,
+                resetCreditCount: nil,
+                resetCreditNextExpiryAt: nil,
+                resetCreditCountdownText: nil,
                 scaleLevel: .standard,
+                isPasteInFlight: false,
                 isPasteAndSubmitInFlight: false,
                 isPromptShortcutInFlight: false,
                 clipboardOperationInFlight: false,
@@ -1548,6 +1602,73 @@ struct CodexUsageStatusTests {
         try expect(object?["method"] as? String == "account/rateLimitResetCredit/consume", "consume method")
         try expect((params?["idempotencyKey"] as? String)?.isEmpty == false, "idempotency key")
         try expect(params?["creditId"] as? String == "credit-1", "selected credit id")
+    }
+
+    private static func testHUDResetCreditPresentation() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        func credit(
+            _ id: String,
+            status: String? = "available",
+            grantedAt: Int64? = nil,
+            expiresAt: Int64?
+        ) -> RateLimitResetCredit {
+            RateLimitResetCredit(
+                id: id,
+                resetType: "weekly",
+                status: status,
+                grantedAt: grantedAt,
+                expiresAt: expiresAt,
+                title: id,
+                description: nil
+            )
+        }
+
+        let later = Int64(now.timeIntervalSince1970) + (3 * 86_400) + (4 * 3_600)
+        let nearest = Int64(now.timeIntervalSince1970) + (2 * 86_400) + (7 * 3_600)
+        let expired = Int64(now.timeIntervalSince1970) - 1
+        let credits = RateLimitResetCredits(
+            availableCount: 4,
+            credits: [
+                credit("later", grantedAt: nearest - 1_000_000, expiresAt: later),
+                credit("unavailable", status: "consumed", expiresAt: nearest - 100),
+                credit("unknown", expiresAt: nil),
+                credit("expired-service-available", expiresAt: expired),
+                credit("nearest", grantedAt: later + 1_000_000, expiresAt: nearest)
+            ]
+        )
+        let presentation = try unwrap(
+            HUDResetCreditPresentation.make(from: credits, now: now),
+            "Reset Credit presentation"
+        )
+        try expect(presentation.count == 4, "HUD count comes from the authoritative availableCount")
+        try expect(presentation.nextExpiryAt == nearest, "HUD selects the earliest usable future expiry regardless of API order")
+        try expect(
+            HUDResetCreditCountdownPolicy.nearestFutureExpiry(in: credits.availableCredits, now: now) == nearest,
+            "grantedAt, unavailable, expired, and missing-expiry entries do not change the HUD target"
+        )
+        try expect(HUDResetCreditCountdownPolicy.text(expiresAt: nearest, now: now) == "剩 2 天 7 小時", "multi-day countdown includes days and hours")
+        try expect(
+            HUDResetCreditCountdownPolicy.text(expiresAt: Int64(now.timeIntervalSince1970) + (7 * 3_600), now: now) == "剩 0 天 7 小時",
+            "sub-day countdown preserves the requested zero-day presentation"
+        )
+        try expect(
+            HUDResetCreditCountdownPolicy.text(expiresAt: Int64(now.timeIntervalSince1970) + 3_599, now: now) == "剩不到 1 小時",
+            "sub-hour countdown is truthful without fake precision"
+        )
+        try expect(HUDResetCreditCountdownPolicy.text(expiresAt: expired, now: now) == "已過期", "expired detail remains explicit")
+        try expect(HUDResetCreditCountdownPolicy.text(expiresAt: nil, now: now) == "到期未知", "missing expiry remains explicit")
+
+        let visibleCredits = CreditsBalance(hasCredits: true, unlimited: false, balance: "3.50")
+        try expect(HUDAccountInfoVisibilityPolicy.showsRow(credits: visibleCredits, resetCreditCount: nil), "Credits-only information shows the row")
+        try expect(HUDAccountInfoVisibilityPolicy.showsRow(credits: nil, resetCreditCount: 2), "Reset-Credit-only information shows the row")
+        try expect(HUDAccountInfoVisibilityPolicy.showsRow(credits: nil, resetCreditCount: 0), "known zero Reset Credit remains visible")
+        try expect(!HUDAccountInfoVisibilityPolicy.showsRow(credits: nil, resetCreditCount: nil), "no account information hides the row")
+        let countOnly = RateLimitResetCredits(availableCount: 2, credits: nil)
+        try expect(
+            HUDResetCreditPresentation.make(from: countOnly, now: now)?.nextExpiryAt == nil,
+            "positive count with no detail never fabricates an expiry"
+        )
+        try expect(HUDResetCreditPresentation.make(from: nil, now: now) == nil, "unknown Reset Credit data stays absent")
     }
 
     private static func testAccountHealthDecoding() throws {
@@ -1748,6 +1869,157 @@ struct CodexUsageStatusTests {
         try expect(summary.unidentifiedAccounts == 1, "all-account overview counts unidentified profiles")
     }
 
+    private static func testAllAccountsUsageRows() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let currentID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let cachedID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        let staleID = UUID(uuidString: "00000000-0000-0000-0000-000000000003")!
+        let unavailableID = UUID(uuidString: "00000000-0000-0000-0000-000000000004")!
+        let unidentifiedID = UUID(uuidString: "00000000-0000-0000-0000-000000000005")!
+
+        func profile(_ id: UUID, name: String, unidentified: Bool = false) -> AccountProfile {
+            AccountProfile(
+                id: id,
+                fingerprint: id.uuidString,
+                displayName: name,
+                accountType: "chatgpt",
+                authMode: "chatgpt",
+                lastSeen: now,
+                isUnidentified: unidentified
+            )
+        }
+        func summary(for profile: AccountProfile, usedPercent: Int?, connection: ConnectionState, age: TimeInterval) -> ProfileQuotaSummary {
+            let snapshot = UsageSnapshot(
+                limitId: "codex",
+                limitName: "Codex",
+                planType: "plus",
+                primary: usedPercent.map { RateLimitWindow(usedPercent: $0, resetsAt: nil, windowDurationMins: 300) },
+                secondary: nil,
+                individualLimit: nil,
+                rateLimitReachedType: nil,
+                spendControlReached: nil,
+                receivedAt: now.addingTimeInterval(-age)
+            )
+            return ProfileQuotaSummary(
+                profile: profile,
+                latestSample: usedPercent == nil && connection == .disconnected
+                    ? nil
+                    : HistorySample(snapshot: snapshot, connectionState: connection, receivedAt: now.addingTimeInterval(-age))
+            )
+        }
+
+        let current = profile(currentID, name: "Current")
+        let cached = profile(cachedID, name: "Cached")
+        let stale = profile(staleID, name: "Stale")
+        let unavailable = profile(unavailableID, name: "Unavailable")
+        let unidentified = profile(unidentifiedID, name: "未識別帳號", unidentified: true)
+        let display: (AccountProfile) -> AccountProfileDisplay = { account in
+            AccountProfileDisplay(title: account.displayName, subtitle: "ChatGPT", isWarning: account.isUnidentified)
+        }
+
+        let currentRow = AllAccountsUsageRowPresentation.make(
+            profile: current,
+            display: display(current),
+            summary: summary(for: current, usedPercent: 8, connection: .connected, age: 10),
+            currentProfileID: currentID,
+            currentConnectionState: .connected,
+            currentSnapshotAvailable: true,
+            currentSnapshotIsStale: false,
+            currentRemainingPercent: 92,
+            now: now
+        )
+        try expect(currentRow.state == .currentLive, "current connected profile should be Live")
+        try expect(currentRow.remainingPercent == 92, "used 8 percent should display 92 percent remaining")
+        try expect(!currentRow.freshnessText.contains("快取"), "current profile must not be labeled cached")
+
+        let staleCurrentRow = AllAccountsUsageRowPresentation.make(
+            profile: current,
+            display: display(current),
+            summary: summary(for: current, usedPercent: 8, connection: .connected, age: 10),
+            currentProfileID: currentID,
+            currentConnectionState: .connected,
+            currentSnapshotAvailable: true,
+            currentSnapshotIsStale: true,
+            currentRemainingPercent: 92,
+            now: now
+        )
+        try expect(staleCurrentRow.state == .cached, "stale current snapshot must not be labeled Live")
+
+        let cachedRow = AllAccountsUsageRowPresentation.make(
+            profile: cached,
+            display: display(cached),
+            summary: summary(for: cached, usedPercent: 20, connection: .connected, age: 60),
+            currentProfileID: currentID,
+            currentConnectionState: .connected,
+            currentSnapshotAvailable: true,
+            currentSnapshotIsStale: false,
+            currentRemainingPercent: 92,
+            now: now
+        )
+        try expect(cachedRow.state == .cached, "recent noncurrent sample should be cached")
+        try expect(!cachedRow.freshnessText.contains("Live"), "noncurrent profile must never be labeled Live")
+        try expect(cachedRow.remainingPercent == 80, "cached quota should use profile-scoped sample")
+
+        let staleRow = AllAccountsUsageRowPresentation.make(
+            profile: stale,
+            display: display(stale),
+            summary: summary(for: stale, usedPercent: 80, connection: .connected, age: 3 * 3600),
+            currentProfileID: currentID,
+            currentConnectionState: .connected,
+            currentSnapshotAvailable: true,
+            currentSnapshotIsStale: false,
+            currentRemainingPercent: 92,
+            now: now
+        )
+        try expect(staleRow.state == .stale, "old sample should be stale")
+
+        let unavailableRow = AllAccountsUsageRowPresentation.make(
+            profile: unavailable,
+            display: display(unavailable),
+            summary: nil,
+            currentProfileID: currentID,
+            currentConnectionState: .connected,
+            currentSnapshotAvailable: true,
+            currentSnapshotIsStale: false,
+            currentRemainingPercent: 92,
+            now: now
+        )
+        try expect(unavailableRow.state == .unavailable, "missing sample should be unavailable")
+        try expect(unavailableRow.remainingPercent == nil, "missing sample should not invent quota")
+
+        let clamped = AllAccountsUsageRowPresentation.make(
+            profile: cached,
+            display: display(cached),
+            summary: summary(for: cached, usedPercent: -20, connection: .connected, age: 30),
+            currentProfileID: currentID,
+            currentConnectionState: .connected,
+            currentSnapshotAvailable: true,
+            currentSnapshotIsStale: false,
+            currentRemainingPercent: 180,
+            now: now
+        )
+        try expect(clamped.remainingPercent == 100, "remaining percentage must clamp invalid values")
+
+        let profiles = [stale, current, cached, unavailable, unidentified]
+        let ordered = AllAccountsUsageRowPresentation.orderedProfiles(profiles, currentProfileID: currentID)
+        try expect(ordered.map(\.id) == [currentID, staleID, cachedID, unavailableID, unidentifiedID], "current profile should be first and remaining order stable")
+        try expect(
+            AllAccountsUsageRowPresentation.make(
+                profile: unidentified,
+                display: display(unidentified),
+                summary: nil,
+                currentProfileID: currentID,
+                currentConnectionState: .connected,
+                currentSnapshotAvailable: true,
+                currentSnapshotIsStale: false,
+                currentRemainingPercent: 92,
+                now: now
+            ).isWarning,
+            "unidentified account remains warning-safe"
+        )
+        try expect(cachedRow.profileID == cachedID, "switch action target must retain the exact profile ID")
+    }
+
     private static func testUpdateVersionComparison() throws {
         try expect(AppVersionComparator.isNewer("v2.4.12", than: "2.4.11"), "v tag should compare newer")
         try expect(AppVersionComparator.isNewer("2.5", than: "2.4.99"), "minor version should compare newer")
@@ -1806,9 +2078,39 @@ struct CodexUsageStatusTests {
         try expect(UsagePopoverTab.settings.title == "設定", "settings has a dedicated tab")
         try expect(UsagePopoverTab.overview.title == "概覽", "overview is the default product tab")
         try expect(AppVersion.label == "v\(AppVersion.current)", "app version label is derived from bundle version")
+        try expect(ProductSettingsRoute.targetTab == .settings, "application Settings routes to the existing Settings tab")
+        try expect(
+            ProductSettingsRoute.destination(from: .overview) == .settings,
+            "Settings request routes from Overview to the product Settings tab"
+        )
+        try expect(
+            ProductSettingsRoute.destination(from: .settings) == .settings,
+            "repeated Settings requests are idempotent at the destination"
+        )
     }
 
+    private static func testFirstClickEventDelivery() throws {
+        let hostingView = FirstClickHostingView(rootView: Text("first click"))
+        try expect(
+            hostingView.acceptsFirstMouse(for: nil),
+            "SwiftUI hosting surfaces accept the first click while inactive"
+        )
+    }
 
+    private static func testHUDPasteAcknowledgementPolicy() throws {
+        try expect(
+            HUDPasteActionPolicy.canStart(isInFlight: false, isCodexFocused: true),
+            "focused paste can start when idle"
+        )
+        try expect(
+            !HUDPasteActionPolicy.canStart(isInFlight: true, isCodexFocused: true),
+            "a second paste is rejected while the first is acknowledged"
+        )
+        try expect(
+            !HUDPasteActionPolicy.canStart(isInFlight: false, isCodexFocused: false),
+            "unfocused paste remains disabled"
+        )
+    }
 
 
     private static func testPopoverPresentationAppearancePolicy() throws {
@@ -1820,6 +2122,10 @@ struct CodexUsageStatusTests {
         try expect(
             PopoverPresentationPolicy.reappliesAfterPopoverDidShow,
             "popover reapplies appearance after its window is created"
+        )
+        try expect(
+            PopoverPresentationPolicy.acceptsFirstMouse,
+            "popover and HUD hosting views preserve first-click delivery"
         )
         let popover = NSPopover()
         PopoverPresentationPolicy.apply(to: popover)
@@ -1925,19 +2231,18 @@ struct CodexUsageStatusTests {
     private static func testHUDMetrics() throws {
         let standard = HUDMetrics(scaleLevel: .standard)
         try expectApproximately(standard.panelSize.width, 416, "canonical panel width")
-        try expectApproximately(standard.panelSize.height, 256.4, "canonical panel height derives compact summary and workflow rows")
-        try expect(standard.panelSize.height >= 250 && standard.panelSize.height <= 265, "standard two-quota HUD stays in the preferred compact range")
-        try expect(standard.panelSize.height <= 270, "standard two-quota HUD stays below the maximum compact height")
+        try expectApproximately(standard.panelSize.height, 282.4, "canonical panel height derives Token hero and workflow rows")
+        try expect(standard.panelSize.height < 300, "standard two-quota Token hero HUD remains bounded")
         try expectApproximately(standard.contentWidth, 394, "content width follows outer padding")
         try expectApproximately(standard.quotaColumnHeight, 73, "quota rows close to the compact quota budget")
         try expectApproximately(standard.headerHeight, 22, "header height")
         try expectApproximately(standard.headerGap, 5, "header gap")
-        try expect(standard.tokenSummaryHeight >= 52, "token summary has a compact but readable height")
+        try expect(standard.tokenSummaryHeight >= 78, "Token hero has room for idle reel cells and secondary metrics")
         try expect(standard.workflowActionHeight / standard.actionHeight > 0.7 && standard.workflowActionHeight / standard.actionHeight < 0.8, "workflow cards are 70–80% of primary row")
         try expectApproximately(standard.verticalContentHeight + standard.outerPadding * 2, standard.panelSize.height, "canonical height closes from derived tokens")
         try expect(standard.panelSize(quotaRowCount: 1).height < standard.panelSize(quotaRowCount: 2).height, "one quota row removes empty vertical space")
         try expect(standard.panelSize(quotaRowCount: 3).height > standard.panelSize(quotaRowCount: 2).height, "three quota rows grow only by quota height")
-        try expect(standard.panelSize(quotaRowCount: 2, includesCredits: true).height > standard.panelSize(quotaRowCount: 2).height, "Credits adds a balance section")
+        try expect(standard.panelSize(quotaRowCount: 2, includesAccountInfoRow: true).height > standard.panelSize(quotaRowCount: 2).height, "account information adds its shared section")
         try expect(
             3 * standard.actionCardWidth + (standard.actionSpacing * 2) <= standard.contentWidth + 0.01,
             "standard action cards fit three columns"
@@ -1963,10 +2268,34 @@ struct CodexUsageStatusTests {
                     "dynamic quota layout closes at \(level.displayName), \(rowCount) rows"
                 )
                 try expectApproximately(
-                    metrics.panelSize(quotaRowCount: rowCount, includesCredits: true).height,
-                    dynamicHeight + metrics.creditsSectionHeight + metrics.sectionGap,
-                    "credits layout closes at \(level.displayName), \(rowCount) rows"
+                    metrics.panelSize(quotaRowCount: rowCount, includesAccountInfoRow: true).height,
+                    dynamicHeight + metrics.accountInfoSectionHeight + metrics.sectionGap,
+                    "account information layout closes at \(level.displayName), \(rowCount) rows"
                 )
+                let stateMatrix: [(CreditsBalance?, Int?, Bool)] = [
+                    (CreditsBalance(hasCredits: true, unlimited: false, balance: "10"), nil, true),
+                    (CreditsBalance(hasCredits: true, unlimited: false, balance: "10"), 2, true),
+                    (nil, 2, true),
+                    (nil, 0, true),
+                    (nil, nil, false)
+                ]
+                for (credits, resetCount, expectedVisible) in stateMatrix {
+                    let visible = HUDAccountInfoVisibilityPolicy.showsRow(
+                        credits: credits,
+                        resetCreditCount: resetCount
+                    )
+                    try expect(visible == expectedVisible, "account information matrix chooses one truthful visibility value")
+                    let matrixSize = metrics.panelSize(
+                        quotaRowCount: rowCount,
+                        includesAccountInfoRow: visible
+                    )
+                    try expectApproximately(matrixSize.width, 416 * metrics.factor, "geometry matrix preserves canonical width")
+                    try expectApproximately(
+                        matrixSize.height,
+                        dynamicHeight + (visible ? metrics.accountInfoSectionHeight + metrics.sectionGap : 0),
+                        "SwiftUI/AppKit account-information geometry closes at \(level.displayName), \(rowCount) rows"
+                    )
+                }
             }
         }
     }

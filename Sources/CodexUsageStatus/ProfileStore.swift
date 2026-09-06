@@ -113,8 +113,14 @@ struct ProfileQuotaSummary: Identifiable {
     }
 
     var isStale: Bool {
+        isStale(at: Date())
+    }
+
+    /// Allows presentation and deterministic tests to evaluate freshness at a
+    /// known point in time without changing the existing two-minute contract.
+    func isStale(at now: Date) -> Bool {
         guard let sample = latestSample else { return true }
-        return sample.connectionState != .connected || Date().timeIntervalSince(sample.receivedAt) > 2 * 60
+        return sample.connectionState != .connected || now.timeIntervalSince(sample.receivedAt) > 2 * 60
     }
 }
 

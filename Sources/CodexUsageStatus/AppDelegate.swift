@@ -59,7 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.animates = false
         popover.delegate = self
         popover.contentSize = NSSize(width: 430, height: 700)
-        popover.contentViewController = NSHostingController(
+        popover.contentViewController = FirstClickHostingController(
             rootView: UsagePopoverView(
                 model: model,
                 selectionController: popoverSelectionController,
@@ -111,7 +111,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func togglePopover(_ sender: Any?) {
+        // The launch path deliberately stages model/App Server construction
+        // one run-loop turn for menu-bar responsiveness.  A user can still
+        // click the status item during that turn; bootstrap synchronously on
+        // that first click so it is never silently dropped.
+        if model == nil || popover == nil {
+            bootstrapModel()
+        }
         showPopover(toggle: true, sender: sender)
+    }
+
+    /// Routes both the App menu Settings command and Command-, to the
+    /// existing product Settings tab. This is deliberately non-toggling: a
+    /// Settings request should always leave the user on Settings, whether the
+    /// popover was closed or already showing another tab.
+    func showProductSettings() {
+        if model == nil || popover == nil {
+            bootstrapModel()
+        }
+        showPopover(tab: ProductSettingsRoute.targetTab)
     }
 
     private func showPopover(tab: UsagePopoverTab = .overview, toggle: Bool = false, sender: Any? = nil) {
