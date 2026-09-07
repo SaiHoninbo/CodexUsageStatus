@@ -60,6 +60,26 @@ struct CodexFloatingHUDView: View {
     @State private var decreaseAnimationID = 0
     @State private var updateCheckRequested = false
     @State private var updateFeedback: UpdateFeedback?
+    @AppStorage(HUDThemePreference.themeKey) private var storedHUDTheme = HUDTheme.neonPurple.rawValue
+    @AppStorage(HUDThemePreference.rotationEnabledKey) private var hudThemeRotationEnabled = false
+    @AppStorage(HUDThemePreference.intervalKey) private var hudThemeRotationInterval = HUDThemeRotationInterval.oneHour.rawValue
+    @AppStorage(HUDThemePreference.lastRotationKey) private var lastHUDThemeRotationAt = 0.0
+
+    private var selectedHUDTheme: HUDTheme {
+        HUDTheme(rawValue: storedHUDTheme) ?? .neonPurple
+    }
+
+    private var selectedHUDPalette: HUDThemePalette {
+        HUDThemePalette.forTheme(selectedHUDTheme)
+    }
+
+    private var selectedHUDRotationInterval: HUDThemeRotationInterval {
+        HUDThemeRotationInterval(rawValue: hudThemeRotationInterval) ?? .oneHour
+    }
+
+    private var themeRotationTaskID: String {
+        "\(hudThemeRotationEnabled)-\(selectedHUDRotationInterval.rawValue)"
+    }
 
     var body: some View {
         // Keep the context-menu host outside the pulse TimelineView. The
@@ -74,7 +94,10 @@ struct CodexFloatingHUDView: View {
                 // Keep the content tree mounted while quota transport is
                 // temporarily empty. The cached presentation is profile-bound
                 // and renders an updating state instead of blanking the panel.
-                HUDPresentationBoundary(presentation: hudPresentation) { presentation in
+                HUDPresentationBoundary(
+                    presentation: hudPresentation,
+                    theme: selectedHUDTheme
+                ) { presentation in
                     hudContainer(presentation: presentation)
                         .overlay { hudPulseOverlay(presentation: presentation) }
                 }
@@ -98,7 +121,11 @@ struct CodexFloatingHUDView: View {
         .contextMenu {
             contextMenuContent
         }
-        .preferredColorScheme(.dark)
+        .environment(\.hudThemePalette, selectedHUDPalette)
+        .preferredColorScheme(selectedHUDTheme == .lightSky ? .light : .dark)
+        .onAppear {
+            evaluateThemeRotationIfDue()
+        }
         .onChange(of: model.updateState) { _, newState in
             presentUpdateFeedback(for: newState)
         }
@@ -108,6 +135,21 @@ struct CodexFloatingHUDView: View {
             try? await Task.sleep(nanoseconds: 4_500_000_000)
             guard !Task.isCancelled else { return }
             updateFeedback = nil
+        }
+        .task(id: themeRotationTaskID) {
+            guard hudThemeRotationEnabled else { return }
+            while !Task.isCancelled && hudThemeRotationEnabled {
+                evaluateThemeRotationIfDue()
+                let remaining = max(
+                    1,
+                    Double(selectedHUDRotationInterval.rawValue)
+                        - max(0, Date().timeIntervalSince1970 - lastHUDThemeRotationAt)
+                )
+                try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+                guard !Task.isCancelled, hudThemeRotationEnabled else { return }
+                storedHUDTheme = HUDThemeRotationPolicy.advance(selectedHUDTheme).rawValue
+                lastHUDThemeRotationAt = Date().timeIntervalSince1970
+            }
         }
     }
 
@@ -335,7 +377,7 @@ struct CodexFloatingHUDView: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: presentation.scaleLevel), style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: presentation.scaleLevel), style: .continuous)
-                .fill(HUDColorPalette.panelTint)
+                .fill(selectedHUDPalette.panelTint)
                 .allowsHitTesting(false)
         }
         .clipShape(RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: presentation.scaleLevel), style: .continuous))
@@ -435,7 +477,7 @@ struct CodexFloatingHUDView: View {
         HStack(alignment: .center, spacing: max(CGFloat(4), metrics.headerGap * 0.5)) {
             Text(presentation.accountEmail ?? "未提供 Email")
                 .font(.system(size: metrics.quotaPrimaryTextSize, weight: .semibold, design: .rounded))
-                .foregroundStyle(HUDColorPalette.secondaryText)
+                .foregroundStyle(selectedHUDPalette.secondaryText)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .minimumScaleFactor(0.62)
@@ -499,7 +541,7 @@ struct CodexFloatingHUDView: View {
             if let decreaseAmount = presentation.decreaseAmount {
                 Text("−\(decreaseAmount)%")
                     .font(.system(size: 9, weight: .bold, design: .rounded))
-                    .foregroundStyle(HUDColorPalette.error)
+                    .foregroundStyle(selectedHUDPalette.error)
                     .offset(x: 1, y: -3)
                     .zIndex(1)
             }
@@ -530,21 +572,21 @@ struct CodexFloatingHUDView: View {
         HStack(spacing: metrics.actionSpacing) {
             workflowShortcutButton(
                 .fixUntilDone,
-                fillColor: HUDColorPalette.fixAction,
+                fillColor: selectedHUDPalette.fixAction,
                 metrics: metrics,
                 presentation: presentation,
                 isHovered: $isFixUntilDoneHovered
             )
             workflowShortcutButton(
                 .fullVerification,
-                fillColor: HUDColorPalette.verificationAction,
+                fillColor: selectedHUDPalette.verificationAction,
                 metrics: metrics,
                 presentation: presentation,
                 isHovered: $isFullVerificationHovered
             )
             workflowShortcutButton(
                 .commitAndPush,
-                fillColor: HUDColorPalette.commitPushAction,
+                fillColor: selectedHUDPalette.commitPushAction,
                 metrics: metrics,
                 presentation: presentation,
                 isHovered: $isCommitAndPushHovered
@@ -594,7 +636,7 @@ struct CodexFloatingHUDView: View {
             helpText: presentation.isCodexFocused ? "貼上並送出" : "切換回 Codex 後可貼上並送出",
             accessibilityLabel: "貼上並送出",
             fillStyle: presentation.isCodexFocused
-                ? .filled(background: HUDColorPalette.submitAction, foreground: .white)
+                ? .filled(background: selectedHUDPalette.submitAction, foreground: .white)
                 : .neutral,
             width: metrics.actionCardWidth,
             height: metrics.actionHeight,
@@ -606,7 +648,7 @@ struct CodexFloatingHUDView: View {
     private func continueShortcutButton(presentation: HUDPresentation, metrics: HUDMetrics) -> some View {
         workflowShortcutButton(
             .continueTask,
-            fillColor: HUDColorPalette.continueAction,
+            fillColor: selectedHUDPalette.continueAction,
             metrics: metrics,
             presentation: presentation,
             height: metrics.actionHeight,
@@ -688,10 +730,10 @@ struct CodexFloatingHUDView: View {
 
     private func hudColor(for statusColor: StatusItemColor) -> Color {
         switch statusColor {
-        case .secondary: return .secondary
-        case .red: return .red
-        case .orange: return .orange
-        case .green: return .green
+        case .secondary: return selectedHUDPalette.secondaryText
+        case .red: return selectedHUDPalette.error
+        case .orange: return selectedHUDPalette.warning
+        case .green: return selectedHUDPalette.continueAction
         }
     }
 
@@ -735,6 +777,39 @@ struct CodexFloatingHUDView: View {
                         Label(
                             "\(index + 1) · \(level.displayName)",
                             systemImage: layoutState.scaleLevel == level ? "checkmark" : "circle"
+                        )
+                    }
+                }
+            }
+            Menu("HUD 色系") {
+                ForEach(HUDTheme.allCases) { theme in
+                    Button {
+                        selectHUDTheme(theme)
+                    } label: {
+                        Label(
+                            theme.displayName,
+                            systemImage: selectedHUDTheme == theme ? "checkmark" : "circle"
+                        )
+                    }
+                }
+            }
+            Menu("自動換色") {
+                Button {
+                    disableHUDThemeRotation()
+                } label: {
+                    Label(
+                        "關閉自動換色",
+                        systemImage: hudThemeRotationEnabled ? "circle" : "checkmark"
+                    )
+                }
+                Divider()
+                ForEach(HUDThemeRotationInterval.allCases) { interval in
+                    Button {
+                        enableHUDThemeRotation(interval)
+                    } label: {
+                        Label(
+                            interval.displayName,
+                            systemImage: hudThemeRotationEnabled && selectedHUDRotationInterval == interval ? "checkmark" : "circle"
                         )
                     }
                 }
@@ -912,6 +987,42 @@ struct CodexFloatingHUDView: View {
         } label: {
             Text(title)
         }
+    }
+
+    private func selectHUDTheme(_ theme: HUDTheme) {
+        storedHUDTheme = theme.rawValue
+        hudThemeRotationEnabled = false
+        lastHUDThemeRotationAt = Date().timeIntervalSince1970
+    }
+
+    private func enableHUDThemeRotation(_ interval: HUDThemeRotationInterval) {
+        hudThemeRotationInterval = interval.rawValue
+        hudThemeRotationEnabled = true
+        lastHUDThemeRotationAt = Date().timeIntervalSince1970
+    }
+
+    private func disableHUDThemeRotation() {
+        hudThemeRotationEnabled = false
+        lastHUDThemeRotationAt = Date().timeIntervalSince1970
+    }
+
+    private func evaluateThemeRotationIfDue(now: Date = Date()) {
+        guard hudThemeRotationEnabled else { return }
+        let last = Date(timeIntervalSince1970: lastHUDThemeRotationAt)
+        guard lastHUDThemeRotationAt > 0 else {
+            lastHUDThemeRotationAt = now.timeIntervalSince1970
+            return
+        }
+        guard HUDThemeRotationPolicy.shouldRotate(
+            now: now,
+            lastRotationAt: last,
+            interval: selectedHUDRotationInterval
+        ) else { return }
+
+        let elapsed = max(0, now.timeIntervalSince(last))
+        let steps = max(1, Int(elapsed / Double(selectedHUDRotationInterval.rawValue)))
+        storedHUDTheme = HUDThemeRotationPolicy.advance(selectedHUDTheme, steps: steps).rawValue
+        lastHUDThemeRotationAt = now.timeIntervalSince1970
     }
 
     private var contextConnectionText: String {

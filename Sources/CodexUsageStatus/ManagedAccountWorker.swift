@@ -45,7 +45,9 @@ final class ManagedAccountWorker: Identifiable {
         client.onAccountHealthState = { [weak self] state, message in self?.onAccountHealthState?(id, state, message) }
         client.onAccountBoundary = { [weak self] in self?.onAccountBoundary?(id) }
         client.onTurnEvent = { [weak self] event in self?.onTurnEvent?(id, event) }
-        client.onTurnTokenUsage = { [weak self] threadID, turnID, total in self?.onTurnTokenUsage?(id, threadID, turnID, total) }
+        client.onTurnTokenUsage = { [weak self] threadID, turnID, total in
+            self?.onTurnTokenUsage?(id, threadID, turnID, total)
+        }
     }
 
     var isRunning: Bool { client.isRunning }

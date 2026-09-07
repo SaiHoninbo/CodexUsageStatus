@@ -11,7 +11,10 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/JSONRPC.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HistoryStore.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/TokenActivityStore.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/LocalTokenUsageLedger.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/CodexLocalUsageObserver.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDPresentation.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/TokenReelAudioFeedback.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/AccountModels.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/ProfileStore.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/CodexCLIResolver.swift" \
@@ -36,6 +39,7 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/AppUpdateService.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDUpdateBadgePolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDColorPalette.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/HUDThemePalette.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/RetiredFeatureCleanup.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/PersistenceWriteCoordinator.swift" \
   "$ROOT_DIR/Tests/CodexUsageStatusTests/TestRunner.swift" \

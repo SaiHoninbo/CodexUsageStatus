@@ -171,13 +171,21 @@ enum TurnActivityCodec {
         )
     }
 
-    static func decodeTokenUsage(params: Any, receivedAt: Date = Date()) -> (threadID: String, turnID: String, tokenTotal: Int64?)? {
+    static func decodeTokenUsage(params: Any, receivedAt: Date = Date()) -> (
+        threadID: String,
+        turnID: String,
+        tokenTotal: Int64?
+    )? {
         guard let object = params as? [String: Any],
               let threadID = object["threadId"] as? String,
               let turnID = object["turnId"] as? String else { return nil }
         let usage = object["tokenUsage"] as? [String: Any]
         let total = usage?["total"] as? [String: Any]
-        return (threadID, turnID, int64(total?["totalTokens"]))
+        return (
+            threadID,
+            turnID,
+            int64(total?["totalTokens"])
+        )
     }
 
     private static func extractContent(from raw: Any?) -> String? {

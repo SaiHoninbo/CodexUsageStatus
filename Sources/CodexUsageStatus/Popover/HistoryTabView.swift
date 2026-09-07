@@ -21,28 +21,28 @@ extension UsagePopoverView {
     var tokenActivitySection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Token 歷史摘要")
+                Text("本機 Codex 使用")
                     .font(.headline)
                 Spacer()
-                Text(model.tokenActivityState.displayName)
+                Text("本機 ledger")
                     .font(.caption)
-                    .foregroundStyle(model.tokenActivityState == .loaded ? HUDColorPalette.continueAction : HUDColorPalette.secondaryText)
+                    .foregroundStyle(HUDColorPalette.continueAction)
             }
             if let activity = model.displayedTokenActivity {
                 VStack(spacing: 4) {
                     HStack(spacing: 0) {
-                        metric(TokenActivityPresentation.lifetimeLabel, tokenCount(activity.lifetimeTokens))
-                        metric(TokenActivityPresentation.peakLabel, tokenCount(activity.peakDailyTokens))
-                        metric(TokenActivityPresentation.longestTurnLabel, durationText(activity.longestRunningTurnSec))
+                        metric(LocalTokenUsageLedgerPresentation.observedLabel, tokenCount(activity.lifetimeTokens))
+                        metric(LocalTokenUsageLedgerPresentation.dailyPeakLabel, tokenCount(activity.peakDailyTokens))
+                        metric(LocalTokenUsageLedgerPresentation.longestTurnLabel, durationText(activity.longestRunningTurnSec))
                     }
                     Rectangle().fill(HUDColorPalette.divider).frame(height: 0.6)
                     HStack(spacing: 0) {
-                        metric(TokenActivityPresentation.currentStreakLabel, daysText(activity.currentStreakDays))
-                        metric(TokenActivityPresentation.longestStreakLabel, daysText(activity.longestStreakDays))
+                        metric(LocalTokenUsageLedgerPresentation.currentStreakLabel, daysText(activity.currentStreakDays))
+                        metric(LocalTokenUsageLedgerPresentation.longestStreakLabel, daysText(activity.longestStreakDays))
                     }
                 }
                 HStack {
-                    Text("每日 token")
+                    Text("本機每日 token")
                         .font(.caption.weight(.semibold))
                     Spacer()
                     Picker("範圍", selection: $model.tokenActivityRange) {
@@ -53,7 +53,7 @@ extension UsagePopoverView {
                 }
                 let buckets = model.visibleTokenBuckets
                 if buckets.isEmpty {
-                    Text("目前沒有每日 token bucket")
+                    Text("這台 Mac 尚未觀測到每日 Token 消耗")
                         .font(.caption)
                         .foregroundStyle(HUDColorPalette.tertiaryText)
                 } else {
@@ -67,27 +67,13 @@ extension UsagePopoverView {
                     .chartYAxis { AxisMarks(position: .leading) }
                     .frame(height: 130)
                 }
-                Text("最後抓取：\(model.tokenActivityFetchedAt?.formatted(date: .abbreviated, time: .shortened) ?? "未知")\(model.tokenActivityIsStale ? " · 資料較舊" : "")")
+                Text("最後觀測：\(model.localTokenUsageLastObservedAt?.formatted(date: .abbreviated, time: .shortened) ?? "尚無本機事件")")
                     .font(.caption2)
-                    .foregroundStyle(model.tokenActivityIsStale ? HUDColorPalette.warning : HUDColorPalette.secondaryText)
-            } else {
-                Text(model.tokenActivityErrorMessage ?? "尚未取得 Token Activity。按 Refresh 讀取。")
-                    .font(.caption)
                     .foregroundStyle(HUDColorPalette.secondaryText)
             }
-            if let error = model.tokenActivityErrorMessage, model.tokenActivity != nil {
-                Text(error).font(.caption2).foregroundStyle(HUDColorPalette.warning)
-            }
-            if model.tokenActivityState == .loading {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text("正在更新 Token Activity…").font(.caption)
-                }
-            } else {
-                Button("Refresh Token Activity") { model.refreshTokenActivity() }
-                    .buttonStyle(.link)
-                    .font(.caption)
-            }
+            Text("僅統計 CodexUsageStatus 在這台 Mac 實際觀測到的 Codex 使用；切換帳號不會重置或改變範圍。")
+                .font(.caption2)
+                .foregroundStyle(HUDColorPalette.tertiaryText)
         }
     }
 

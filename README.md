@@ -31,7 +31,7 @@ Do not download the repository source archive for installation. The source archi
 5. If macOS blocks the app, open **System Settings → Privacy & Security**, scroll to the security message, and choose **Open Anyway**.
 6. Launch Codex Usage Status. It appears as a menu-bar item and can show the floating HUD beside Codex.
 
-The application is currently ad-hoc signed and is not notarized with Apple. The first-launch confirmation is therefore expected. Keeping the app in `/Applications` also gives the login-item registration a stable path.
+Published release artifacts are signed with the maintainer's Apple Development identity and are not notarized with Apple; local `package` builds remain ad-hoc unless the explicit release-signing mode is used. The first-launch confirmation may therefore be expected. Keeping the app in `/Applications` also gives the login-item registration a stable path.
 
 ## Permissions
 

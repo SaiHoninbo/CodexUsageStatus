@@ -44,10 +44,10 @@ struct HUDPresentation: Equatable {
     let identityPlan: String?
     let quota: HUDDualQuotaPresentation?
     let tokenMetrics: [TokenActivityMetric]?
-    /// A network-only token update event. Cache hydration, account switches,
-    /// and chart-range changes intentionally publish `nil` here so the HUD
-    /// keeps its stable geometry and does not replay feedback.
-    let tokenActivityFeedback: TokenActivityUpdateFeedback?
+    /// A local-observation token update event. Account lifetime refreshes,
+    /// cache hydration, account switches, and chart-range changes publish
+    /// `nil` so the HUD cannot replay feedback for non-local consumption.
+    let tokenActivityFeedback: TokenHeroUpdateFeedback?
     let tokenActivityIsStale: Bool
     let updateBadge: HUDUpdateBadgeState
     let dataAgeText: String
@@ -160,16 +160,16 @@ struct TokenActivityMetric: Equatable, Identifiable {
     var id: String { label }
 }
 
-/// The minimal value-semantic payload needed to animate the existing compact
-/// Token Activity summary. It deliberately carries the final lifetime value
-/// and changed secondary labels rather than raw persistence or network state.
-struct TokenActivityUpdateFeedback: Equatable {
+/// The minimal value-semantic payload needed to animate the Token Hero. Its
+/// values represent the machine-scoped local observation ledger rather than
+/// the account lifetime returned by Token Activity.
+struct TokenHeroUpdateFeedback: Equatable {
     let generation: UInt64
-    let previousLifetimeTokens: Int64
-    let lifetimeTokens: Int64
+    let previousTokens: Int64
+    let tokens: Int64
     let changedMetricLabels: [String]
 
-    var lifetimeDelta: Int64 { lifetimeTokens - previousLifetimeTokens }
+    var tokenDelta: Int64 { tokens - previousTokens }
 
     func changed(_ label: String) -> Bool {
         changedMetricLabels.contains(label)
@@ -197,7 +197,7 @@ enum TokenActivitySoundPolicy {
 
     /// Sound is a per-event decision. The view model owns the generation gate
     /// and invokes this once for each qualifying callback.
-    static func shouldPlay(for feedback: TokenActivityUpdateFeedback?, enabled: Bool) -> Bool {
+    static func shouldPlay(for feedback: TokenHeroUpdateFeedback?, enabled: Bool) -> Bool {
         enabled && feedback != nil
     }
 
@@ -211,7 +211,7 @@ enum TokenActivitySoundPolicy {
 struct TokenActivitySoundGate: Equatable {
     private(set) var lastPlayedGeneration: UInt64?
 
-    mutating func consume(feedback: TokenActivityUpdateFeedback?, enabled: Bool) -> Bool {
+    mutating func consume(feedback: TokenHeroUpdateFeedback?, enabled: Bool) -> Bool {
         guard TokenActivitySoundPolicy.shouldPlay(for: feedback, enabled: enabled),
               let feedback,
               lastPlayedGeneration != feedback.generation else {
@@ -219,48 +219,6 @@ struct TokenActivitySoundGate: Equatable {
         }
         lastPlayedGeneration = feedback.generation
         return true
-    }
-}
-
-/// Pure trigger policy for Token Activity feedback. The raw incoming
-/// snapshot is required because `TokenActivityStore.update` merges nullable
-/// fields; a sparse patch must never look like a lifetime increase merely
-/// because it retained an older stored value.
-enum TokenActivityFeedbackPolicy {
-    static func make(
-        previousSource: TokenActivitySnapshot?,
-        previousSummary: TokenActivitySnapshot?,
-        currentSummary: TokenActivitySnapshot?,
-        incoming: TokenActivitySnapshot,
-        generation: UInt64,
-        sameProfile: Bool = true
-    ) -> TokenActivityUpdateFeedback? {
-        guard sameProfile,
-              let previousSource,
-              let previousSummary,
-              let currentSummary,
-              incoming.fetchedAt > previousSource.fetchedAt,
-              let oldLifetime = previousSource.lifetimeTokens,
-              let incomingLifetime = incoming.lifetimeTokens,
-              incomingLifetime > oldLifetime,
-              let previousSummaryLifetime = previousSummary.lifetimeTokens,
-              let currentSummaryLifetime = currentSummary.lifetimeTokens,
-              currentSummaryLifetime > previousSummaryLifetime else {
-            return nil
-        }
-
-        let oldMetrics = TokenActivityPresentation.metrics(for: previousSummary)
-        let newMetrics = TokenActivityPresentation.metrics(for: currentSummary)
-        let changedLabels = zip(oldMetrics, newMetrics)
-            .filter { $0.0.value != $0.1.value }
-            .map { $0.1.label }
-
-        return TokenActivityUpdateFeedback(
-            generation: generation,
-            previousLifetimeTokens: previousSummaryLifetime,
-            lifetimeTokens: currentSummaryLifetime,
-            changedMetricLabels: changedLabels
-        )
     }
 }
 

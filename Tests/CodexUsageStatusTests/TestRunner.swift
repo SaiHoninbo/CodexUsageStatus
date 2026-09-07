@@ -69,8 +69,11 @@ struct CodexUsageStatusTests {
             ("token activity decoding", testTokenActivityDecoding),
             ("token activity null fields", testTokenActivityNullFields),
             ("token activity presentation", testTokenActivityPresentation),
+            ("local Codex usage artifact parser", testLocalCodexUsageArtifactParser),
+            ("local token usage ledger", testLocalTokenUsageLedger),
             ("token activity aggregation", testTokenActivityAggregation),
-            ("token activity update feedback", testTokenActivityUpdateFeedback),
+            ("local Token Hero update feedback", testTokenActivityUpdateFeedback),
+            ("token reel audio feedback", testTokenReelAudioFeedback),
             ("status item presentation projection", testStatusItemPresentationProjection),
             ("HUD presentation boundary", testHUDPresentationBoundary),
             ("token activity store replacement and retention", testTokenActivityStoreReplacementAndRetention),
@@ -96,6 +99,7 @@ struct CodexUsageStatusTests {
             ("HUD paste acknowledgement policy", testHUDPasteAcknowledgementPolicy),
             ("popover presentation appearance policy", testPopoverPresentationAppearancePolicy),
             ("HUD scale levels", testHUDScaleLevels),
+            ("HUD themes and rotation policy", testHUDThemesAndRotationPolicy),
             ("HUD C metrics", testHUDMetrics),
             ("HUD update badge policy", testHUDUpdateBadgePolicy),
             ("Codex application identity", testCodexApplicationIdentity),
@@ -1164,50 +1168,212 @@ struct CodexUsageStatusTests {
         try expect(unknownAggregate?.peakDailyTokens == nil, "all-account aggregation does not fabricate unknown peak")
     }
 
-    private static func testTokenActivityUpdateFeedback() throws {
-        let baseDate = Date(timeIntervalSince1970: 1_757_000_000)
+    private static func testLocalCodexUsageArtifactParser() throws {
+        let line = Data(#"{"timestamp":"2026-09-07T03:18:41.123Z","type":"token_usage_record","payload":{"thread_id":"thread-live","turn_id":"turn-live","usage":{"total_tokens":321},"turn_token_usage":{"total_tokens":321},"thread_token_usage":{"total_tokens":9876}}}"#.utf8)
+        let record = try unwrap(CodexLocalUsageArtifactParser.parseLine(line), "token usage record from Codex rollout JSONL")
+        try expect(record.threadID == "thread-live", "artifact parser preserves thread identity")
+        try expect(record.turnID == "turn-live", "artifact parser preserves turn identity")
+        try expect(record.cumulativeTokenTotal == 9_876, "artifact parser uses the cumulative thread token total")
+        try expect(record.lastCallTokenTotal == 321, "artifact parser uses the latest call token total")
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        try expect(record.observedAt == formatter.date(from: "2026-09-07T03:18:41.123Z"), "artifact parser preserves event timestamp")
 
-        func snapshot(
-            at offset: TimeInterval = 0,
-            lifetime: Int64? = 4_829_524_138,
-            peak: Int64? = 575_763_278,
-            longestTurn: Int64? = 64 * 3600 + 45 * 60,
-            currentStreak: Int64? = 1,
-            longestStreak: Int64? = 24
-        ) -> TokenActivitySnapshot {
-            TokenActivitySnapshot(
-                fetchedAt: baseDate.addingTimeInterval(offset),
-                lifetimeTokens: lifetime,
-                peakDailyTokens: peak,
-                longestRunningTurnSec: longestTurn,
-                currentStreakDays: currentStreak,
-                longestStreakDays: longestStreak,
-                dailyUsageBuckets: nil
-            )
+        let ignored = Data(#"{"timestamp":"2026-09-07T03:18:41.123Z","type":"event_msg","payload":{"type":"token_count"}}"#.utf8)
+        try expect(CodexLocalUsageArtifactParser.parseLine(ignored) == nil, "non-token artifact events are ignored")
+        let missingIdentity = Data(#"{"timestamp":"2026-09-07T03:18:41.123Z","type":"token_usage_record","payload":{"thread_id":"","turn_id":"turn-live","usage":{"total_tokens":321},"thread_token_usage":{"total_tokens":9876}}}"#.utf8)
+        try expect(CodexLocalUsageArtifactParser.parseLine(missingIdentity) == nil, "artifacts without stable identity are ignored")
+
+        let sessionMeta = Data(#"{"type":"session_meta","payload":{"id":"thread-from-session-meta"}}"#.utf8)
+        try expect(
+            CodexLocalUsageArtifactParser.parseSessionThreadID(sessionMeta) == "thread-from-session-meta",
+            "session metadata provides the rollout thread identity"
+        )
+        let completion = Data(#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-complete","started_at":1000,"completed_at":1012.75,"duration_ms":12750}}"#.utf8)
+        let completionRecord = try unwrap(
+            CodexLocalUsageArtifactParser.parseTurnCompletion(completion, threadID: "thread-from-session-meta"),
+            "completed Turn lifecycle artifact"
+        )
+        try expect(completionRecord.threadID == "thread-from-session-meta", "Turn lifecycle retains rollout thread identity")
+        try expect(completionRecord.turnID == "turn-complete", "Turn lifecycle retains turn identity")
+        try expect(completionRecord.durationSeconds == 12, "Turn duration uses explicit lifecycle duration, not token timestamps")
+        try expect(completionRecord.startedAt == Date(timeIntervalSince1970: 1000), "Turn lifecycle preserves start timestamp")
+        try expect(completionRecord.completedAt == Date(timeIntervalSince1970: 1012.75), "Turn lifecycle preserves completion timestamp")
+        let unknownLifecycle = Data(#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-complete","started_at":1000,"completed_at":1012.75}}"#.utf8)
+        let fallbackCompletion = try unwrap(
+            CodexLocalUsageArtifactParser.parseTurnCompletion(unknownLifecycle, threadID: "thread-from-session-meta"),
+            "lifecycle artifact without duration field"
+        )
+        try expect(fallbackCompletion.durationSeconds == 12, "Turn lifecycle falls back to explicit start/end timestamps")
+        try expect(CodexLocalUsageArtifactParser.parseTurnCompletion(completion, threadID: nil) == nil, "Turn lifecycle without thread identity is ignored")
+    }
+
+    private static func testLocalTokenUsageLedger() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-local-ledger-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let profileStore = AccountProfileStore(applicationSupportURL: base.appendingPathComponent("support"))
+        let profileA = profileStore.createManagedProfile(displayName: "A")
+        let profileB = profileStore.createManagedProfile(displayName: "B")
+        let fileURL = profileStore.containerURL.appendingPathComponent("local-token-usage-ledger.json")
+        let store = LocalTokenUsageLedgerStore(fileURL: fileURL)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+        let day1 = calendar.date(from: DateComponents(year: 2026, month: 9, day: 1, hour: 12))!
+        let day2 = calendar.date(byAdding: .day, value: 1, to: day1)!
+        let day3 = calendar.date(byAdding: .day, value: 1, to: day2)!
+        let day5 = calendar.date(byAdding: .day, value: 2, to: day3)!
+
+        let first = try unwrap(store.record(
+            profileID: profileA.id,
+            threadID: "thread-a",
+            turnID: "turn-1",
+            cumulativeTokenTotal: 1_120,
+            lastCallTokenTotal: 120,
+            at: day1
+        ), "first locally observed turn total")
+        try expect(first.previousTotalObservedTokens == 0, "new local ledger starts at zero")
+        try expect(first.delta == 120 && first.totalObservedTokens == 120, "first observation records only the last call, not restored thread history")
+        try expect(store.record(profileID: profileA.id, threadID: "thread-a", turnID: "turn-1", cumulativeTokenTotal: 1_120, lastCallTokenTotal: 120) == nil, "equal callback is deduplicated")
+        try expect(store.record(profileID: profileA.id, threadID: "thread-a", turnID: "turn-1", cumulativeTokenTotal: 1_100, lastCallTokenTotal: 100) == nil, "older thread total cannot subtract or double count")
+
+        let increment = try unwrap(store.record(
+            profileID: profileA.id,
+            threadID: "thread-a",
+            turnID: "turn-1",
+            cumulativeTokenTotal: 1_175,
+            lastCallTokenTotal: 55,
+            at: day1.addingTimeInterval(1)
+        ), "positive local turn delta")
+        try expect(increment.delta == 55 && increment.totalObservedTokens == 175, "same turn adds only its positive delta")
+
+        let secondTurn = try unwrap(store.record(
+            profileID: profileB.id,
+            threadID: "thread-a",
+            turnID: "turn-2",
+            cumulativeTokenTotal: 9_025,
+            lastCallTokenTotal: 25,
+            at: day1.addingTimeInterval(2)
+        ), "second local turn")
+        try expect(secondTurn.delta == 25 && secondTurn.totalObservedTokens == 200, "same thread ID in another profile has an independent high-water")
+        let sameThreadNewTurn = try unwrap(store.record(
+            profileID: profileA.id,
+            threadID: "thread-a",
+            turnID: "turn-3",
+            cumulativeTokenTotal: 1_200,
+            lastCallTokenTotal: 25,
+            at: day2
+        ), "same thread next turn")
+        try expect(sameThreadNewTurn.delta == 25 && sameThreadNewTurn.totalObservedTokens == 225, "thread cumulative high-water continues across turn identifiers")
+        let resetCounter = try unwrap(store.record(
+            profileID: profileA.id,
+            threadID: "thread-a",
+            turnID: "turn-4",
+            cumulativeTokenTotal: 30,
+            lastCallTokenTotal: 30,
+            at: day3
+        ), "reset thread cumulative counter")
+        try expect(resetCounter.delta == 30 && resetCounter.totalObservedTokens == 255, "a new active turn can recover from a reset thread counter using last-call usage")
+        try expect(store.record(profileID: profileA.id, threadID: "", turnID: "turn-3", cumulativeTokenTotal: 10, lastCallTokenTotal: 10) == nil, "missing thread identity is rejected")
+        try expect(store.record(profileID: profileA.id, threadID: "thread-a", turnID: "turn-3", cumulativeTokenTotal: nil, lastCallTokenTotal: nil) == nil, "missing usage is rejected")
+
+        let baselineOnly = LocalTokenUsageLedgerStore(fileURL: base.appendingPathComponent("baseline-only.json"))
+        try expect(
+            baselineOnly.record(
+                profileID: profileA.id,
+                threadID: "restored-thread",
+                turnID: "old-turn",
+                cumulativeTokenTotal: 50_000,
+                lastCallTokenTotal: nil
+            ) == nil,
+            "restored cumulative history without a last-call value seeds a baseline without inflating the ledger"
+        )
+        try expect(baselineOnly.snapshot.totalObservedTokens == 0, "restored account/thread lifetime is never treated as local consumption")
+
+        let defaultNamespace = LocalTokenUsageLedgerStore(fileURL: base.appendingPathComponent("default-namespace.json"))
+        _ = defaultNamespace.record(
+            profileID: nil,
+            threadID: "default-thread",
+            turnID: "default-turn",
+            cumulativeTokenTotal: 1_000,
+            lastCallTokenTotal: 100,
+            at: day1
+        )
+        let afterDefaultProfileSwitch = try unwrap(defaultNamespace.record(
+            profileID: nil,
+            threadID: "default-thread",
+            turnID: "default-turn",
+            cumulativeTokenTotal: 1_125,
+            lastCallTokenTotal: 125,
+            at: day1.addingTimeInterval(1)
+        ), "default CODEX_HOME remains stable across selected profile changes")
+        try expect(afterDefaultProfileSwitch.delta == 125 && afterDefaultProfileSwitch.totalObservedTokens == 225, "default observation namespace does not reset on account switch")
+        try expect(defaultNamespace.recordCompletedTurn(profileID: nil, threadID: "default-thread", turnID: "default-turn", durationSeconds: 42, at: day1), "rollout lifecycle can record a default-root Turn")
+        try expect(!defaultNamespace.recordCompletedTurn(profileID: nil, threadID: "default-thread", turnID: "default-turn", durationSeconds: 42, at: day1), "duplicate terminal lifecycle does not change local longest Turn")
+        try expect(!defaultNamespace.recordCompletedTurn(profileID: nil, threadID: "default-thread", turnID: "shorter", durationSeconds: 12, at: day1), "shorter rollout Turn does not replace local maximum")
+        try expect(defaultNamespace.recordCompletedTurn(profileID: nil, threadID: "default-thread", turnID: "longer", durationSeconds: 84, at: day2), "longer rollout Turn updates local maximum")
+        try expect(defaultNamespace.snapshot.longestObservedTurnSec == 84, "rollout lifecycle keeps the longest local Turn")
+
+        _ = store.record(
+            profileID: profileB.id,
+            threadID: "thread-b",
+            turnID: "turn-5",
+            cumulativeTokenTotal: 40,
+            lastCallTokenTotal: 40,
+            at: day5
+        )
+        try expect(store.snapshot.dailyUsageBuckets.first(where: { $0.startDate == "2026-09-01" })?.tokens == 200, "same-day deltas across profiles share one machine bucket")
+        try expect(store.recordCompletedTurn(profileID: profileA.id, threadID: "thread-a", turnID: "turn-4", durationSeconds: 90, at: day3), "longest local Turn is accepted")
+        try expect(!store.recordCompletedTurn(profileID: profileB.id, threadID: "thread-b", turnID: "turn-5", durationSeconds: 60, at: day5), "shorter Turn does not replace the local maximum")
+
+        let reloaded = LocalTokenUsageLedgerStore(fileURL: fileURL)
+        try expect(reloaded.snapshot.totalObservedTokens == 295, "machine ledger persists across launch")
+        try expect(reloaded.snapshot.threads.count == 3, "profile-plus-thread baselines persist to prevent replay")
+        try expect(reloaded.snapshot.longestObservedTurnSec == 90, "local longest Turn persists")
+
+        let metrics = LocalTokenUsageLedgerPresentation.metrics(snapshot: reloaded.snapshot)
+        try expect(metrics.first?.label == "本機觀測 token", "HUD Hero identifies the local observation source")
+        try expect(metrics.map(\.label) == ["本機觀測 token", "本機單日峰值", "本機最長 Turn", "本機目前連續", "本機最長連續"], "all five HUD metrics identify machine-local scope")
+        try expect(metrics.map(\.value) == ["295", "200", "1 分 30 秒", "1 天", "3 天"], "all five HUD metrics derive only from the machine ledger")
+        try expect(LocalTokenUsageLedgerPresentation.metrics(snapshot: reloaded.snapshot) == metrics, "account scope cannot alter machine metrics")
+
+        try expect(profileStore.deleteProfile(id: profileB.id), "profile B can be deleted")
+        let afterProfileDeletion = LocalTokenUsageLedgerStore(fileURL: fileURL)
+        try expect(afterProfileDeletion.snapshot.totalObservedTokens == 295, "deleting a profile cannot delete machine history")
+
+        let feedback = LocalTokenUsageLedgerPresentation.feedback(for: secondTurn, generation: 4)
+        try expect(feedback.previousTokens == 175 && feedback.tokens == 200, "reel uses local ledger before/after values")
+        try expect(feedback.changedMetricLabels == [LocalTokenUsageLedgerPresentation.observedLabel], "positive machine delta animates only the Reel Hero")
+
+        // Account-history scope is a presentation filter only. A positive
+        // machine observation produces identical feedback in either scope;
+        // only an explicit scope transition clears the transient event.
+        let scopeFeedbacks = AccountScope.allCases.map { scope -> TokenHeroUpdateFeedback in
+            _ = scope
+            return LocalTokenUsageLedgerPresentation.feedback(for: secondTurn, generation: 5)
         }
+        let currentScopeFeedback = scopeFeedbacks[0]
+        let allScopeFeedback = scopeFeedbacks[1]
+        try expect(currentScopeFeedback == allScopeFeedback, "current and all account scopes share machine-local feedback")
+        var scopeSoundGate = TokenActivitySoundGate()
+        try expect(scopeSoundGate.consume(feedback: currentScopeFeedback, enabled: true), "current scope accepts one local feedback sound")
+        try expect(!scopeSoundGate.consume(feedback: allScopeFeedback, enabled: true), "same local generation cannot replay when scope changes")
+        try expect(LocalTokenUsageLedgerPresentation.feedback(for: LocalTokenUsageLedgerUpdate(previousTotalObservedTokens: 200, totalObservedTokens: 200, delta: 0), generation: 6).tokenDelta == 0, "equal local observation has no positive feedback delta")
+    }
 
-        let old = snapshot()
-        let increased = snapshot(
-            at: 60,
-            lifetime: 4_831_028_746,
-            peak: 600_000_000,
-            longestTurn: 70 * 3600,
-            currentStreak: 2
+    private static func testTokenActivityUpdateFeedback() throws {
+        let update = LocalTokenUsageLedgerUpdate(
+            previousTotalObservedTokens: 4_829_524_138,
+            totalObservedTokens: 4_831_028_746,
+            delta: 1_504_608
         )
-        let event = TokenActivityFeedbackPolicy.make(
-            previousSource: old,
-            previousSummary: old,
-            currentSummary: increased,
-            incoming: increased,
-            generation: 7
-        )
-        try expect(event?.generation == 7, "qualifying network update carries its generation")
-        try expect(event?.previousLifetimeTokens == old.lifetimeTokens, "feedback retains the previous lifetime")
-        try expect(event?.lifetimeTokens == increased.lifetimeTokens, "feedback retains the final lifetime")
-        try expect(event?.lifetimeDelta == 1_504_608, "feedback computes the lifetime delta")
-        try expect(event?.changed(TokenActivityPresentation.peakLabel) == true, "changed peak metric is marked for pulse")
-        try expect(event?.changed(TokenActivityPresentation.longestTurnLabel) == true, "changed turn metric is marked for pulse")
-        try expect(event?.changed(TokenActivityPresentation.currentStreakLabel) == true, "changed streak metric is marked for pulse")
+        let event = LocalTokenUsageLedgerPresentation.feedback(for: update, generation: 7)
+        try expect(event.generation == 7, "qualifying local observation carries its generation")
+        try expect(event.previousTokens == update.previousTotalObservedTokens, "feedback retains the previous local ledger total")
+        try expect(event.tokens == update.totalObservedTokens, "feedback retains the final local ledger total")
+        try expect(event.tokenDelta == 1_504_608, "feedback computes the local observed delta")
+        try expect(event.changed(LocalTokenUsageLedgerPresentation.observedLabel), "the local Token Hero is marked for animation")
+        try expect(!event.changed(TokenActivityPresentation.peakLabel), "network history metrics do not pulse for a local ledger event")
         try expect(TokenActivitySoundPolicy.shouldPlay(for: event, enabled: true), "sound preference enables one chime for the event")
         try expect(!TokenActivitySoundPolicy.shouldPlay(for: event, enabled: false), "sound preference disables the chime without disabling animation")
         try expect(TokenActivitySoundPolicy.preferredSystemSoundName == "Tink", "token credit chime prefers the Tink system sound")
@@ -1218,95 +1384,15 @@ struct CodexUsageStatusTests {
         var soundGate = TokenActivitySoundGate()
         try expect(soundGate.consume(feedback: event, enabled: true), "sound gate accepts the first event generation")
         try expect(!soundGate.consume(feedback: event, enabled: true), "sound gate rejects a duplicate generation")
-
-        let duplicate = snapshot(at: 120, lifetime: increased.lifetimeTokens)
-        try expect(
-            TokenActivityFeedbackPolicy.make(
-                previousSource: increased,
-                previousSummary: increased,
-                currentSummary: duplicate,
-                incoming: duplicate,
-                generation: 8
-            ) == nil,
-            "same lifetime never creates a second event or sound"
-        )
-        let equalTimestampLarger = snapshot(at: 60, lifetime: 5_000_000_000)
-        try expect(
-            TokenActivityFeedbackPolicy.make(
-                previousSource: increased,
-                previousSummary: increased,
-                currentSummary: equalTimestampLarger,
-                incoming: equalTimestampLarger,
-                generation: 8
-            ) == nil,
-            "equal fetchedAt never creates feedback even when lifetime is larger"
-        )
-        let secondaryOnly = snapshot(at: 120, lifetime: increased.lifetimeTokens, peak: 700_000_000)
-        try expect(
-            TokenActivityFeedbackPolicy.make(
-                previousSource: increased,
-                previousSummary: increased,
-                currentSummary: secondaryOnly,
-                incoming: secondaryOnly,
-                generation: 8
-            ) == nil,
-            "secondary-only changes do not roll or chime without lifetime growth"
-        )
         try expect(!TokenActivitySoundPolicy.shouldPlay(for: nil, enabled: true), "a non-event cannot produce a second chime")
         try expect(!soundGate.consume(feedback: nil, enabled: true), "sound gate ignores a non-event")
-        try expect(
-            TokenActivityFeedbackPolicy.make(
-                previousSource: nil,
-                previousSummary: nil,
-                currentSummary: increased,
-                incoming: increased,
-                generation: 8
-            ) == nil,
-            "startup and cache hydration without a network baseline stay silent"
-        )
-        try expect(
-            TokenActivityFeedbackPolicy.make(
-                previousSource: old,
-                previousSummary: old,
-                currentSummary: increased,
-                incoming: increased,
-                generation: 8,
-                sameProfile: false
-            ) == nil,
-            "profile-boundary updates never create feedback"
-        )
-
-        let olderButLarger = snapshot(at: -60, lifetime: 9_000_000_000)
-        try expect(
-            TokenActivityFeedbackPolicy.make(
-                previousSource: old,
-                previousSummary: old,
-                currentSummary: olderButLarger,
-                incoming: olderButLarger,
-                generation: 9
-            ) == nil,
-            "older snapshots never create feedback"
-        )
-
-        let nilLifetimePatch = snapshot(at: 60, lifetime: nil)
-        let retainedMerged = snapshot(at: 60, lifetime: old.lifetimeTokens)
-        try expect(
-            TokenActivityFeedbackPolicy.make(
-                previousSource: old,
-                previousSummary: old,
-                currentSummary: retainedMerged,
-                incoming: nilLifetimePatch,
-                generation: 10
-            ) == nil,
-            "sparse nil lifetime patches never animate retained values"
-        )
 
         let slots = TokenOdometerPresentation.slots(
-            previous: old.lifetimeTokens ?? 0,
-            current: increased.lifetimeTokens ?? 0
+            previous: update.previousTotalObservedTokens,
+            current: update.totalObservedTokens
         )
         let formattedSlots = slots.map { String($0.currentCharacter) }.joined().replacingOccurrences(of: " ", with: "")
-        try expect(formattedSlots == TokenActivityPresentation.tokenCount(increased.lifetimeTokens), "odometer final value exactly matches the formatted lifetime")
+        try expect(formattedSlots == TokenActivityPresentation.tokenCount(update.totalObservedTokens), "odometer final value exactly matches the formatted local ledger")
         try expect(slots.contains(where: { $0.isChangedDigit }), "odometer identifies changed numeric slots")
         try expect(slots.contains(where: { $0.currentCharacter == "," && !$0.isChangedDigit }), "odometer keeps separators stable")
 
@@ -1361,6 +1447,43 @@ struct CodexUsageStatusTests {
         try expect(standardSize == afterFeedbackSize, "token feedback does not change HUD geometry")
     }
 
+    private static func testTokenReelAudioFeedback() throws {
+        let normal = TokenReelAudioPlan.make(reduceMotion: false)
+        try expect(normal.isBounded, "normal Reel audio schedule stays within its visual window")
+        try expect(normal.duration == TokenActivityFeedbackAnimation.normalDuration, "normal Reel audio shares the authoritative visual duration")
+        try expect(
+            normal.events.map(\.offset) == [0.03, 0.10, 0.19, 0.31, 0.46, TokenActivityFeedbackAnimation.normalDuration],
+            "normal Reel audio uses the bounded rolling tick offsets and landing")
+        try expect(normal.events.last?.offset == TokenActivityFeedbackAnimation.normalDuration, "normal landing offset matches the visual Reel duration")
+        try expect(
+            normal.events.dropLast().allSatisfy { $0.role == .rollingTick && $0.volume == 0.17 },
+            "rolling ticks are quiet and never replace the landing cue")
+        try expect(
+            normal.events.last?.role == .landing && normal.events.last?.volume == 0.48,
+            "landing cue is the final single completion event")
+
+        let reduced = TokenReelAudioPlan.make(reduceMotion: true)
+        try expect(reduced.isBounded, "Reduce Motion audio schedule stays bounded")
+        try expect(reduced.duration == TokenActivityFeedbackAnimation.reduceMotionDuration, "Reduce Motion shares the authoritative visual duration")
+        try expect(reduced.events.last?.offset == TokenActivityFeedbackAnimation.reduceMotionDuration, "Reduce Motion landing offset matches the visual duration")
+        try expect(reduced.events.count == 1 && reduced.events[0].role == .landing, "Reduce Motion suppresses rolling ticks")
+
+        try expect(TokenReelAudioSelectionPolicy.rollingTick(popAvailable: true, morseAvailable: true) == .pop, "Pop is preferred for rolling ticks")
+        try expect(TokenReelAudioSelectionPolicy.rollingTick(popAvailable: false, morseAvailable: true) == .morse, "Morse is the rolling tick fallback")
+        try expect(TokenReelAudioSelectionPolicy.rollingTick(popAvailable: false, morseAvailable: false) == nil, "missing rolling sounds stay silent rather than beep repeatedly")
+        try expect(TokenReelAudioSelectionPolicy.landing(tinkAvailable: true, glassAvailable: true) == .tink, "Tink is preferred for landing")
+        try expect(TokenReelAudioSelectionPolicy.landing(tinkAvailable: false, glassAvailable: true) == .glass, "Glass is the landing fallback")
+        try expect(TokenReelAudioSelectionPolicy.landing(tinkAvailable: false, glassAvailable: false) == .beep, "beep remains the safe final landing fallback")
+
+        let suiteName = "TokenReelAudioFeedbackTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        try expect(TokenReelSoundPreference.load(from: defaults), "Token Reel sound defaults enabled")
+        defaults.set(false, forKey: TokenReelSoundPreference.key)
+        try expect(!TokenReelSoundPreference.load(from: defaults), "Token Reel sound preference persists independently")
+        try expect(TokenReelSoundPreference.key != "usage.notifications.soundEnabled", "Token Reel sound does not reuse notification sound preference")
+    }
+
     private static func testStatusItemPresentationProjection() throws {
         let base = StatusItemPresentationSource(
             stackedTitle: "Codex\n86%",
@@ -1390,7 +1513,7 @@ struct CodexUsageStatusTests {
             tokenValue: String = "4,829,524,138",
             profileIDOverride: UUID? = nil,
             reduceMotion: Bool = false,
-            tokenFeedback: TokenActivityUpdateFeedback? = nil
+            tokenFeedback: TokenHeroUpdateFeedback? = nil
         ) -> HUDPresentation {
             let effectiveProfileID = profileIDOverride ?? profileID
             let fiveHour = HUDQuotaWindowPresentation(
@@ -1464,14 +1587,15 @@ struct CodexUsageStatusTests {
         try expect(base != makePresentation(tokenValue: "4,829,524,139"), "token metric changes invalidate the HUD presentation")
         try expect(base != makePresentation(profileIDOverride: UUID()), "profile identity changes invalidate the HUD presentation")
         try expect(base != makePresentation(reduceMotion: true), "Reduce Motion changes invalidate pulse presentation")
-        let feedback = TokenActivityUpdateFeedback(
+        let feedback = TokenHeroUpdateFeedback(
             generation: 1,
-            previousLifetimeTokens: 4_829_524_138,
-            lifetimeTokens: 4_831_028_746,
+            previousTokens: 4_829_524_138,
+            tokens: 4_831_028_746,
             changedMetricLabels: [TokenActivityPresentation.lifetimeLabel]
         )
         try expect(base != makePresentation(tokenFeedback: feedback), "token feedback changes invalidate only the visual boundary")
         try expect(makePresentation(tokenFeedback: feedback) == makePresentation(tokenFeedback: feedback), "identical token feedback remains equatable")
+
     }
 
     private static func testTokenActivityStoreReplacementAndRetention() throws {
@@ -1696,9 +1820,12 @@ struct CodexUsageStatusTests {
         try expect(event?.content == "hello", "turn content")
         let usage = TurnActivityCodec.decodeTokenUsage(params: [
             "threadId": "thread-1", "turnId": "turn-1",
-            "tokenUsage": ["total": ["totalTokens": 1234]]
+            "tokenUsage": [
+                "total": ["totalTokens": 1234],
+                "last": ["totalTokens": 234]
+            ]
         ])
-        try expect(usage?.tokenTotal == 1234, "turn token usage")
+        try expect(usage?.tokenTotal == 1234, "thread cumulative token usage")
     }
 
     private static func testAccountProfilesIsolateEmail() throws {
@@ -2561,6 +2688,51 @@ struct CodexUsageStatusTests {
             lastSeen: Date()
         )
         try expect(profile.syncIntervalSeconds == 1_800, "new managed profiles inherit the account default")
+    }
+
+    private static func testHUDThemesAndRotationPolicy() throws {
+        try expect(
+            HUDTheme.allCases == [.neonPurple, .lightSky, .mario],
+            "HUD themes use the fixed manual/automatic order"
+        )
+        try expect(HUDTheme.neonPurple.next == .lightSky, "neon purple advances to light sky")
+        try expect(HUDTheme.lightSky.next == .mario, "light sky advances to mario")
+        try expect(HUDTheme.mario.next == .neonPurple, "mario wraps to neon purple")
+        try expect(
+            HUDThemeRotationInterval.allCases.map(\.rawValue) == [1_800, 3_600, 10_800, 21_600, 43_200, 86_400],
+            "rotation intervals stay within the approved choices"
+        )
+
+        let base = Date(timeIntervalSince1970: 10_000)
+        try expect(
+            !HUDThemeRotationPolicy.shouldRotate(
+                now: base.addingTimeInterval(3_599),
+                lastRotationAt: base,
+                interval: .oneHour
+            ),
+            "rotation waits until the configured interval"
+        )
+        try expect(
+            HUDThemeRotationPolicy.shouldRotate(
+                now: base.addingTimeInterval(3_600),
+                lastRotationAt: base,
+                interval: .oneHour
+            ),
+            "rotation triggers at the configured interval"
+        )
+        try expect(
+            HUDThemeRotationPolicy.advance(.neonPurple, steps: 4) == .lightSky,
+            "rotation advances deterministically and wraps"
+        )
+
+        let suiteName = "HUDThemeTests-\(UUID().uuidString)"
+        let defaults = try unwrap(UserDefaults(suiteName: suiteName), "isolated theme defaults")
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        try expect(HUDThemePreference.loadTheme(from: defaults) == .neonPurple, "theme defaults start at neon purple")
+        defaults.set(HUDTheme.lightSky.rawValue, forKey: HUDThemePreference.themeKey)
+        defaults.set(HUDThemeRotationInterval.oneDay.rawValue, forKey: HUDThemePreference.intervalKey)
+        try expect(HUDThemePreference.loadTheme(from: defaults) == .lightSky, "theme preference round trips")
+        try expect(HUDThemePreference.loadInterval(from: defaults) == .oneDay, "rotation interval round trips")
     }
 
     private static func testAccountRefreshDependencyPolicy() throws {

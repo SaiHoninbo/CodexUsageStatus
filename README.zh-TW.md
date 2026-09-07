@@ -35,7 +35,7 @@ Codex Usage Status 是 macOS 選單列用量 HUD，用來監控本機 Codex App 
 5. 如果 macOS 阻擋啟動，開啟「系統設定 → 隱私權與安全性」，在安全性提示中選擇「仍要打開」。
 6. 啟動 Codex Usage Status；它會出現在選單列，也可以在 Codex 旁顯示浮動 HUD。
 
-目前 App 使用 ad-hoc signing，尚未經 Apple notarization，因此第一次啟動可能需要右鍵「打開」。建議固定放在 `/Applications`，讓登入啟動註冊使用穩定的 App 路徑。
+公開發布的 artifact 使用維護者的 Apple Development identity 簽署，尚未經 Apple notarization；除非使用明確的 release signing mode，否則本機 `package` 建置仍使用 ad-hoc signing。因此第一次啟動可能需要右鍵「打開」。建議固定放在 `/Applications`，讓登入啟動註冊使用穩定的 App 路徑。
 
 ## 權限
 

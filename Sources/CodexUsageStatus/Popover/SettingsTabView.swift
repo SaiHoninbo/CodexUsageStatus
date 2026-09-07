@@ -227,6 +227,18 @@ extension UsagePopoverView {
                 .font(.caption2)
                 .foregroundStyle(HUDColorPalette.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
+            Toggle("Token Reel 音效", isOn: Binding(
+                get: { model.tokenReelSoundEnabled },
+                set: { model.setTokenReelSoundEnabled($0) }
+            ))
+            Text("只有真正增加的 Token 才播放一次 Reel 音效；不會因啟動、切帳號或重新整理重播。")
+                .font(.caption2)
+                .foregroundStyle(HUDColorPalette.tertiaryText)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("試聽 Reel 音效") { model.previewTokenReelSound() }
+                .buttonStyle(.link)
+                .font(.caption)
+                .disabled(!model.tokenReelSoundEnabled)
             Button("重設 HUD 位置") { resetHUDPosition() }
                 .buttonStyle(.link)
                 .font(.caption)

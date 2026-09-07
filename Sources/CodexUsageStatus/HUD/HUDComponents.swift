@@ -8,6 +8,7 @@ struct HUDQuotaRow: View {
     let width: CGFloat
     let height: CGFloat
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+    @Environment(\.hudThemePalette) private var palette
 
     init(
         kind: HUDQuotaWindowKind,
@@ -25,9 +26,9 @@ struct HUDQuotaRow: View {
 
     private var accent: Color {
         switch kind {
-        case .fiveHour: return HUDColorPalette.fiveHour
-        case .sevenDay: return HUDColorPalette.sevenDay
-        case .gptReserveWeekly: return HUDColorPalette.gptReserveWeekly
+        case .fiveHour: return palette.fiveHour
+        case .sevenDay: return palette.sevenDay
+        case .gptReserveWeekly: return palette.gptReserveWeekly
         }
     }
 
@@ -58,7 +59,7 @@ struct HUDQuotaRow: View {
     var body: some View {
         ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(HUDColorPalette.elevatedSurface)
+                .fill(palette.elevatedSurface)
 
             // Keep the quota readable at a glance without turning the HUD
             // into a pair of saturated dashboard bars. The accent is a thin
@@ -92,9 +93,9 @@ struct HUDQuotaRow: View {
                     Text(resetText)
                 }
                 .font(.system(size: height * 0.38, weight: .medium, design: .rounded))
-                .foregroundStyle(HUDColorPalette.secondaryText)
+                .foregroundStyle(palette.secondaryText)
             }
-            .foregroundStyle(HUDColorPalette.primaryText)
+            .foregroundStyle(palette.primaryText)
             .lineLimit(1)
             .minimumScaleFactor(0.52)
             .allowsTightening(true)
@@ -134,6 +135,7 @@ struct HUDAccountInfoRow: View {
     let sectionHeight: CGFloat
     let rowHeight: CGFloat
     let scaleFactor: CGFloat
+    @Environment(\.hudThemePalette) private var palette
 
     private var balanceText: String {
         credits?.displayBalance ?? "—"
@@ -144,7 +146,7 @@ struct HUDAccountInfoRow: View {
     }
 
     private var resetColor: Color {
-        (resetCreditCount ?? 0) > 0 ? HUDColorPalette.verificationAction : HUDColorPalette.tertiaryText
+        (resetCreditCount ?? 0) > 0 ? palette.verificationAction : palette.tertiaryText
     }
 
     var body: some View {
@@ -156,7 +158,7 @@ struct HUDAccountInfoRow: View {
                 }
                 if showsCredits, resetCreditCount != nil {
                     Rectangle()
-                        .fill(HUDColorPalette.divider)
+                        .fill(palette.divider)
                         .frame(width: max(0.6, 0.8 * scaleFactor), height: rowHeight * 0.62)
                 }
                 if let resetCreditCount {
@@ -177,20 +179,20 @@ struct HUDAccountInfoRow: View {
         HStack(spacing: max(5, 7 * scaleFactor)) {
             Image(systemName: "wallet.pass")
                 .font(.system(size: max(14, 19 * scaleFactor), weight: .semibold))
-                .foregroundStyle(HUDColorPalette.credits)
+                .foregroundStyle(palette.credits)
             Text("Credits")
                 .font(.system(size: max(12, 15 * scaleFactor), weight: .semibold, design: .rounded))
-                .foregroundStyle(HUDColorPalette.credits)
+                .foregroundStyle(palette.credits)
             Spacer(minLength: 3)
             Text(balanceText)
                 .font(.system(size: max(15, 21 * scaleFactor), weight: .bold, design: .rounded))
-                .foregroundStyle(HUDColorPalette.primaryText)
+                .foregroundStyle(palette.primaryText)
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.62)
             Text("餘額")
                 .font(.system(size: max(9, 11 * scaleFactor), weight: .medium, design: .rounded))
-                .foregroundStyle(HUDColorPalette.secondaryText)
+                .foregroundStyle(palette.secondaryText)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -212,7 +214,7 @@ struct HUDAccountInfoRow: View {
                 if count > 0, let resetCreditCountdownText {
                     Text(resetCreditCountdownText)
                         .font(.system(size: max(8, 10 * scaleFactor), weight: .medium, design: .rounded))
-                        .foregroundStyle(HUDColorPalette.secondaryText)
+                        .foregroundStyle(palette.secondaryText)
                         .lineLimit(1)
                         .minimumScaleFactor(0.72)
                 }
@@ -235,19 +237,20 @@ struct HUDAccountInfoRow: View {
 
     private var divider: some View {
         Rectangle()
-            .fill(HUDColorPalette.divider)
+            .fill(palette.divider)
             .frame(width: width, height: max(0.6, 0.8 * scaleFactor))
     }
 }
 
 struct HUDTokenActivitySummaryView: View, Equatable {
     let summaryMetrics: [TokenActivityMetric]?
-    let feedback: TokenActivityUpdateFeedback?
+    let feedback: TokenHeroUpdateFeedback?
     let width: CGFloat
     let height: CGFloat
     let scaleFactor: CGFloat
     let isStale: Bool
     let reduceMotion: Bool
+    @Environment(\.hudThemePalette) private var palette
 
     private var metrics: [TokenActivityMetric] {
         summaryMetrics ?? TokenActivityPresentation.metrics(for: nil)
@@ -266,34 +269,34 @@ struct HUDTokenActivitySummaryView: View, Equatable {
     var body: some View {
         HStack(spacing: max(6, 8 * scaleFactor)) {
             lifetimeHero(metrics.first ?? TokenActivityMetric(
-                label: TokenActivityPresentation.lifetimeLabel,
+                label: LocalTokenUsageLedgerPresentation.observedLabel,
                 value: "—"
             ))
             Rectangle()
-                .fill(HUDColorPalette.divider)
+                .fill(palette.divider)
                 .frame(width: max(0.6, 0.8 * scaleFactor))
                 .padding(.vertical, max(5, 7 * scaleFactor))
             secondaryGrid(Array(metrics.dropFirst().prefix(4)))
         }
         .padding(.horizontal, max(7, 9 * scaleFactor))
         .frame(width: width, height: height)
-        .background(HUDColorPalette.elevatedSurface, in: RoundedRectangle(cornerRadius: max(7, height * 0.18), style: .continuous))
+        .background(palette.elevatedSurface, in: RoundedRectangle(cornerRadius: max(7, height * 0.18), style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: max(7, height * 0.18), style: .continuous)
-                .stroke(isStale ? HUDColorPalette.warning.opacity(0.62) : HUDColorPalette.token.opacity(0.32), lineWidth: max(0.6, 0.8 * scaleFactor))
+                .stroke(isStale ? palette.warning.opacity(0.62) : palette.token.opacity(0.32), lineWidth: max(0.6, 0.8 * scaleFactor))
         }
         .opacity(isStale ? 0.88 : 1)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Token Activity")
+        .accessibilityLabel("本機 Token 使用與帳號歷史")
         .accessibilityValue(metrics.map { "\($0.label) \($0.value)" }.joined(separator: "；") + (isStale ? "；資料較舊" : ""))
-        .help(isStale ? "帳號歷史摘要（資料較舊）" : "帳號歷史摘要")
+        .help(isStale ? "本機觀測 Token；次要帳號歷史資料較舊" : "本機觀測 Token 與帳號歷史摘要")
     }
 
     private func lifetimeHero(_ metric: TokenActivityMetric) -> some View {
         VStack(alignment: .leading, spacing: max(2, 3 * scaleFactor)) {
             Label(metric.label, systemImage: "cylinder.split.1x2.fill")
                 .font(.system(size: max(8, 11 * scaleFactor), weight: .semibold, design: .rounded))
-                .foregroundStyle(HUDColorPalette.token)
+                .foregroundStyle(palette.token)
             if let feedback {
                 HUDTokenOdometerView(
                     feedback: feedback,
@@ -332,13 +335,13 @@ struct HUDTokenActivitySummaryView: View, Equatable {
         VStack(alignment: .leading, spacing: max(0.5, 1 * scaleFactor)) {
             Text(metric.label)
                 .font(.system(size: max(6, 8 * scaleFactor), weight: .medium, design: .rounded))
-                .foregroundStyle(HUDColorPalette.secondaryText)
+                .foregroundStyle(palette.secondaryText)
                 .lineLimit(1)
                 .minimumScaleFactor(0.62)
                 .allowsTightening(true)
             Text(metric.value)
                 .font(.system(size: max(8, 11 * scaleFactor), weight: .bold, design: .rounded))
-                .foregroundStyle(HUDColorPalette.primaryText)
+                .foregroundStyle(palette.primaryText)
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.42)
@@ -358,6 +361,7 @@ struct HUDTokenActivitySummaryView: View, Equatable {
 struct HUDTokenStaticOdometerView: View {
     let value: String
     let scaleFactor: CGFloat
+    @Environment(\.hudThemePalette) private var palette
 
     private var characters: [Character] { Array(value) }
     private var fontSize: CGFloat { max(11, 17 * scaleFactor) }
@@ -370,18 +374,18 @@ struct HUDTokenStaticOdometerView: View {
                 if character.isNumber {
                     Text(String(character))
                         .font(.system(size: fontSize, weight: .bold, design: .rounded))
-                        .foregroundStyle(HUDColorPalette.primaryText)
+                        .foregroundStyle(palette.primaryText)
                         .monospacedDigit()
                         .frame(width: slotWidth, height: slotHeight)
-                        .background(HUDColorPalette.graphiteControl.opacity(0.82), in: RoundedRectangle(cornerRadius: max(2.5, 4 * scaleFactor), style: .continuous))
+                        .background(palette.graphiteControl.opacity(0.82), in: RoundedRectangle(cornerRadius: max(2.5, 4 * scaleFactor), style: .continuous))
                         .overlay {
                             RoundedRectangle(cornerRadius: max(2.5, 4 * scaleFactor), style: .continuous)
-                                .stroke(HUDColorPalette.token.opacity(0.34), lineWidth: max(0.6, 0.8 * scaleFactor))
+                                .stroke(palette.token.opacity(0.34), lineWidth: max(0.6, 0.8 * scaleFactor))
                         }
                 } else {
                     Text(String(character))
                         .font(.system(size: fontSize, weight: .bold, design: .rounded))
-                        .foregroundStyle(HUDColorPalette.secondaryText)
+                        .foregroundStyle(palette.secondaryText)
                         .frame(width: max(3, 5 * scaleFactor), height: slotHeight)
                 }
             }
@@ -393,14 +397,14 @@ struct HUDTokenStaticOdometerView: View {
 }
 
 struct HUDTokenOdometerView: View {
-    let feedback: TokenActivityUpdateFeedback
+    let feedback: TokenHeroUpdateFeedback
     let scaleFactor: CGFloat
     let reduceMotion: Bool
 
     private var slots: [TokenOdometerSlot] {
         TokenOdometerPresentation.slots(
-            previous: feedback.previousLifetimeTokens,
-            current: feedback.lifetimeTokens
+            previous: feedback.previousTokens,
+            current: feedback.tokens
         )
     }
 
@@ -447,6 +451,7 @@ struct HUDTokenOdometerDigit: View {
     let scaleFactor: CGFloat
     let reduceMotion: Bool
     let reelPlan: TokenOdometerReelPlan?
+    @Environment(\.hudThemePalette) private var palette
 
     @State private var animatedStep = 0
 
@@ -467,7 +472,7 @@ struct HUDTokenOdometerDigit: View {
     private var characterText: some View {
         Text(String(slot.currentCharacter == " " ? Character("\u{00A0}") : slot.currentCharacter))
             .font(.system(size: fontSize, weight: .bold, design: .rounded))
-            .foregroundStyle(HUDColorPalette.primaryText)
+            .foregroundStyle(palette.primaryText)
             .monospacedDigit()
             .lineLimit(1)
             .minimumScaleFactor(0.42)
@@ -477,7 +482,7 @@ struct HUDTokenOdometerDigit: View {
     private func reelDigitText(_ digit: Int) -> some View {
         Text(String(digit))
             .font(.system(size: fontSize, weight: .bold, design: .rounded))
-            .foregroundStyle(HUDColorPalette.primaryText)
+            .foregroundStyle(palette.primaryText)
             .monospacedDigit()
             .lineLimit(1)
             .minimumScaleFactor(0.42)
@@ -547,14 +552,14 @@ struct HUDTokenOdometerDigit: View {
         if slot.currentCharacter.isNumber {
             motionContent
                 .frame(width: slotWidth, height: slotHeight)
-                .background(HUDColorPalette.graphiteControl.opacity(0.82), in: RoundedRectangle(cornerRadius: max(2.5, 4 * scaleFactor), style: .continuous))
+                .background(palette.graphiteControl.opacity(0.82), in: RoundedRectangle(cornerRadius: max(2.5, 4 * scaleFactor), style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: max(2.5, 4 * scaleFactor), style: .continuous)
-                        .stroke(HUDColorPalette.token.opacity(reelPlan == nil ? 0.34 : 0.72), lineWidth: max(0.6, 0.8 * scaleFactor))
+                        .stroke(palette.token.opacity(reelPlan == nil ? 0.34 : 0.72), lineWidth: max(0.6, 0.8 * scaleFactor))
                 }
         } else {
             staticCharacterText
-                .foregroundStyle(HUDColorPalette.secondaryText)
+                .foregroundStyle(palette.secondaryText)
                 .frame(width: separatorWidth, height: slotHeight)
         }
     }
@@ -573,11 +578,12 @@ struct HUDActionCard: View {
     let isDisabled: Bool
     let helpText: String
     let accessibilityLabel: String
-    let iconColor: Color
+    let iconColor: Color?
     let fillStyle: FillStyle
     let width: CGFloat
     let height: CGFloat
     @Binding var isHovered: Bool
+    @Environment(\.hudThemePalette) private var palette
 
     private var cornerRadius: CGFloat {
         max(5, height * 0.14)
@@ -595,7 +601,7 @@ struct HUDActionCard: View {
         isDisabled: Bool,
         helpText: String,
         accessibilityLabel: String,
-        iconColor: Color = HUDColorPalette.primaryText,
+        iconColor: Color? = nil,
         fillStyle: FillStyle = .neutral,
         width: CGFloat,
         height: CGFloat,
@@ -618,7 +624,7 @@ struct HUDActionCard: View {
     private var imageForegroundColor: Color {
         switch fillStyle {
         case .neutral:
-            return iconColor.opacity(isHovered ? 0.96 : 0.78)
+            return (iconColor ?? palette.primaryText).opacity(isHovered ? 0.96 : 0.78)
         case .filled(_, let foreground):
             return foreground.opacity(isHovered ? 0.98 : 0.96)
         }
@@ -627,7 +633,7 @@ struct HUDActionCard: View {
     private var textForegroundColor: Color {
         switch fillStyle {
         case .neutral:
-            return HUDColorPalette.primaryText
+            return palette.primaryText
         case .filled(_, let foreground):
             return foreground.opacity(isHovered ? 0.98 : 0.96)
         }
@@ -636,7 +642,7 @@ struct HUDActionCard: View {
     private var backgroundColor: Color {
         switch fillStyle {
         case .neutral:
-            return isHovered ? HUDColorPalette.controlSurface : HUDColorPalette.elevatedSurface
+            return isHovered ? palette.controlSurface : palette.elevatedSurface
         case .filled(let background, _):
             return background.opacity(isHovered ? 0.28 : 0.16)
         }
@@ -661,20 +667,24 @@ struct HUDActionCard: View {
             // hit-test rectangle. A max-sized label can otherwise retain an
             // intrinsic Button hit region near the card's rounded edges.
             .frame(width: width, height: height)
-            .contentShape(shape)
+            // The card remains visually rounded, but its full rectangular
+            // bounds are the intentional action hit target. This keeps
+            // corner/edge clicks responsive without changing mouse-up action
+            // semantics.
+            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(HUDImmediateButtonStyle(cornerRadius: cornerRadius))
         .frame(width: width, height: height)
         .background(backgroundColor, in: shape)
         .overlay {
             switch fillStyle {
             case .neutral:
-                shape.stroke(HUDColorPalette.border, lineWidth: 0.8 * scaleFactor)
+                shape.stroke(palette.border, lineWidth: 0.8 * scaleFactor)
             case .filled(let background, _):
                 shape.stroke(background.opacity(isHovered ? 0.78 : 0.5), lineWidth: 0.8 * scaleFactor)
             }
         }
-        .contentShape(shape)
+        .contentShape(Rectangle())
         .disabled(isDisabled)
         .onHover { isHovered = $0 }
         .help(helpText)
@@ -683,10 +693,28 @@ struct HUDActionCard: View {
     }
 }
 
+/// Keeps the existing mouse-up action semantics while making acceptance
+/// visible on the first mouse-down. This is intentionally a presentation-only
+/// style: it does not invoke the action early or bypass any in-flight gate.
+struct HUDImmediateButtonStyle: ButtonStyle {
+    let cornerRadius: CGFloat
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Color.white.opacity(configuration.isPressed ? 0.16 : 0))
+            }
+            .scaleEffect(configuration.isPressed ? 0.985 : 1)
+            .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+    }
+}
+
 struct HUDUpdateBadge: View {
     let state: HUDUpdateBadgeState
     let height: CGFloat
     let action: () -> Void
+    @Environment(\.hudThemePalette) private var palette
 
     private var isActionable: Bool { state.isActionable }
 
@@ -710,9 +738,9 @@ struct HUDUpdateBadge: View {
 
     private var iconColor: Color {
         switch state {
-        case .available: return HUDColorPalette.update
-        case .error: return HUDColorPalette.error
-        default: return HUDColorPalette.secondaryText
+        case .available: return palette.update
+        case .error: return palette.error
+        default: return palette.secondaryText
         }
     }
 
@@ -732,7 +760,7 @@ struct HUDUpdateBadge: View {
                 .foregroundStyle(iconColor)
             Text(title)
                 .font(.system(size: titleSize, weight: .semibold, design: .rounded))
-                .foregroundStyle(HUDColorPalette.primaryText)
+                .foregroundStyle(palette.primaryText)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
                 .allowsTightening(true)
@@ -771,8 +799,8 @@ struct HUDUpdateBadge: View {
         }
         .buttonStyle(.plain)
         .disabled(!isActionable)
-        .background(HUDColorPalette.controlSurface, in: Capsule())
-        .overlay { Capsule().stroke(HUDColorPalette.border, lineWidth: 0.6) }
+        .background(palette.controlSurface, in: Capsule())
+        .overlay { Capsule().stroke(palette.border, lineWidth: 0.6) }
         .help(isActionable ? (state.isAvailable ? "開啟更新詳情" : "重新檢查更新") : accessibilityValue)
         .accessibilityLabel(title)
         .accessibilityValue(accessibilityValue)
@@ -785,19 +813,20 @@ struct HUDUpdateBadge: View {
 struct HUDPlanBadge: View {
     let plan: String
     let height: CGFloat
+    @Environment(\.hudThemePalette) private var palette
 
     private var normalizedPlan: String {
         plan.lowercased().replacingOccurrences(of: "_", with: " ")
     }
 
     private var tint: Color {
-        if normalizedPlan.contains("pro") { return HUDColorPalette.verificationAction }
-        if normalizedPlan.contains("plus") { return HUDColorPalette.sevenDay }
-        if normalizedPlan.contains("business") { return HUDColorPalette.fiveHour }
-        if normalizedPlan.contains("team") { return HUDColorPalette.token }
-        if normalizedPlan.contains("enterprise") { return HUDColorPalette.token }
-        if normalizedPlan.contains("free") { return HUDColorPalette.secondaryText }
-        return HUDColorPalette.secondaryText
+        if normalizedPlan.contains("pro") { return palette.verificationAction }
+        if normalizedPlan.contains("plus") { return palette.sevenDay }
+        if normalizedPlan.contains("business") { return palette.fiveHour }
+        if normalizedPlan.contains("team") { return palette.token }
+        if normalizedPlan.contains("enterprise") { return palette.token }
+        if normalizedPlan.contains("free") { return palette.secondaryText }
+        return palette.secondaryText
     }
 
     var body: some View {
@@ -819,18 +848,24 @@ struct HUDPlanBadge: View {
 
 struct HUDPresentationBoundary<Content: View>: View, Equatable {
     let presentation: HUDPresentation
+    /// Theme is a stable render input, not an identity reset. Including it in
+    /// equality guarantees palette repaint while preserving child state such
+    /// as an in-flight Token Reel generation.
+    let theme: HUDTheme
     private let content: (HUDPresentation) -> Content
 
     init(
         presentation: HUDPresentation,
+        theme: HUDTheme = .neonPurple,
         @ViewBuilder content: @escaping (HUDPresentation) -> Content
     ) {
         self.presentation = presentation
+        self.theme = theme
         self.content = content
     }
 
     static func == (lhs: HUDPresentationBoundary<Content>, rhs: HUDPresentationBoundary<Content>) -> Bool {
-        lhs.presentation == rhs.presentation
+        lhs.presentation == rhs.presentation && lhs.theme == rhs.theme
     }
 
     var body: some View { content(presentation) }
