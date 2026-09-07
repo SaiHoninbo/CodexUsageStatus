@@ -343,6 +343,7 @@ struct CodexFloatingHUDView: View {
     @ViewBuilder
     private func hudContainer(presentation: HUDPresentation) -> some View {
         let metrics = HUDMetrics(scaleLevel: presentation.scaleLevel)
+        let cornerRadius = FloatingHUDLayout.cornerRadius(for: presentation.scaleLevel)
         let panelSize = metrics.panelSize(
             quotaRowCount: presentation.quotaRowCount,
             includesAccountInfoRow: presentation.showsAccountInfoRow
@@ -382,21 +383,27 @@ struct CodexFloatingHUDView: View {
         }
         .padding(metrics.outerPadding)
         .frame(width: panelSize.width, height: panelSize.height, alignment: .topLeading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: presentation.scaleLevel), style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: presentation.scaleLevel), style: .continuous)
-                .fill(selectedHUDPalette.panelSurface)
+        // Keep theme surfaces behind the content.  They are panel chrome, not
+        // a foreground scrim: placing them in an overlay washes out text,
+        // controls, and the Token Reel when a theme uses an opaque surface.
+        .background {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(.regularMaterial)
                 .overlay {
-                    RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: presentation.scaleLevel), style: .continuous)
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(selectedHUDPalette.panelSurface)
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                         .fill(selectedHUDPalette.panelTint)
                 }
-                .overlay {
-                    RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: presentation.scaleLevel), style: .continuous)
-                        .stroke(selectedHUDPalette.panelBorder, lineWidth: 1.0)
-                }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .stroke(selectedHUDPalette.panelBorder, lineWidth: 1.0)
                 .allowsHitTesting(false)
         }
-        .clipShape(RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: presentation.scaleLevel), style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Codex 用量")
         .accessibilityValue(hudAccessibilityValue(presentation: presentation))
