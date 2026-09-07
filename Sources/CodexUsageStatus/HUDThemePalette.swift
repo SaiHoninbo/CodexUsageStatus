@@ -49,15 +49,39 @@ enum HUDThemeRotationInterval: Int, CaseIterable, Codable, Equatable, Identifiab
     }
 }
 
-/// All semantic colors needed by HUD presentation components.  Keeping this
-/// as a value lets one theme change invalidate the HUD without touching the
-/// model, ledger, token reel, or popover surface.
+/// The AppKit/SwiftUI appearance contract for the floating HUD.  This is
+/// intentionally HUD-only; the product popover keeps its own appearance.
+enum HUDThemeAppearance: String, Equatable {
+    case dark
+    case light
+
+    var colorScheme: ColorScheme {
+        switch self {
+        case .dark: return .dark
+        case .light: return .light
+        }
+    }
+}
+
+/// Component-level semantic tokens for the floating HUD. Keeping surfaces,
+/// appearance, and action emphasis here lets one theme change repaint the HUD
+/// without touching the model, ledger, Token Reel, or popover surface.
 struct HUDThemePalette: Equatable {
+    let appearance: HUDThemeAppearance
+    let panelSurface: Color
     let panelTint: Color
+    let panelBorder: Color
     let surface: Color
     let elevatedSurface: Color
     let controlSurface: Color
     let graphiteControl: Color
+    let tokenHeroSurface: Color
+    let tokenHeroBorder: Color
+    let fiveHourSurface: Color
+    let sevenDaySurface: Color
+    let gptReserveSurface: Color
+    let accountInfoSurface: Color
+    let neutralActionSurface: Color
     let primaryText: Color
     let secondaryText: Color
     let tertiaryText: Color
@@ -76,16 +100,31 @@ struct HUDThemePalette: Equatable {
     let fixAction: Color
     let verificationAction: Color
     let commitPushAction: Color
+    let filledActionForeground: Color
+    let commitPushForeground: Color
+    let filledActionOpacity: Double
+    let filledActionHoverOpacity: Double
+    let filledActionPressedOpacity: Double
     let update: Color
     let warning: Color
     let error: Color
 
     static let neonPurple = HUDThemePalette(
-        panelTint: Color(red: 0.067, green: 0.075, blue: 0.090).opacity(0.60),
+        appearance: .dark,
+        panelSurface: Color(red: 0.067, green: 0.075, blue: 0.090).opacity(0.82),
+        panelTint: Color(red: 0.067, green: 0.075, blue: 0.090).opacity(0.16),
+        panelBorder: Color(red: 0.68, green: 0.38, blue: 1.0).opacity(0.62),
         surface: Color.white.opacity(0.075),
         elevatedSurface: Color(red: 0.098, green: 0.114, blue: 0.133).opacity(0.92),
         controlSurface: Color(red: 0.137, green: 0.157, blue: 0.188).opacity(0.92),
         graphiteControl: Color(red: 0.137, green: 0.157, blue: 0.188),
+        tokenHeroSurface: Color(red: 0.098, green: 0.114, blue: 0.133).opacity(0.96),
+        tokenHeroBorder: Color(red: 0.68, green: 0.38, blue: 1.0).opacity(0.72),
+        fiveHourSurface: Color(red: 0.20, green: 0.11, blue: 0.10).opacity(0.82),
+        sevenDaySurface: Color(red: 0.08, green: 0.13, blue: 0.25).opacity(0.82),
+        gptReserveSurface: Color(red: 0.07, green: 0.20, blue: 0.19).opacity(0.82),
+        accountInfoSurface: Color(red: 0.13, green: 0.11, blue: 0.20).opacity(0.86),
+        neutralActionSurface: Color(red: 0.137, green: 0.157, blue: 0.188).opacity(0.94),
         primaryText: Color.white.opacity(0.96),
         secondaryText: Color.white.opacity(0.72),
         tertiaryText: Color.white.opacity(0.48),
@@ -104,17 +143,32 @@ struct HUDThemePalette: Equatable {
         fixAction: Color(red: 0.82, green: 0.25, blue: 0.10),
         verificationAction: Color(red: 0.48, green: 0.18, blue: 0.94),
         commitPushAction: Color(red: 0.28, green: 0.16, blue: 0.72),
+        filledActionForeground: .white,
+        commitPushForeground: .white,
+        filledActionOpacity: 0.36,
+        filledActionHoverOpacity: 0.52,
+        filledActionPressedOpacity: 0.64,
         update: Color(red: 1.0, green: 0.43, blue: 0.20),
         warning: Color(red: 1.0, green: 0.43, blue: 0.20),
         error: Color(red: 1.0, green: 0.27, blue: 0.36)
     )
 
     static let lightSky = HUDThemePalette(
-        panelTint: Color(red: 0.82, green: 0.93, blue: 1.0).opacity(0.46),
+        appearance: .light,
+        panelSurface: Color.white.opacity(0.84),
+        panelTint: Color(red: 0.82, green: 0.93, blue: 1.0).opacity(0.10),
+        panelBorder: Color(red: 0.35, green: 0.65, blue: 0.95).opacity(0.58),
         surface: Color.white.opacity(0.54),
         elevatedSurface: Color.white.opacity(0.76),
         controlSurface: Color(red: 0.84, green: 0.93, blue: 1.0).opacity(0.80),
         graphiteControl: Color(red: 0.88, green: 0.95, blue: 1.0),
+        tokenHeroSurface: Color.white.opacity(0.82),
+        tokenHeroBorder: Color(red: 0.10, green: 0.48, blue: 0.90).opacity(0.55),
+        fiveHourSurface: Color(red: 1.0, green: 0.93, blue: 0.86).opacity(0.88),
+        sevenDaySurface: Color(red: 0.86, green: 0.94, blue: 1.0).opacity(0.90),
+        gptReserveSurface: Color(red: 0.86, green: 0.98, blue: 0.94).opacity(0.90),
+        accountInfoSurface: Color.white.opacity(0.88),
+        neutralActionSurface: Color.white.opacity(0.88),
         primaryText: Color(red: 0.04, green: 0.10, blue: 0.23),
         secondaryText: Color(red: 0.12, green: 0.25, blue: 0.43).opacity(0.86),
         tertiaryText: Color(red: 0.19, green: 0.32, blue: 0.48).opacity(0.68),
@@ -133,17 +187,32 @@ struct HUDThemePalette: Equatable {
         fixAction: Color(red: 1.0, green: 0.47, blue: 0.14),
         verificationAction: Color(red: 0.48, green: 0.30, blue: 0.92),
         commitPushAction: Color(red: 0.04, green: 0.63, blue: 0.72),
+        filledActionForeground: .white,
+        commitPushForeground: .white,
+        filledActionOpacity: 0.76,
+        filledActionHoverOpacity: 0.88,
+        filledActionPressedOpacity: 0.96,
         update: Color(red: 0.95, green: 0.40, blue: 0.13),
         warning: Color(red: 0.95, green: 0.40, blue: 0.13),
         error: Color(red: 0.84, green: 0.12, blue: 0.18)
     )
 
     static let mario = HUDThemePalette(
-        panelTint: Color(red: 0.98, green: 0.17, blue: 0.10).opacity(0.54),
+        appearance: .light,
+        panelSurface: Color(red: 1.0, green: 0.97, blue: 0.88).opacity(0.90),
+        panelTint: Color(red: 0.98, green: 0.83, blue: 0.48).opacity(0.08),
+        panelBorder: Color(red: 0.88, green: 0.18, blue: 0.06).opacity(0.62),
         surface: Color.white.opacity(0.68),
         elevatedSurface: Color(red: 1.0, green: 0.95, blue: 0.78).opacity(0.86),
         controlSurface: Color(red: 1.0, green: 0.82, blue: 0.20).opacity(0.82),
         graphiteControl: Color(red: 1.0, green: 0.92, blue: 0.70),
+        tokenHeroSurface: Color(red: 0.98, green: 0.18, blue: 0.08).opacity(0.94),
+        tokenHeroBorder: Color(red: 1.0, green: 0.72, blue: 0.02).opacity(0.88),
+        fiveHourSurface: Color(red: 1.0, green: 0.90, blue: 0.84).opacity(0.92),
+        sevenDaySurface: Color(red: 0.87, green: 0.94, blue: 1.0).opacity(0.92),
+        gptReserveSurface: Color(red: 0.88, green: 1.0, blue: 0.90).opacity(0.92),
+        accountInfoSurface: Color(red: 1.0, green: 0.96, blue: 0.79).opacity(0.94),
+        neutralActionSurface: Color.white.opacity(0.90),
         primaryText: Color(red: 0.13, green: 0.07, blue: 0.05),
         secondaryText: Color(red: 0.25, green: 0.12, blue: 0.08).opacity(0.82),
         tertiaryText: Color(red: 0.33, green: 0.18, blue: 0.10).opacity(0.64),
@@ -162,6 +231,11 @@ struct HUDThemePalette: Equatable {
         fixAction: Color(red: 0.94, green: 0.12, blue: 0.08),
         verificationAction: Color(red: 0.44, green: 0.18, blue: 0.90),
         commitPushAction: Color(red: 1.0, green: 0.72, blue: 0.02),
+        filledActionForeground: .white,
+        commitPushForeground: Color(red: 0.12, green: 0.08, blue: 0.02),
+        filledActionOpacity: 0.90,
+        filledActionHoverOpacity: 1.0,
+        filledActionPressedOpacity: 1.0,
         update: Color(red: 0.96, green: 0.48, blue: 0.02),
         warning: Color(red: 0.96, green: 0.48, blue: 0.02),
         error: Color(red: 0.92, green: 0.08, blue: 0.05)

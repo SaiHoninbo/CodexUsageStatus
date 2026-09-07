@@ -55,6 +55,15 @@ final class UsageViewModel: ObservableObject {
     @Published private(set) var activeTurn: TurnActivitySnapshot = .idle {
         didSet { refreshStatusItemPresentation() }
     }
+    /// Rollout/session observation is the single user-visible Turn authority.
+    /// These capabilities are factual limits of the metadata-only source, not
+    /// user preferences and not a second polling subsystem.
+    var localTurnObservationCapabilities: CodexLocalTurnObservationCapabilities {
+        CodexLocalTurnObservationCapabilities.current
+    }
+    var turnFailureNotificationSupported: Bool { localTurnObservationCapabilities.failed }
+    var turnInterruptedNotificationSupported: Bool { localTurnObservationCapabilities.interrupted }
+    var turnContentNotificationSupported: Bool { localTurnObservationCapabilities.content }
     @Published private(set) var notifyOnTurnSuccess: Bool
     @Published private(set) var notifyOnTurnFailure: Bool
     @Published private(set) var notifyOnTurnInterrupted: Bool
@@ -82,6 +91,7 @@ final class UsageViewModel: ObservableObject {
     private var tokenActivityStore: TokenActivityStore
     private var localTokenUsageLedgerStore: LocalTokenUsageLedgerStore
     private var localUsageObserver: CodexLocalUsageObserver?
+    private var activeTurnSourceKey: String?
     private let profileStore: AccountProfileStore
     private let legacyHistoryURL: URL
     private let legacyTokenActivityURL: URL
@@ -290,20 +300,15 @@ final class UsageViewModel: ObservableObject {
             self.selectedResetCreditID = nil
             self.resetCreditOperationState = .idle
             self.activeTurn = .unknownSnapshot()
+            self.activeTurnSourceKey = nil
             self.accountHealthState = .loading
         }
-        client.onTurnEvent = { [weak self] event in
-            guard let self else { return }
-            guard self.defaultClientEnabled else { return }
-            self.activeTurn = event
-            self.evaluateTurnNotification(event)
-        }
-        client.onTurnTokenUsage = { [weak self] threadID, turnID, tokenTotal in
-            guard let self, self.activeTurn.threadID == threadID, self.activeTurn.turnID == turnID else { return }
-            guard self.defaultClientEnabled else { return }
-            self.activeTurn.tokenTotal = tokenTotal
-            self.activeTurn.receivedAt = Date()
-        }
+        // App Server remains the quota/account transport, but its Turn events
+        // are deliberately not projected into the user-visible Turn card.
+        // Codex Desktop rollout/session metadata is the single activity
+        // authority, which avoids two competing timelines.
+        client.onTurnEvent = nil
+        client.onTurnTokenUsage = nil
         client.onResetCreditResult = { [weak self] outcome in
             guard let self else { return }
             guard self.defaultClientEnabled else { return }
@@ -332,6 +337,9 @@ final class UsageViewModel: ObservableObject {
             },
             turnCompletionHandler: { [weak self] profileID, record in
                 self?.handleLocalTurnCompletion(profileID: profileID, record: record)
+            },
+            turnActivityHandler: { [weak self] event in
+                self?.handleLocalTurnActivity(event)
             }
         )
     }
@@ -503,6 +511,7 @@ final class UsageViewModel: ObservableObject {
         accountProfiles = profileStore.accountProfiles()
         refreshLocalUsageObserverRoots()
         activeTurn = .unknownSnapshot()
+        activeTurnSourceKey = nil
         selectedResetCreditID = nil
         resetCreditOperationState = .idle
         resetCreditMessage = "已切換到 \(profile.displayName)"
@@ -544,6 +553,7 @@ final class UsageViewModel: ObservableObject {
         accountProfiles = profileStore.accountProfiles()
         refreshLocalUsageObserverRoots()
         activeTurn = .unknownSnapshot()
+        activeTurnSourceKey = nil
         selectedResetCreditID = nil
         resetCreditOperationState = .idle
         resetCreditMessage = "已建立 \(profile.displayName)"
@@ -1024,21 +1034,13 @@ final class UsageViewModel: ObservableObject {
             self.resetCredits = nil
             self.selectedResetCreditID = nil
             self.activeTurn = .unknownSnapshot()
+            self.activeTurnSourceKey = nil
             self.accountHealthState = .loading
         }
-        worker.onTurnEvent = { [weak self] _, event in
-            guard let self, self.currentProfileID == id else { return }
-            guard self.workerGenerations[id] == generation else { return }
-            self.activeTurn = event
-            self.evaluateTurnNotification(event)
-        }
-        worker.onTurnTokenUsage = { [weak self] _, threadID, turnID, total in
-            guard let self, self.currentProfileID == id,
-                  self.activeTurn.threadID == threadID, self.activeTurn.turnID == turnID else { return }
-            guard self.workerGenerations[id] == generation else { return }
-            self.activeTurn.tokenTotal = total
-            self.activeTurn.receivedAt = Date()
-        }
+        // Managed workers retain App Server transport for quota/account data;
+        // their Turn callbacks are not a second visible activity authority.
+        worker.onTurnEvent = nil
+        worker.onTurnTokenUsage = nil
         worker.onResetCreditResult = { [weak self] _, outcome in
             guard let self, self.currentProfileID == id else { return }
             guard self.workerGenerations[id] == generation else { return }
@@ -1197,6 +1199,96 @@ final class UsageViewModel: ObservableObject {
         }
     }
 
+    private func handleLocalTurnActivity(_ event: CodexLocalTurnActivityEvent) {
+        // Only the physical root selected by the current account context may
+        // drive the visible Turn card. Other roots still feed their own local
+        // ledger, but can never overwrite the current account's activity.
+        let selectedProfile = currentProfile
+        var managedHomeURL: URL?
+        if let selectedProfile, selectedProfile.isManaged {
+            managedHomeURL = profileStore.codexHomeURL(for: selectedProfile)
+        }
+        let defaultHomeURL = CodexLocalUsageObservationRoot.canonicalDefaultHomeURL()
+        guard CodexLocalTurnActivityAuthority.acceptsCurrentRoot(
+            event: event,
+            currentProfileID: currentProfileID,
+            currentProfileIsManaged: selectedProfile?.isManaged == true,
+            managedHomeURL: managedHomeURL,
+            defaultHomeURL: defaultHomeURL
+        ) else { return }
+        let sourceKey = CodexLocalTurnActivityAuthority.sourceKey(
+            profileID: event.profileID,
+            physicalRootURL: event.physicalRootURL
+        )
+
+        switch event.kind {
+        case .started:
+            activeTurnSourceKey = sourceKey
+            activeTurn = TurnActivitySnapshot(
+                state: .active,
+                threadID: event.threadID,
+                turnID: event.turnID,
+                startedAt: event.startedAt ?? event.observedAt,
+                completedAt: nil,
+                elapsedSeconds: 0,
+                tokenTotal: nil,
+                content: nil,
+                errorMessage: nil,
+                receivedAt: event.observedAt
+            )
+
+        case .tokenUpdated:
+            guard CodexLocalTurnActivityAuthority.matchesActiveTurn(
+                      event: event,
+                      activeTurn: activeTurn,
+                      activeTurnSourceKey: activeTurnSourceKey,
+                      sourceKey: sourceKey
+                  ),
+                  let tokenTotal = event.turnTokenTotal else { return }
+            activeTurn.tokenTotal = tokenTotal
+            activeTurn.receivedAt = event.observedAt
+
+        case .completed, .failed, .interrupted:
+            guard CodexLocalTurnActivityAuthority.acceptsTerminal(
+                event: event,
+                activeTurn: activeTurn,
+                activeTurnSourceKey: activeTurnSourceKey,
+                sourceKey: sourceKey
+            ) else { return }
+            let state: TurnActivityState
+            let message: String?
+            switch event.kind {
+            case .completed:
+                state = .completed
+                message = nil
+            case .failed:
+                state = .failed
+                message = "Codex Turn 發生錯誤"
+            case .interrupted:
+                state = .interrupted
+                message = "Codex Turn 已中斷"
+            default:
+                return
+            }
+            activeTurnSourceKey = sourceKey
+            activeTurn = TurnActivitySnapshot(
+                state: state,
+                threadID: event.threadID,
+                turnID: event.turnID,
+                startedAt: event.startedAt ?? activeTurn.startedAt,
+                completedAt: event.completedAt ?? event.observedAt,
+                elapsedSeconds: event.durationSeconds ?? activeTurn.elapsedSeconds,
+                tokenTotal: activeTurn.tokenTotal,
+                content: nil,
+                errorMessage: message,
+                receivedAt: event.observedAt
+            )
+            // Rollouts intentionally expose metadata only. Never pass the
+            // opt-in content preference into this source's notification path.
+            evaluateTurnNotification(activeTurn, contentEnabled: false)
+        }
+    }
+
     private func handleLocalTurnCompletion(
         profileID: UUID?,
         record: CodexLocalTurnCompletionRecord
@@ -1213,13 +1305,7 @@ final class UsageViewModel: ObservableObject {
 
     private func refreshLocalUsageObserverRoots() {
         guard let localUsageObserver else { return }
-        let defaultHome: URL
-        if let configured = ProcessInfo.processInfo.environment["CODEX_HOME"], !configured.isEmpty {
-            defaultHome = URL(fileURLWithPath: configured, isDirectory: true)
-        } else {
-            defaultHome = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".codex", isDirectory: true)
-        }
+        let defaultHome = CodexLocalUsageObservationRoot.canonicalDefaultHomeURL()
         // The physical default CODEX_HOME is a stable machine observation
         // source. It must not change high-water namespace when the selected
         // UsageStatus account changes; managed homes carry their own profile.
@@ -1455,7 +1541,7 @@ final class UsageViewModel: ObservableObject {
         }
     }
 
-    private func evaluateTurnNotification(_ event: TurnActivitySnapshot) {
+    private func evaluateTurnNotification(_ event: TurnActivitySnapshot, contentEnabled: Bool? = nil) {
         turnNotificationService.evaluate(
             event: event,
             profileID: currentProfileID,
@@ -1465,7 +1551,7 @@ final class UsageViewModel: ObservableObject {
                 notifyOnInterrupted: notifyOnTurnInterrupted,
                 notifyOnLongRunning: notifyOnLongRunningTurn,
                 longRunningThresholdMinutes: longRunningThresholdMinutes,
-                showContentInNotifications: showTurnContentInNotifications,
+                showContentInNotifications: contentEnabled ?? (showTurnContentInNotifications && turnContentNotificationSupported),
                 soundEnabled: notificationSoundEnabled
             )
         )
@@ -1490,6 +1576,7 @@ final class UsageViewModel: ObservableObject {
         if needsProfileLoad {
             switchToProfile(selection.profile)
             activeTurn = .unknownSnapshot()
+            activeTurnSourceKey = nil
             selectedResetCreditID = nil
             resetCreditMessage = "已切換到 \(selection.profile.displayName)"
             resetCreditOperationState = .idle

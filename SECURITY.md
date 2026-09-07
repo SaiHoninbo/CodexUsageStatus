@@ -10,12 +10,29 @@ The public repository and its release assets must never contain:
 
 - ChatGPT credentials, refresh tokens, access tokens, API keys, or `auth.json`
 - prompt text, conversation text, thread titles, or raw App Server messages
+- rollout/session prompt or conversation content (the activity observer is
+  metadata-only and read-only)
 - local quota history, token-activity history, profile indexes, or account data
 - machine-specific absolute paths that identify a developer's home directory
 
 The app may create local state at runtime under the user's Application Support
 directory. That state is not part of the repository or release ZIP and should
 remain user-only readable/writable.
+
+## Desktop activity authority
+
+The visible Turn state uses read-only Codex Desktop rollout/session metadata
+under known `CODEX_HOME` roots. The observer records only stable lifecycle
+identifiers, timestamps, durations, and turn-local token totals. It never reads
+or persists prompt text, conversation text, thread titles, agent messages, or
+raw rollout content. Existing files are seeded at EOF, and physical root
+identity is retained so managed profiles cannot overwrite the default profile's
+activity.
+
+The local App Server remains the transport authority for quota, account
+identity, Reset Credit, and other product data, but its Turn callbacks are not a
+second user-visible activity source. Turn notification content is disabled
+because the rollout authority currently exposes metadata only.
 
 ## Public-repository hygiene
 

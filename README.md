@@ -66,12 +66,30 @@ poller.
 
 The menu-bar title stays focused on the active account's quota, for example `Codex 78%`. Token activity and reset-credit details remain in the popover instead of replacing the quota summary.
 
+### Desktop Turn activity
+
+The Overview Turn card is sourced from Codex Desktop's local rollout/session
+JSONL under the known `CODEX_HOME` roots. It observes lifecycle metadata such as
+Turn start, turn-local token totals, completion, failure, and interruption;
+private App Server Turn callbacks remain transport-only and do not compete with
+that visible timeline. The observer is read-only, starts existing files at
+their current end, and does not create a second Codex process.
+
+This path is metadata-first: it does not read or persist prompts, conversation
+text, thread titles, agent messages, or raw rollout content. Turn notification
+content is therefore disabled until a safe content capability exists. Quota,
+account identity, Reset Credit, and other App Server-backed data continue to use
+the local App Server transport.
+
 ## Account and privacy boundary
 
 The app talks to the local Codex App Server over its stdio interface. It does not use a private web endpoint, inject UI into Codex, or manage API keys.
 
 - The public repository, release ZIP, history files, Token Activity files, profile index, and logs do not contain ChatGPT credentials or tokens. Managed profiles may keep a local `auth.json` inside the user's owner-only Application Support `CODEX_HOME` so the local App Server can run; it is never uploaded, bundled, committed, or copied into the public release.
 - Prompt text, conversation text, thread titles, and raw App Server authentication data are not written to the app's history files.
+- Rollout/session observation is read-only and metadata-only; it records only
+  lifecycle identifiers, timestamps, durations, and turn-local token totals
+  needed for the current Turn card and local ledger.
 - Local history, token activity, and managed-account credentials are kept under the user's Application Support directory with user-only file permissions.
 - Managed profiles use separate `CODEX_HOME` directories and separate App Server processes.
 - The system `~/.codex` profile is not copied into the app bundle or release ZIP.

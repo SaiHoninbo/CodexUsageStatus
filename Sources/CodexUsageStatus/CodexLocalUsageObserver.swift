@@ -9,6 +9,9 @@ struct CodexLocalTokenUsageRecord: Equatable, Sendable {
     let turnID: String
     let cumulativeTokenTotal: Int64
     let lastCallTokenTotal: Int64?
+    /// Turn-local total from `turn_token_usage.total_tokens`; this is the
+    /// value safe to show on the active Turn card.
+    let turnTokenTotal: Int64?
     let observedAt: Date
 }
 
@@ -18,6 +21,48 @@ struct CodexLocalTurnCompletionRecord: Equatable, Sendable {
     let startedAt: Date
     let completedAt: Date
     let durationSeconds: Int64
+}
+
+enum CodexLocalTurnActivityEventKind: Equatable, Sendable {
+    case started
+    case tokenUpdated
+    case completed
+    case failed
+    case interrupted
+}
+
+/// Metadata-only lifecycle evidence from a physical Codex Desktop rollout
+/// root.  The root URL is intentionally retained so a managed profile can
+/// never be confused with the default CODEX_HOME namespace.
+struct CodexLocalTurnActivityEvent: Equatable, Sendable {
+    let profileID: UUID?
+    let physicalRootURL: URL
+    let threadID: String
+    let turnID: String
+    let kind: CodexLocalTurnActivityEventKind
+    let startedAt: Date?
+    let completedAt: Date?
+    let durationSeconds: Int64?
+    let turnTokenTotal: Int64?
+    let observedAt: Date
+}
+
+struct CodexLocalTurnObservationCapabilities: Equatable, Sendable {
+    let started: Bool
+    let tokenUsage: Bool
+    let completed: Bool
+    let failed: Bool
+    let interrupted: Bool
+    let content: Bool
+
+    static let current = CodexLocalTurnObservationCapabilities(
+        started: true,
+        tokenUsage: true,
+        completed: true,
+        failed: true,
+        interrupted: true,
+        content: false
+    )
 }
 
 enum CodexLocalUsageArtifactParser {
@@ -57,6 +102,8 @@ enum CodexLocalUsageArtifactParser {
         let startedAt: Double?
         let completedAt: Double?
         let durationMilliseconds: Double?
+        let reason: String?
+        let error: LifecycleError?
 
         enum CodingKeys: String, CodingKey {
             case type
@@ -64,10 +111,17 @@ enum CodexLocalUsageArtifactParser {
             case startedAt = "started_at"
             case completedAt = "completed_at"
             case durationMilliseconds = "duration_ms"
+            case reason
+            case error
         }
     }
 
+    private struct LifecycleError: Decodable {
+        let message: String?
+    }
+
     private struct LifecycleEnvelope: Decodable {
+        let timestamp: String?
         let type: String?
         let payload: LifecyclePayload?
     }
@@ -106,6 +160,7 @@ enum CodexLocalUsageArtifactParser {
             turnID: turnID,
             cumulativeTokenTotal: cumulative,
             lastCallTokenTotal: last,
+            turnTokenTotal: payload.turnTokenUsage?.totalTokens.flatMap { $0 >= 0 ? $0 : nil },
             observedAt: observedAt
         )
     }
@@ -119,40 +174,147 @@ enum CodexLocalUsageArtifactParser {
     }
 
     static func parseTurnCompletion(_ data: Data, threadID: String?) -> CodexLocalTurnCompletionRecord? {
+        guard let event = parseTurnActivity(data, threadID: threadID),
+              event.kind == .completed,
+              let startedAt = event.startedAt,
+              let completedAt = event.completedAt,
+              let durationSeconds = event.durationSeconds else { return nil }
+
+        return CodexLocalTurnCompletionRecord(
+            threadID: event.threadID,
+            turnID: event.turnID,
+            startedAt: startedAt,
+            completedAt: completedAt,
+            durationSeconds: durationSeconds
+        )
+    }
+
+    static func parseTurnActivity(_ data: Data, threadID: String?) -> (kind: CodexLocalTurnActivityEventKind, threadID: String, turnID: String, startedAt: Date?, completedAt: Date?, durationSeconds: Int64?, observedAt: Date)? {
         guard let threadID, !threadID.isEmpty,
               let envelope = try? JSONDecoder().decode(LifecycleEnvelope.self, from: data),
               envelope.type == "event_msg",
               let payload = envelope.payload,
-              payload.type == "task_complete",
               let turnID = payload.turnID,
-              !turnID.isEmpty,
-              let started = payload.startedAt,
-              let completed = payload.completedAt,
-              started.isFinite,
-              completed.isFinite,
-              completed >= started else { return nil }
+              !turnID.isEmpty else { return nil }
 
-        let durationSeconds: Int64
+        let started = payload.startedAt.flatMap { $0.isFinite ? Date(timeIntervalSince1970: $0) : nil }
+        let completed = payload.completedAt.flatMap { $0.isFinite ? Date(timeIntervalSince1970: $0) : nil }
+        guard completed == nil || started == nil || completed! >= started! else { return nil }
+        let durationSeconds: Int64?
         if let durationMilliseconds = payload.durationMilliseconds,
            durationMilliseconds.isFinite,
            durationMilliseconds >= 0 {
             durationSeconds = max(0, Int64((durationMilliseconds / 1_000).rounded(.down)))
+        } else if let started, let completed {
+            durationSeconds = max(0, Int64(completed.timeIntervalSince(started).rounded(.down)))
         } else {
-            durationSeconds = max(0, Int64((completed - started).rounded(.down)))
+            durationSeconds = nil
         }
-        return CodexLocalTurnCompletionRecord(
-            threadID: threadID,
-            turnID: turnID,
-            startedAt: Date(timeIntervalSince1970: started),
-            completedAt: Date(timeIntervalSince1970: completed),
-            durationSeconds: durationSeconds
-        )
+        guard let observedAt = envelope.timestamp.flatMap({ iso8601Formatter.date(from: $0) })
+                ?? completed
+                ?? started else {
+            // Lifecycle records are authority data only when the artifact
+            // provides a factual timestamp.  Scan time is deliberately not
+            // substituted because it would invent an event chronology.
+            return nil
+        }
+
+        switch payload.type {
+        case "task_started":
+            return (.started, threadID, turnID, started, nil, nil, observedAt)
+        case "task_complete":
+            return (payload.error == nil ? .completed : .failed, threadID, turnID, started, completed, durationSeconds, observedAt)
+        case "turn_aborted":
+            guard payload.reason == "interrupted" else { return nil }
+            return (.interrupted, threadID, turnID, started, completed, durationSeconds, observedAt)
+        default:
+            return nil
+        }
     }
 }
 
 struct CodexLocalUsageObservationRoot: Equatable, Sendable {
     let profileID: UUID?
     let codexHomeURL: URL
+
+    /// Resolves the one physical default CODEX_HOME namespace used by the
+    /// local observer.  The default namespace intentionally retains a nil
+    /// profile attribution even when the UI has selected an unmanaged profile.
+    static func canonicalDefaultHomeURL(
+        fileManager: FileManager = .default,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL {
+        if let configured = environment["CODEX_HOME"], !configured.isEmpty {
+            return URL(fileURLWithPath: configured, isDirectory: true)
+        }
+        return fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex", isDirectory: true)
+    }
+}
+
+/// Pure authority checks shared by the observer projection and its tests.
+/// Physical CODEX_HOME identity is part of the source boundary; a UUID alone
+/// is never sufficient to accept a lifecycle event.
+enum CodexLocalTurnActivityAuthority {
+    static func normalizedRoot(_ url: URL) -> URL {
+        url.standardizedFileURL.resolvingSymlinksInPath()
+    }
+
+    static func sourceKey(profileID: UUID?, physicalRootURL: URL) -> String {
+        let namespace = profileID?.uuidString ?? "default"
+        return namespace + "|" + normalizedRoot(physicalRootURL).path
+    }
+
+    static func acceptsCurrentRoot(
+        event: CodexLocalTurnActivityEvent,
+        currentProfileID: UUID?,
+        currentProfileIsManaged: Bool,
+        managedHomeURL: URL?,
+        defaultHomeURL: URL
+    ) -> Bool {
+        let eventRoot = normalizedRoot(event.physicalRootURL)
+        if currentProfileIsManaged {
+            guard let currentProfileID,
+                  event.profileID == currentProfileID,
+                  let managedHomeURL else { return false }
+            return eventRoot == normalizedRoot(managedHomeURL)
+        }
+
+        // Unmanaged/default UI profiles still observe only the stable default
+        // namespace, whose event profile attribution is intentionally nil.
+        return event.profileID == nil && eventRoot == normalizedRoot(defaultHomeURL)
+    }
+
+    static func matchesActiveTurn(
+        event: CodexLocalTurnActivityEvent,
+        activeTurn: TurnActivitySnapshot,
+        activeTurnSourceKey: String?,
+        sourceKey: String
+    ) -> Bool {
+        activeTurn.state == .active
+            && activeTurnSourceKey == sourceKey
+            && activeTurn.threadID == event.threadID
+            && activeTurn.turnID == event.turnID
+    }
+
+    static func acceptsTerminal(
+        event: CodexLocalTurnActivityEvent,
+        activeTurn: TurnActivitySnapshot,
+        activeTurnSourceKey: String?,
+        sourceKey: String
+    ) -> Bool {
+        switch event.kind {
+        case .completed, .failed, .interrupted:
+            return matchesActiveTurn(
+                event: event,
+                activeTurn: activeTurn,
+                activeTurnSourceKey: activeTurnSourceKey,
+                sourceKey: sourceKey
+            )
+        default:
+            return false
+        }
+    }
 }
 
 private struct CodexLocalUsageCursor: Codable, Equatable, Sendable {
@@ -183,6 +345,7 @@ private struct CodexLocalUsageCursor: Codable, Equatable, Sendable {
 private struct CodexLocalUsageScanResult: Sendable {
     let events: [(profileID: UUID?, record: CodexLocalTokenUsageRecord)]
     let turnCompletions: [(profileID: UUID?, record: CodexLocalTurnCompletionRecord)]
+    let turnActivities: [CodexLocalTurnActivityEvent]
     let cursors: [String: CodexLocalUsageCursor]
     let seededPaths: Set<String>
 }
@@ -194,6 +357,7 @@ private struct CodexLocalUsageScanResult: Sendable {
 final class CodexLocalUsageObserver {
     typealias ObservationHandler = (UUID?, CodexLocalTokenUsageRecord) -> Void
     typealias TurnCompletionHandler = (UUID?, CodexLocalTurnCompletionRecord) -> Void
+    typealias TurnActivityHandler = (CodexLocalTurnActivityEvent) -> Void
 
     private let cursorURL: URL
     private var roots: [CodexLocalUsageObservationRoot] = []
@@ -203,6 +367,7 @@ final class CodexLocalUsageObserver {
     private var scanInFlight = false
     private var handler: ObservationHandler?
     private var turnCompletionHandler: TurnCompletionHandler?
+    private var turnActivityHandler: TurnActivityHandler?
     private var hasStarted = false
     private var rootsGeneration: UInt64 = 0
     private var lifecycleGeneration: UInt64 = 0
@@ -210,11 +375,13 @@ final class CodexLocalUsageObserver {
     init(
         cursorURL: URL,
         handler: ObservationHandler? = nil,
-        turnCompletionHandler: TurnCompletionHandler? = nil
+        turnCompletionHandler: TurnCompletionHandler? = nil,
+        turnActivityHandler: TurnActivityHandler? = nil
     ) {
         self.cursorURL = cursorURL
         self.handler = handler
         self.turnCompletionHandler = turnCompletionHandler
+        self.turnActivityHandler = turnActivityHandler
         loadCursors()
     }
 
@@ -315,6 +482,9 @@ final class CodexLocalUsageObserver {
                 for event in result.events {
                     self.handler?(event.profileID, event.record)
                 }
+                for event in result.turnActivities {
+                    self.turnActivityHandler?(event)
+                }
                 for event in result.turnCompletions {
                     self.turnCompletionHandler?(event.profileID, event.record)
                 }
@@ -332,6 +502,7 @@ final class CodexLocalUsageObserver {
         var updatedSeededPaths = seededPaths
         var events: [(profileID: UUID?, record: CodexLocalTokenUsageRecord)] = []
         var turnCompletions: [(profileID: UUID?, record: CodexLocalTurnCompletionRecord)] = []
+        var turnActivities: [CodexLocalTurnActivityEvent] = []
         var seenPaths = Set<String>()
 
         for root in roots {
@@ -402,6 +573,32 @@ final class CodexLocalUsageObserver {
                             }
                             if let record = CodexLocalUsageArtifactParser.parseLine(lineData) {
                                 events.append((root.profileID, record))
+                                turnActivities.append(CodexLocalTurnActivityEvent(
+                                    profileID: root.profileID,
+                                    physicalRootURL: root.codexHomeURL,
+                                    threadID: record.threadID,
+                                    turnID: record.turnID,
+                                    kind: .tokenUpdated,
+                                    startedAt: nil,
+                                    completedAt: nil,
+                                    durationSeconds: nil,
+                                    turnTokenTotal: record.turnTokenTotal,
+                                    observedAt: record.observedAt
+                                ))
+                            }
+                            if let activity = CodexLocalUsageArtifactParser.parseTurnActivity(lineData, threadID: threadID) {
+                                turnActivities.append(CodexLocalTurnActivityEvent(
+                                    profileID: root.profileID,
+                                    physicalRootURL: root.codexHomeURL,
+                                    threadID: activity.threadID,
+                                    turnID: activity.turnID,
+                                    kind: activity.kind,
+                                    startedAt: activity.startedAt,
+                                    completedAt: activity.completedAt,
+                                    durationSeconds: activity.durationSeconds,
+                                    turnTokenTotal: nil,
+                                    observedAt: activity.observedAt
+                                ))
                             }
                             if let completion = CodexLocalUsageArtifactParser.parseTurnCompletion(
                                 lineData,
@@ -422,6 +619,7 @@ final class CodexLocalUsageObserver {
         return CodexLocalUsageScanResult(
             events: events,
             turnCompletions: turnCompletions,
+            turnActivities: turnActivities,
             cursors: updatedCursors,
             seededPaths: updatedSeededPaths
         )

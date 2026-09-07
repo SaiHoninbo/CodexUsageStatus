@@ -68,12 +68,27 @@ App 不執行直接 Git client，也不再輪詢第三方 Feed。
 
 選單列主文字固定以目前作用中帳號的 quota 為主，例如 `Codex 78%`。Token Activity 與 reset credit 詳情會留在 popover，不會取代最重要的 quota 摘要。
 
+### Desktop Turn 活動
+
+概覽頁的 Turn 卡片以已知 `CODEX_HOME` 下 Codex Desktop 的本機
+rollout／session JSONL 為唯一活動來源。它只觀察開始、目前 turn token、完成、
+失敗與中斷等生命週期 metadata；App Server 的私有 Turn callback 仍保留作為
+傳輸，但不再與這條可見時間線競爭。觀察器是唯讀的，既有檔案從目前檔尾開始，
+也不會建立第二個 Codex process。
+
+這條路徑採 metadata-first：不讀取或保存 prompt、對話文字、thread title、
+agent message 或 rollout 原始內容。因此在安全內容能力存在前，Turn 通知內容
+選項會停用。Quota、帳號身份、Reset Credit 與其他 App Server 資料仍由本機
+App Server 傳輸提供。
+
 ## 帳號與隱私邊界
 
 App 透過 stdio 介面連接本機 Codex App Server，不使用私有網路端點、不注入 Codex UI，也不管理 API key。
 
 - 公開 repository、Release ZIP、history、Token Activity、profile index 與 log 都不會包含 ChatGPT credential 或 token。受管 profile 可能會把 `auth.json` 保存在使用者本人可讀寫的 Application Support 專屬 `CODEX_HOME`，讓本機 App Server 執行；這些資料不會上傳、打包、提交或複製到公開 Release。
 - Prompt、對話文字、thread title 與 App Server 原始認證資料不會寫入歷史檔案。
+- Rollout／session 觀察是唯讀且只含 metadata；只記錄目前 Turn 卡片與本機
+  ledger 所需的生命週期識別、時間戳、耗時與 turn-local token 總量。
 - 本機歷史、Token Activity 與受管帳號認證資料保存在使用者的 Application Support 目錄，檔案權限限制為使用者本人可讀寫。
 - 受管 profile 使用獨立的 `CODEX_HOME` 與獨立 App Server process。
 - 系統 `~/.codex` profile 不會被複製進 App bundle 或 Release ZIP。

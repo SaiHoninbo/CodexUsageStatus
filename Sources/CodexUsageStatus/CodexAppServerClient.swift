@@ -490,13 +490,19 @@ final class CodexAppServerClient {
                 invalidatePendingAccountRead()
                 refreshAccount()
             } else if (method == "turn/started" || method == "turn/completed"),
+                      let onTurnEvent,
                       let params = message.object["params"],
                       let event = TurnActivityCodec.decodeEvent(method: method, params: params) {
-                onTurnEvent?(event)
+                // Decode Turn payloads only for an explicitly opted-in
+                // transport consumer. UsageStatus leaves this callback nil:
+                // rollout/session metadata is its sole visible Turn source,
+                // so prompt/content fields are never parsed here.
+                onTurnEvent(event)
             } else if method == "thread/tokenUsage/updated",
+                      let onTurnTokenUsage,
                       let params = message.object["params"],
                       let usage = TurnActivityCodec.decodeTokenUsage(params: params) {
-                onTurnTokenUsage?(usage.threadID, usage.turnID, usage.tokenTotal)
+                onTurnTokenUsage(usage.threadID, usage.turnID, usage.tokenTotal)
             }
             return
         }

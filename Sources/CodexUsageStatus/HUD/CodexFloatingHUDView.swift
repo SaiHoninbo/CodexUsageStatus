@@ -39,6 +39,9 @@ struct CodexFloatingHUDView: View {
     let checkForUpdates: () -> Void
     let cancelUpdateCheck: () -> Void
     let openReleasePage: () -> Void
+    /// Keeps the non-activating AppKit panel appearance in lockstep with the
+    /// SwiftUI theme without recreating the panel or changing its geometry.
+    let setHUDThemeAppearance: (HUDThemeAppearance) -> Void
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var isPasteHovered = false
     @State private var isPasteAndSubmitHovered = false
@@ -122,9 +125,14 @@ struct CodexFloatingHUDView: View {
             contextMenuContent
         }
         .environment(\.hudThemePalette, selectedHUDPalette)
-        .preferredColorScheme(selectedHUDTheme == .lightSky ? .light : .dark)
+        .preferredColorScheme(selectedHUDPalette.appearance.colorScheme)
         .onAppear {
+            setHUDThemeAppearance(selectedHUDPalette.appearance)
             evaluateThemeRotationIfDue()
+        }
+        .onChange(of: storedHUDTheme) { _, rawValue in
+            let theme = HUDTheme(rawValue: rawValue) ?? .neonPurple
+            setHUDThemeAppearance(HUDThemePalette.forTheme(theme).appearance)
         }
         .onChange(of: model.updateState) { _, newState in
             presentUpdateFeedback(for: newState)
@@ -377,7 +385,15 @@ struct CodexFloatingHUDView: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: presentation.scaleLevel), style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: presentation.scaleLevel), style: .continuous)
-                .fill(selectedHUDPalette.panelTint)
+                .fill(selectedHUDPalette.panelSurface)
+                .overlay {
+                    RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: presentation.scaleLevel), style: .continuous)
+                        .fill(selectedHUDPalette.panelTint)
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: presentation.scaleLevel), style: .continuous)
+                        .stroke(selectedHUDPalette.panelBorder, lineWidth: 1.0)
+                }
                 .allowsHitTesting(false)
         }
         .clipShape(RoundedRectangle(cornerRadius: FloatingHUDLayout.cornerRadius(for: presentation.scaleLevel), style: .continuous))
@@ -636,7 +652,7 @@ struct CodexFloatingHUDView: View {
             helpText: presentation.isCodexFocused ? "貼上並送出" : "切換回 Codex 後可貼上並送出",
             accessibilityLabel: "貼上並送出",
             fillStyle: presentation.isCodexFocused
-                ? .filled(background: selectedHUDPalette.submitAction, foreground: .white)
+                ? .filled(background: selectedHUDPalette.submitAction, foreground: selectedHUDPalette.filledActionForeground)
                 : .neutral,
             width: metrics.actionCardWidth,
             height: metrics.actionHeight,
@@ -688,7 +704,12 @@ struct CodexFloatingHUDView: View {
             helpText: helpText,
             accessibilityLabel: shortcut.accessibilityLabel,
             fillStyle: presentation.isCodexFocused
-                ? .filled(background: fillColor, foreground: .white)
+                ? .filled(
+                    background: fillColor,
+                    foreground: shortcut == .commitAndPush
+                        ? selectedHUDPalette.commitPushForeground
+                        : selectedHUDPalette.filledActionForeground
+                )
                 : .neutral,
             width: metrics.actionCardWidth,
             height: cardHeight,

@@ -70,6 +70,7 @@ struct CodexUsageStatusTests {
             ("token activity null fields", testTokenActivityNullFields),
             ("token activity presentation", testTokenActivityPresentation),
             ("local Codex usage artifact parser", testLocalCodexUsageArtifactParser),
+            ("desktop activity authority", testDesktopActivityAuthority),
             ("local token usage ledger", testLocalTokenUsageLedger),
             ("token activity aggregation", testTokenActivityAggregation),
             ("local Token Hero update feedback", testTokenActivityUpdateFeedback),
@@ -1175,6 +1176,7 @@ struct CodexUsageStatusTests {
         try expect(record.turnID == "turn-live", "artifact parser preserves turn identity")
         try expect(record.cumulativeTokenTotal == 9_876, "artifact parser uses the cumulative thread token total")
         try expect(record.lastCallTokenTotal == 321, "artifact parser uses the latest call token total")
+        try expect(record.turnTokenTotal == 321, "artifact parser preserves the turn-local token total")
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         try expect(record.observedAt == formatter.date(from: "2026-09-07T03:18:41.123Z"), "artifact parser preserves event timestamp")
@@ -1206,6 +1208,204 @@ struct CodexUsageStatusTests {
         )
         try expect(fallbackCompletion.durationSeconds == 12, "Turn lifecycle falls back to explicit start/end timestamps")
         try expect(CodexLocalUsageArtifactParser.parseTurnCompletion(completion, threadID: nil) == nil, "Turn lifecycle without thread identity is ignored")
+
+        let started = Data(#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-started","started_at":2000}}"#.utf8)
+        let startedActivity = try unwrap(
+            CodexLocalUsageArtifactParser.parseTurnActivity(started, threadID: "thread-from-session-meta"),
+            "started Turn lifecycle artifact"
+        )
+        try expect(startedActivity.kind == .started, "rollout task_started is an active Turn event")
+        try expect(startedActivity.startedAt == Date(timeIntervalSince1970: 2000), "started Turn preserves metadata timestamp")
+
+        let failed = Data(#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-failed","started_at":2000,"completed_at":2002,"error":{"codex_error_info":{"kind":"server"}}}}"#.utf8)
+        let failedActivity = try unwrap(
+            CodexLocalUsageArtifactParser.parseTurnActivity(failed, threadID: "thread-from-session-meta"),
+            "failed Turn lifecycle artifact"
+        )
+        try expect(failedActivity.kind == .failed, "task_complete with error is a failed Turn event")
+
+        let interrupted = Data(#"{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-interrupted","started_at":2000,"completed_at":2001,"duration_ms":1000,"reason":"interrupted"}}"#.utf8)
+        let interruptedActivity = try unwrap(
+            CodexLocalUsageArtifactParser.parseTurnActivity(interrupted, threadID: "thread-from-session-meta"),
+            "interrupted Turn lifecycle artifact"
+        )
+        try expect(interruptedActivity.kind == .interrupted, "turn_aborted is an interrupted Turn event")
+        let missingAbortReason = Data(#"{"timestamp":"2026-09-07T03:18:41.123Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-missing-reason","started_at":2000,"completed_at":2001,"duration_ms":1000}}"#.utf8)
+        try expect(
+            CodexLocalUsageArtifactParser.parseTurnActivity(missingAbortReason, threadID: "thread-from-session-meta") == nil,
+            "turn_aborted without an explicit interrupted reason is ignored"
+        )
+        let unknownAbortReason = Data(#"{"timestamp":"2026-09-07T03:18:41.123Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-unknown-reason","started_at":2000,"completed_at":2001,"duration_ms":1000,"reason":"timeout"}}"#.utf8)
+        try expect(
+            CodexLocalUsageArtifactParser.parseTurnActivity(unknownAbortReason, threadID: "thread-from-session-meta") == nil,
+            "turn_aborted with an unknown reason is ignored"
+        )
+        let noFactualTimestamp = Data(#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-no-time"}}"#.utf8)
+        try expect(
+            CodexLocalUsageArtifactParser.parseTurnActivity(noFactualTimestamp, threadID: "thread-from-session-meta") == nil,
+            "lifecycle artifact without a factual timestamp is ignored"
+        )
+        try expect(CodexLocalTurnObservationCapabilities.current.content == false, "rollout authority is metadata-only")
+        try expect(CodexLocalTurnObservationCapabilities.current.failed, "rollout failure evidence is available")
+        try expect(CodexLocalTurnObservationCapabilities.current.interrupted, "rollout interruption evidence is available")
+    }
+
+    private static func testDesktopActivityAuthority() throws {
+        let defaultHome = URL(fileURLWithPath: "/tmp/codex-default-home")
+        let managedHomeA = URL(fileURLWithPath: "/tmp/codex-managed-a")
+        let managedHomeB = URL(fileURLWithPath: "/tmp/codex-managed-b")
+        let profileA = UUID()
+        let profileB = UUID()
+        let observedAt = Date(timeIntervalSince1970: 2_000_000_000)
+
+        func event(
+            profileID: UUID?,
+            root: URL,
+            threadID: String = "thread-a",
+            turnID: String = "turn-a",
+            kind: CodexLocalTurnActivityEventKind = .started,
+            startedAt: Date? = observedAt,
+            completedAt: Date? = nil,
+            durationSeconds: Int64? = nil,
+            tokenTotal: Int64? = nil
+        ) -> CodexLocalTurnActivityEvent {
+            CodexLocalTurnActivityEvent(
+                profileID: profileID,
+                physicalRootURL: root,
+                threadID: threadID,
+                turnID: turnID,
+                kind: kind,
+                startedAt: startedAt,
+                completedAt: completedAt,
+                durationSeconds: durationSeconds,
+                turnTokenTotal: tokenTotal,
+                observedAt: observedAt
+            )
+        }
+
+        let defaultEvent = event(profileID: nil, root: defaultHome)
+        try expect(
+            CodexLocalTurnActivityAuthority.acceptsCurrentRoot(
+                event: defaultEvent,
+                currentProfileID: profileA,
+                currentProfileIsManaged: false,
+                managedHomeURL: nil,
+                defaultHomeURL: defaultHome
+            ),
+            "unmanaged UUID UI profile accepts only the nil default-root event"
+        )
+        try expect(
+            CodexLocalTurnActivityAuthority.acceptsCurrentRoot(
+                event: event(profileID: profileA, root: managedHomeA),
+                currentProfileID: profileA,
+                currentProfileIsManaged: true,
+                managedHomeURL: managedHomeA,
+                defaultHomeURL: defaultHome
+            ),
+            "managed profile A accepts its matching UUID and physical root"
+        )
+        try expect(
+            !CodexLocalTurnActivityAuthority.acceptsCurrentRoot(
+                event: defaultEvent,
+                currentProfileID: profileA,
+                currentProfileIsManaged: true,
+                managedHomeURL: managedHomeA,
+                defaultHomeURL: defaultHome
+            ),
+            "managed profile A rejects a nil default-root event"
+        )
+        try expect(
+            !CodexLocalTurnActivityAuthority.acceptsCurrentRoot(
+                event: event(profileID: profileB, root: managedHomeB),
+                currentProfileID: profileA,
+                currentProfileIsManaged: true,
+                managedHomeURL: managedHomeA,
+                defaultHomeURL: defaultHome
+            ),
+            "managed profile A rejects profile B's physical root"
+        )
+        try expect(
+            !CodexLocalTurnActivityAuthority.acceptsCurrentRoot(
+                event: event(profileID: profileA, root: managedHomeB),
+                currentProfileID: profileA,
+                currentProfileIsManaged: true,
+                managedHomeURL: managedHomeA,
+                defaultHomeURL: defaultHome
+            ),
+            "matching UUID with the wrong physical root is rejected"
+        )
+
+        let sourceKey = CodexLocalTurnActivityAuthority.sourceKey(profileID: nil, physicalRootURL: defaultHome)
+        let started = event(profileID: nil, root: defaultHome, kind: .started)
+        let activeTurn = TurnActivitySnapshot(
+            state: .active,
+            threadID: started.threadID,
+            turnID: started.turnID,
+            startedAt: started.startedAt,
+            completedAt: nil,
+            elapsedSeconds: 0,
+            tokenTotal: nil,
+            content: nil,
+            errorMessage: nil,
+            receivedAt: started.observedAt
+        )
+        let token = event(profileID: nil, root: defaultHome, kind: .tokenUpdated, tokenTotal: 42)
+        try expect(
+            CodexLocalTurnActivityAuthority.matchesActiveTurn(
+                event: token,
+                activeTurn: activeTurn,
+                activeTurnSourceKey: sourceKey,
+                sourceKey: sourceKey
+            ),
+            "accepted start permits a matching token update"
+        )
+        let terminal = event(
+            profileID: nil,
+            root: defaultHome,
+            kind: .completed,
+            startedAt: started.startedAt,
+            completedAt: observedAt.addingTimeInterval(12),
+            durationSeconds: 12
+        )
+        try expect(
+            CodexLocalTurnActivityAuthority.acceptsTerminal(
+                event: terminal,
+                activeTurn: activeTurn,
+                activeTurnSourceKey: sourceKey,
+                sourceKey: sourceKey
+            ),
+            "start → token → matching terminal is accepted"
+        )
+        let idle = TurnActivitySnapshot.unknownSnapshot(receivedAt: observedAt)
+        try expect(
+            !CodexLocalTurnActivityAuthority.acceptsTerminal(
+                event: terminal,
+                activeTurn: idle,
+                activeTurnSourceKey: nil,
+                sourceKey: sourceKey
+            ),
+            "idle/unknown state rejects an orphan terminal"
+        )
+        try expect(
+            !CodexLocalTurnActivityAuthority.acceptsTerminal(
+                event: terminal,
+                activeTurn: activeTurn,
+                activeTurnSourceKey: CodexLocalTurnActivityAuthority.sourceKey(profileID: profileA, physicalRootURL: managedHomeA),
+                sourceKey: sourceKey
+            ),
+            "profile switch invalidates a late terminal from the old source"
+        )
+        let newStarted = event(profileID: nil, root: defaultHome, turnID: "turn-new", kind: .started)
+        try expect(
+            CodexLocalTurnActivityAuthority.acceptsCurrentRoot(
+                event: newStarted,
+                currentProfileID: profileA,
+                currentProfileIsManaged: false,
+                managedHomeURL: nil,
+                defaultHomeURL: defaultHome
+            ),
+            "new Turn after a profile transition can be accepted from the default root"
+        )
     }
 
     private static func testLocalTokenUsageLedger() throws {
@@ -2698,6 +2898,19 @@ struct CodexUsageStatusTests {
         try expect(HUDTheme.neonPurple.next == .lightSky, "neon purple advances to light sky")
         try expect(HUDTheme.lightSky.next == .mario, "light sky advances to mario")
         try expect(HUDTheme.mario.next == .neonPurple, "mario wraps to neon purple")
+        let neon = HUDThemePalette.neonPurple
+        let light = HUDThemePalette.lightSky
+        let mario = HUDThemePalette.mario
+        try expect(neon.appearance == .dark, "neon purple uses a dark HUD appearance")
+        try expect(light.appearance == .light, "light sky uses a light HUD appearance")
+        try expect(mario.appearance == .light, "mario uses a light HUD appearance")
+        try expect(neon.tokenHeroSurface != neon.panelSurface, "neon token hero has its own semantic surface")
+        try expect(light.fiveHourSurface != light.sevenDaySurface, "light sky quota surfaces remain differentiated")
+        try expect(mario.tokenHeroSurface != mario.panelSurface, "mario token hero is distinct from the cream panel")
+        try expect(mario.commitPushForeground != mario.filledActionForeground, "mario yellow commit action uses dark text")
+        try expect(neon.filledActionHoverOpacity > neon.filledActionOpacity, "neon action hover is stronger than idle")
+        try expect(light.filledActionHoverOpacity > light.filledActionOpacity, "light sky action hover is stronger than idle")
+        try expect(mario.filledActionHoverOpacity >= mario.filledActionOpacity, "mario action hover remains fully legible")
         try expect(
             HUDThemeRotationInterval.allCases.map(\.rawValue) == [1_800, 3_600, 10_800, 21_600, 43_200, 86_400],
             "rotation intervals stay within the approved choices"

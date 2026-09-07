@@ -32,6 +32,14 @@ struct HUDQuotaRow: View {
         }
     }
 
+    private var semanticSurface: Color {
+        switch kind {
+        case .fiveHour: return palette.fiveHourSurface
+        case .sevenDay: return palette.sevenDaySurface
+        case .gptReserveWeekly: return palette.gptReserveSurface
+        }
+    }
+
     private var systemImage: String {
         "clock"
     }
@@ -59,7 +67,7 @@ struct HUDQuotaRow: View {
     var body: some View {
         ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(palette.elevatedSurface)
+                .fill(semanticSurface)
 
             // Keep the quota readable at a glance without turning the HUD
             // into a pair of saturated dashboard bars. The accent is a thin
@@ -169,6 +177,10 @@ struct HUDAccountInfoRow: View {
             divider
         }
         .frame(width: width, height: sectionHeight, alignment: .center)
+        .background(
+            palette.accountInfoSurface,
+            in: RoundedRectangle(cornerRadius: max(5, rowHeight * 0.16), style: .continuous)
+        )
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("帳號額度資訊")
         .accessibilityValue(accessibilityValue)
@@ -280,10 +292,10 @@ struct HUDTokenActivitySummaryView: View, Equatable {
         }
         .padding(.horizontal, max(7, 9 * scaleFactor))
         .frame(width: width, height: height)
-        .background(palette.elevatedSurface, in: RoundedRectangle(cornerRadius: max(7, height * 0.18), style: .continuous))
+        .background(palette.tokenHeroSurface, in: RoundedRectangle(cornerRadius: max(7, height * 0.18), style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: max(7, height * 0.18), style: .continuous)
-                .stroke(isStale ? palette.warning.opacity(0.62) : palette.token.opacity(0.32), lineWidth: max(0.6, 0.8 * scaleFactor))
+                .stroke(isStale ? palette.warning.opacity(0.62) : palette.tokenHeroBorder, lineWidth: max(0.6, 0.8 * scaleFactor))
         }
         .opacity(isStale ? 0.88 : 1)
         .accessibilityElement(children: .combine)
@@ -377,10 +389,10 @@ struct HUDTokenStaticOdometerView: View {
                         .foregroundStyle(palette.primaryText)
                         .monospacedDigit()
                         .frame(width: slotWidth, height: slotHeight)
-                        .background(palette.graphiteControl.opacity(0.82), in: RoundedRectangle(cornerRadius: max(2.5, 4 * scaleFactor), style: .continuous))
+                        .background(palette.elevatedSurface, in: RoundedRectangle(cornerRadius: max(2.5, 4 * scaleFactor), style: .continuous))
                         .overlay {
                             RoundedRectangle(cornerRadius: max(2.5, 4 * scaleFactor), style: .continuous)
-                                .stroke(palette.token.opacity(0.34), lineWidth: max(0.6, 0.8 * scaleFactor))
+                                .stroke(palette.tokenHeroBorder.opacity(0.72), lineWidth: max(0.6, 0.8 * scaleFactor))
                         }
                 } else {
                     Text(String(character))
@@ -552,10 +564,10 @@ struct HUDTokenOdometerDigit: View {
         if slot.currentCharacter.isNumber {
             motionContent
                 .frame(width: slotWidth, height: slotHeight)
-                .background(palette.graphiteControl.opacity(0.82), in: RoundedRectangle(cornerRadius: max(2.5, 4 * scaleFactor), style: .continuous))
+                .background(palette.elevatedSurface, in: RoundedRectangle(cornerRadius: max(2.5, 4 * scaleFactor), style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: max(2.5, 4 * scaleFactor), style: .continuous)
-                        .stroke(palette.token.opacity(reelPlan == nil ? 0.34 : 0.72), lineWidth: max(0.6, 0.8 * scaleFactor))
+                        .stroke(palette.tokenHeroBorder.opacity(reelPlan == nil ? 0.72 : 1.0), lineWidth: max(0.6, 0.8 * scaleFactor))
                 }
         } else {
             staticCharacterText
@@ -642,9 +654,21 @@ struct HUDActionCard: View {
     private var backgroundColor: Color {
         switch fillStyle {
         case .neutral:
-            return isHovered ? palette.controlSurface : palette.elevatedSurface
+            return isHovered ? palette.controlSurface : palette.neutralActionSurface
         case .filled(let background, _):
-            return background.opacity(isHovered ? 0.28 : 0.16)
+            return background.opacity(isHovered ? palette.filledActionHoverOpacity : palette.filledActionOpacity)
+        }
+    }
+
+    private var pressedOverlayOpacity: Double {
+        switch fillStyle {
+        case .neutral:
+            return 0.12
+        case .filled:
+            // The pressed state adds only the theme-specific delta above the
+            // idle fill, keeping the action readable while making mouse-down
+            // acceptance more apparent on bright and dark themes alike.
+            return max(0.10, palette.filledActionPressedOpacity - palette.filledActionOpacity)
         }
     }
 
@@ -673,7 +697,11 @@ struct HUDActionCard: View {
             // semantics.
             .contentShape(Rectangle())
         }
-        .buttonStyle(HUDImmediateButtonStyle(cornerRadius: cornerRadius))
+        .buttonStyle(HUDImmediateButtonStyle(
+            cornerRadius: cornerRadius,
+            pressedOverlay: palette.primaryText,
+            pressedOpacity: pressedOverlayOpacity
+        ))
         .frame(width: width, height: height)
         .background(backgroundColor, in: shape)
         .overlay {
@@ -681,7 +709,7 @@ struct HUDActionCard: View {
             case .neutral:
                 shape.stroke(palette.border, lineWidth: 0.8 * scaleFactor)
             case .filled(let background, _):
-                shape.stroke(background.opacity(isHovered ? 0.78 : 0.5), lineWidth: 0.8 * scaleFactor)
+                shape.stroke(background.opacity(isHovered ? palette.filledActionPressedOpacity : palette.filledActionHoverOpacity), lineWidth: 0.8 * scaleFactor)
             }
         }
         .contentShape(Rectangle())
@@ -698,12 +726,14 @@ struct HUDActionCard: View {
 /// style: it does not invoke the action early or bypass any in-flight gate.
 struct HUDImmediateButtonStyle: ButtonStyle {
     let cornerRadius: CGFloat
+    let pressedOverlay: Color
+    let pressedOpacity: Double
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .overlay {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(Color.white.opacity(configuration.isPressed ? 0.16 : 0))
+                    .fill(pressedOverlay.opacity(configuration.isPressed ? pressedOpacity : 0))
             }
             .scaleEffect(configuration.isPressed ? 0.985 : 1)
             .animation(.easeOut(duration: 0.08), value: configuration.isPressed)

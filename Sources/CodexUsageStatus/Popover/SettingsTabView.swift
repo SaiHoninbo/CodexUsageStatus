@@ -180,6 +180,13 @@ extension UsagePopoverView {
                 get: { model.showTurnContentInNotifications },
                 set: { model.setTurnContentInNotifications($0) }
             ))
+            .disabled(!model.turnContentNotificationSupported)
+            Text(model.turnContentNotificationSupported
+                 ? "通知內容功能由目前的 Turn 來源提供。"
+                 : "本機 rollout 只提供 Turn metadata；為保護 prompt 與對話內容，這個選項目前停用。")
+                .font(.caption2)
+                .foregroundStyle(HUDColorPalette.tertiaryText)
+                .fixedSize(horizontal: false, vertical: true)
             Toggle("帳號切換通知", isOn: Binding(
                 get: { model.notifyOnAccountSwitch },
                 set: { model.setAccountSwitchNotifications($0) }

@@ -185,11 +185,15 @@ final class FloatingHUDPanelController: NSObject {
             accountInfoRowVisibilityChanged: { [weak self] visible in self?.setAccountInfoRowVisibility(visible) },
             checkForUpdates: { [weak self] in self?.model.checkForUpdates() },
             cancelUpdateCheck: { [weak self] in self?.model.cancelUpdateCheck() },
-            openReleasePage: { [weak self] in self?.model.openUpdateReleasePage() }
+            openReleasePage: { [weak self] in self?.model.openUpdateReleasePage() },
+            setHUDThemeAppearance: { [weak self] appearance in
+                self?.applyHUDAppearance(appearance)
+            }
         )
         let hostingView = FirstClickHostingView(rootView: rootView)
-        let darkAppearance = NSAppearance(named: .darkAqua)
-        hostingView.appearance = darkAppearance
+        let initialAppearance = HUDThemePalette.forTheme(HUDThemePreference.loadTheme()).appearance
+        let appKitAppearance = nsAppearance(for: initialAppearance)
+        hostingView.appearance = appKitAppearance
         let newPanel = DraggableHUDPanel(
             contentRect: NSRect(origin: .zero, size: layoutState.size),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -210,7 +214,7 @@ final class FloatingHUDPanelController: NSObject {
         newPanel.level = .floating
         newPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         newPanel.backgroundColor = .clear
-        newPanel.appearance = darkAppearance
+        newPanel.appearance = appKitAppearance
         newPanel.isOpaque = false
         newPanel.hasShadow = false
         newPanel.hidesOnDeactivate = false
@@ -283,6 +287,22 @@ final class FloatingHUDPanelController: NSObject {
             try? await Task.sleep(nanoseconds: 250_000_000)
             guard !Task.isCancelled else { return }
             self?.refreshVisibility()
+        }
+    }
+
+    /// Applies the HUD theme's AppKit appearance in place. The panel remains
+    /// non-activating and keeps its identity, frame, drag state, and SwiftUI
+    /// child state while only the appearance environment changes.
+    private func applyHUDAppearance(_ appearance: HUDThemeAppearance) {
+        let appKitAppearance = nsAppearance(for: appearance)
+        panel?.appearance = appKitAppearance
+        panel?.contentView?.appearance = appKitAppearance
+    }
+
+    private func nsAppearance(for appearance: HUDThemeAppearance) -> NSAppearance? {
+        switch appearance {
+        case .dark: return NSAppearance(named: .darkAqua)
+        case .light: return NSAppearance(named: .aqua)
         }
     }
 
