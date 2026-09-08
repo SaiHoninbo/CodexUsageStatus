@@ -359,7 +359,10 @@ struct CodexFloatingHUDView: View {
                 isStale: presentation.tokenActivityIsStale,
                 reduceMotion: presentation.reduceMotion
             )
-            .equatable()
+            // The Token Hero consumes the theme palette from the environment.
+            // Do not put an Equatable gate in front of it: palette-only theme
+            // changes must repaint the secondary metric labels and values even
+            // when the usage payload itself is unchanged.
             Color.clear.frame(height: metrics.tokenSummaryGap)
             hudHeader(presentation: presentation, metrics: metrics)
             Color.clear.frame(height: metrics.headerGap)
