@@ -426,6 +426,24 @@ enum AllAccountsUsageRowState: String, Equatable {
     }
 }
 
+/// Activity truth is separate from quota freshness. Only the selected
+/// profile can be Live; every other profile is local cached/stale evidence.
+enum AllAccountsLocalActivityState: String, Equatable {
+    case currentLive
+    case cached
+    case stale
+    case noData
+
+    var displayName: String {
+        switch self {
+        case .currentLive: return "Live"
+        case .cached: return "Cached"
+        case .stale: return "Stale"
+        case .noData: return "No Data"
+        }
+    }
+}
+
 /// Non-persistent, value-semantic projection for one All Accounts row.
 /// Account identity remains supplied by `AccountProfileDisplay`, while quota
 /// and freshness come from the profile-scoped history sample.
@@ -436,6 +454,9 @@ struct AllAccountsUsageRowPresentation: Identifiable, Equatable {
     let remainingPercent: Int?
     let freshnessText: String
     let state: AllAccountsUsageRowState
+    let activityText: String
+    let activityState: AllAccountsLocalActivityState
+    let observedTokenDelta: Int64?
     let isCurrent: Bool
     let isWarning: Bool
 
@@ -458,7 +479,9 @@ struct AllAccountsUsageRowPresentation: Identifiable, Equatable {
         currentSnapshotAvailable: Bool,
         currentSnapshotIsStale: Bool,
         currentRemainingPercent: Int?,
-        now: Date
+        now: Date,
+        localActivity: LocalTokenProfileObservation? = nil,
+        observedTokenDelta: Int64? = nil
     ) -> Self {
         let isCurrent = profile.id == currentProfileID
         let isCurrentLive = isCurrent
@@ -484,6 +507,34 @@ struct AllAccountsUsageRowPresentation: Identifiable, Equatable {
             freshnessText = "\(state.displayName) · \(ageText(since: summary?.latestSample?.receivedAt, now: now))"
         }
 
+        let activityState: AllAccountsLocalActivityState
+        if let localActivity {
+            let age = now.timeIntervalSince(localActivity.lastObservedAt)
+            // Token activity truth is intentionally independent of quota
+            // transport freshness. A recent local observation for the
+            // selected account remains Live even when the quota sample is
+            // stale/offline; quota state is rendered separately above.
+            if isCurrent && age <= 15 * 60 {
+                activityState = .currentLive
+            } else if age > 15 * 60 {
+                activityState = .stale
+            } else {
+                activityState = .cached
+            }
+        } else {
+            activityState = .noData
+        }
+        let activityText: String
+        if let localActivity {
+            var text = "活動：\(activityState.displayName) · \(ageText(since: localActivity.lastObservedAt, now: now))"
+            if let observedTokenDelta, observedTokenDelta > 0 {
+                text += " · 本次觀測 +\(TokenActivityPresentation.tokenCount(observedTokenDelta))"
+            }
+            activityText = text
+        } else {
+            activityText = "活動：No Data · 尚無本機觀測"
+        }
+
         return Self(
             profileID: profile.id,
             title: display.title,
@@ -491,6 +542,9 @@ struct AllAccountsUsageRowPresentation: Identifiable, Equatable {
             remainingPercent: clamp(percent),
             freshnessText: freshnessText,
             state: state,
+            activityText: activityText,
+            activityState: activityState,
+            observedTokenDelta: observedTokenDelta,
             isCurrent: isCurrent,
             isWarning: display.isWarning
         )

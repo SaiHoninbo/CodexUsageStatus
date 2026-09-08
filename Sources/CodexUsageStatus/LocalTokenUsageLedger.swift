@@ -61,6 +61,36 @@ struct LocalTokenUsageLedgerUpdate: Equatable {
     let delta: Int64
 }
 
+/// Profile-scoped evidence derived from the existing machine-local ledger.
+/// This is a projection over persisted threads, not a second persistence
+/// subsystem and not account lifetime Token Activity.
+struct LocalTokenProfileObservation: Equatable {
+    let profileID: UUID?
+    let lastObservedAt: Date
+    let observedThreadCount: Int
+}
+
+extension LocalTokenUsageLedgerSnapshot {
+    func profileObservations() -> [LocalTokenProfileObservation] {
+        Dictionary(grouping: threads, by: \.profileID).compactMap { profileID, threads in
+            guard let lastObservedAt = threads.map(\.updatedAt).max() else { return nil }
+            return LocalTokenProfileObservation(
+                profileID: profileID,
+                lastObservedAt: lastObservedAt,
+                observedThreadCount: threads.count
+            )
+        }
+        .sorted { lhs, rhs in
+            switch (lhs.profileID, rhs.profileID) {
+            case (nil, nil): return false
+            case (nil, _): return true
+            case (_, nil): return false
+            case let (left?, right?): return left.uuidString < right.uuidString
+            }
+        }
+    }
+}
+
 /// One installation-scoped ledger built only from Codex events observed on
 /// this Mac. Profile identity attributes high-water marks but never scopes or
 /// deletes the machine total. Account Token Activity is deliberately not an

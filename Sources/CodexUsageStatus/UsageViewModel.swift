@@ -47,6 +47,7 @@ final class UsageViewModel: ObservableObject {
     @Published private(set) var currentProfileID: UUID?
     @Published private(set) var workerStates: [UUID: ConnectionState] = [:]
     @Published private(set) var workerErrors: [UUID: String] = [:]
+    @Published private(set) var localProfileActivityVersion: UInt64 = 0
     @Published private(set) var loginStates: [UUID: String] = [:]
     @Published private(set) var quotaRefreshIntervalSeconds: Int = RefreshCadenceDefaults.quotaSeconds
     @Published private(set) var globalSyncIntervalSeconds: Int = RefreshCadenceDefaults.accountSeconds
@@ -107,6 +108,11 @@ final class UsageViewModel: ObservableObject {
     /// quota/token payloads.
     private var tokenActivityLastFetchedAt: Date?
     private var managedTokenActivityLastFetchedAt: [UUID: Date] = [:]
+    /// A delta is shown only while this process can tie it to a factual
+    /// ledger callback. Persisted thread timestamps remain the authority for
+    /// activity age after restart.
+    private var latestLocalObservedDeltas: [String: Int64] = [:]
+    private var latestLocalObservedDeltaDates: [String: Date] = [:]
     private var hudTokenActivitySummary: TokenActivitySnapshot?
     private var hudTokenActivityFeedbackGeneration: UInt64 = 0
     private var tokenActivitySoundGate = TokenActivitySoundGate()
@@ -377,6 +383,7 @@ final class UsageViewModel: ObservableObject {
             // startup.
             await withCheckedContinuation { continuation in
                 self.localTokenUsageLedgerStore.loadAsynchronously {
+                    self.localProfileActivityVersion &+= 1
                     continuation.resume()
                 }
             }
@@ -1185,6 +1192,11 @@ final class UsageViewModel: ObservableObject {
             at: record.observedAt
         ) else { return }
 
+        let activityKey = localActivityKey(for: profileID)
+        latestLocalObservedDeltas[activityKey] = update.delta
+        latestLocalObservedDeltaDates[activityKey] = record.observedAt
+        localProfileActivityVersion &+= 1
+
         refreshHUDTokenActivitySummary()
         hudTokenActivityFeedbackGeneration &+= 1
         let feedback = LocalTokenUsageLedgerPresentation.feedback(
@@ -1477,6 +1489,81 @@ final class UsageViewModel: ObservableObject {
 
     var localTokenUsageLastObservedAt: Date? {
         localTokenUsageLedgerStore.snapshot.lastObservedAt
+    }
+
+    /// Profile-scoped activity evidence comes only from the existing local
+    /// ledger. The default CODEX_HOME namespace (`nil`) is attributed to the
+    /// selected unmanaged UI profile for display; managed roots retain their
+    /// UUID attribution.
+    var localProfileActivityByID: [UUID: LocalTokenProfileObservation] {
+        var result: [UUID: LocalTokenProfileObservation] = [:]
+        for observation in localTokenUsageLedgerStore.snapshot.profileObservations() {
+            if let profileID = observation.profileID {
+                result[profileID] = observation
+            } else if let currentProfileID,
+                      let currentProfile,
+                      !currentProfile.isManaged {
+                result[currentProfileID] = LocalTokenProfileObservation(
+                    profileID: currentProfileID,
+                    lastObservedAt: observation.lastObservedAt,
+                    observedThreadCount: observation.observedThreadCount
+                )
+            }
+        }
+        return result
+    }
+
+    func localProfileActivity(for profile: AccountProfile) -> LocalTokenProfileObservation? {
+        localProfileActivityByID[profile.id]
+    }
+
+    func localObservedTokenDelta(for profile: AccountProfile) -> Int64? {
+        guard let activity = localProfileActivity(for: profile) else { return nil }
+        let key = localActivityStorageKey(for: profile)
+        guard latestLocalObservedDeltaDates[key] == activity.lastObservedAt else { return nil }
+        return latestLocalObservedDeltas[key]
+    }
+
+    var localActivityScopeText: String {
+        accountScope == .current
+            ? "目前帳號 · 本機觀測"
+            : "全部帳號 · 本機觀測（非同時 Live）"
+    }
+
+    var localMachineScopeText: String {
+        "這台 Mac · 所有已觀測 Codex 總量"
+    }
+
+    var localProfileActivitySummaryText: String {
+        let observations = localProfileActivityByID
+        guard let latest = observations.values.map(\.lastObservedAt).max() else {
+            return "尚無本機帳號活動資料"
+        }
+        return "已觀測 \(observations.count) 個帳號 · 最新 \(localAgeText(since: latest))"
+    }
+
+    private func localActivityKey(for profileID: UUID?) -> String {
+        profileID?.uuidString ?? "default"
+    }
+
+    private func localActivityStorageKey(for profile: AccountProfile) -> String {
+        if localTokenUsageLedgerStore.snapshot.threads.contains(where: { $0.profileID == profile.id }) {
+            return localActivityKey(for: profile.id)
+        }
+        if profile.id == currentProfileID,
+           !profile.isManaged,
+           localTokenUsageLedgerStore.snapshot.threads.contains(where: { $0.profileID == nil }) {
+            return localActivityKey(for: nil)
+        }
+        return localActivityKey(for: profile.id)
+    }
+
+    private func localAgeText(since date: Date) -> String {
+        let seconds = max(0, Int(currentDate.timeIntervalSince(date)))
+        if seconds < 60 { return "剛剛" }
+        if seconds < 3600 { return "\(max(1, seconds / 60)) 分鐘前" }
+        if seconds < 86400 { return "\(max(1, seconds / 3600)) 小時前" }
+        return "\(max(1, seconds / 86400)) 天前"
     }
 
     var selectedResetCredit: RateLimitResetCredit? {

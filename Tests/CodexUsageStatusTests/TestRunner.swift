@@ -87,6 +87,8 @@ struct CodexUsageStatusTests {
             ("account profile display formatting", testAccountProfileDisplayFormatting),
             ("account scope summary", testAccountScopeSummary),
             ("all-account usage rows", testAllAccountsUsageRows),
+            ("local profile activity projection", testLocalProfileActivityProjection),
+            ("all-account activity scope truth", testAllAccountActivityScopeTruth),
             ("turn activity event decoding", testTurnActivityDecoding),
             ("account profiles isolate email", testAccountProfilesIsolateEmail),
             ("account read disables refresh token", testAccountReadDisablesRefreshToken),
@@ -2258,6 +2260,7 @@ struct CodexUsageStatusTests {
         try expect(currentRow.state == .currentLive, "current connected profile should be Live")
         try expect(currentRow.remainingPercent == 92, "used 8 percent should display 92 percent remaining")
         try expect(!currentRow.freshnessText.contains("快取"), "current profile must not be labeled cached")
+        try expect(currentRow.activityState == .noData, "quota freshness must not masquerade as local Token activity")
 
         let staleCurrentRow = AllAccountsUsageRowPresentation.make(
             profile: current,
@@ -2345,6 +2348,94 @@ struct CodexUsageStatusTests {
             "unidentified account remains warning-safe"
         )
         try expect(cachedRow.profileID == cachedID, "switch action target must retain the exact profile ID")
+    }
+
+    private static func testLocalProfileActivityProjection() throws {
+        let profileA = UUID(uuidString: "00000000-0000-0000-0000-00000000000a")!
+        let profileB = UUID(uuidString: "00000000-0000-0000-0000-00000000000b")!
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let snapshot = LocalTokenUsageLedgerSnapshot(
+            totalObservedTokens: 300,
+            threads: [
+                LocalTokenUsageLedgerThread(profileID: nil, threadID: "default-1", turnID: "turn-1", observedCumulativeTokens: 10, updatedAt: base),
+                LocalTokenUsageLedgerThread(profileID: nil, threadID: "default-2", turnID: "turn-2", observedCumulativeTokens: 20, updatedAt: base.addingTimeInterval(30)),
+                LocalTokenUsageLedgerThread(profileID: profileA, threadID: "a-1", turnID: "turn-3", observedCumulativeTokens: 30, updatedAt: base.addingTimeInterval(10)),
+                LocalTokenUsageLedgerThread(profileID: profileA, threadID: "a-2", turnID: "turn-4", observedCumulativeTokens: 40, updatedAt: base.addingTimeInterval(50)),
+                LocalTokenUsageLedgerThread(profileID: profileB, threadID: "b-1", turnID: "turn-5", observedCumulativeTokens: 50, updatedAt: base.addingTimeInterval(5))
+            ],
+            dailyUsageBuckets: [],
+            longestObservedTurnSec: nil,
+            lastObservedAt: base.addingTimeInterval(50)
+        )
+        let observations = snapshot.profileObservations()
+        try expect(observations.count == 3, "ledger projection groups observations by profile namespace")
+        try expect(observations[0].profileID == nil, "default CODEX_HOME observation retains nil namespace")
+        try expect(observations[0].observedThreadCount == 2, "default namespace counts its observed threads")
+        try expect(observations[0].lastObservedAt == base.addingTimeInterval(30), "default namespace uses newest thread timestamp")
+        try expect(observations.contains { $0.profileID == profileA && $0.observedThreadCount == 2 && $0.lastObservedAt == base.addingTimeInterval(50) }, "managed profile A projection is profile-scoped")
+        try expect(observations.contains { $0.profileID == profileB && $0.observedThreadCount == 1 }, "managed profile B projection is retained")
+    }
+
+    private static func testAllAccountActivityScopeTruth() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let currentID = UUID(uuidString: "00000000-0000-0000-0000-000000000011")!
+        let cachedID = UUID(uuidString: "00000000-0000-0000-0000-000000000012")!
+        let staleID = UUID(uuidString: "00000000-0000-0000-0000-000000000013")!
+        let display: (AccountProfile) -> AccountProfileDisplay = { profile in
+            AccountProfileDisplay(title: profile.displayName, subtitle: "ChatGPT", isWarning: false)
+        }
+        func profile(_ id: UUID, _ name: String) -> AccountProfile {
+            AccountProfile(id: id, fingerprint: id.uuidString, displayName: name, accountType: "chatgpt", authMode: "chatgpt", lastSeen: now)
+        }
+        let current = profile(currentID, "Current")
+        let cached = profile(cachedID, "Cached")
+        let stale = profile(staleID, "Stale")
+        let recent = LocalTokenProfileObservation(profileID: cachedID, lastObservedAt: now.addingTimeInterval(-90), observedThreadCount: 1)
+        let old = LocalTokenProfileObservation(profileID: staleID, lastObservedAt: now.addingTimeInterval(-16 * 60), observedThreadCount: 2)
+        let currentActivity = LocalTokenProfileObservation(profileID: currentID, lastObservedAt: now.addingTimeInterval(-5), observedThreadCount: 3)
+        func row(_ profile: AccountProfile, activity: LocalTokenProfileObservation?, delta: Int64? = nil) -> AllAccountsUsageRowPresentation {
+            AllAccountsUsageRowPresentation.make(
+                profile: profile,
+                display: display(profile),
+                summary: nil,
+                currentProfileID: currentID,
+                currentConnectionState: .connected,
+                currentSnapshotAvailable: true,
+                currentSnapshotIsStale: false,
+                currentRemainingPercent: 92,
+                now: now,
+                localActivity: activity,
+                observedTokenDelta: delta
+            )
+        }
+        let live = row(current, activity: currentActivity, delta: 125)
+        try expect(live.activityState == .currentLive, "current account with local observation is Live")
+        try expect(live.activityText.contains("活動：Live"), "Live activity label is explicit")
+        try expect(live.activityText.contains("+125"), "factual current-process delta is shown")
+
+        let liveWithStaleQuota = AllAccountsUsageRowPresentation.make(
+            profile: current,
+            display: display(current),
+            summary: nil,
+            currentProfileID: currentID,
+            currentConnectionState: .offline,
+            currentSnapshotAvailable: false,
+            currentSnapshotIsStale: true,
+            currentRemainingPercent: nil,
+            now: now,
+            localActivity: currentActivity
+        )
+        try expect(liveWithStaleQuota.activityState == .currentLive, "recent local activity stays Live when quota transport is stale")
+
+        let cachedRow = row(cached, activity: recent)
+        try expect(cachedRow.activityState == .cached, "non-current recent activity is Cached")
+        try expect(!cachedRow.activityText.contains("Live"), "non-current activity never claims Live")
+
+        let staleRow = row(stale, activity: old)
+        try expect(staleRow.activityState == .stale, "old local observation is Stale")
+
+        let noData = row(profile(UUID(uuidString: "00000000-0000-0000-0000-000000000014")!, "No Data"), activity: nil)
+        try expect(noData.activityState == .noData && noData.activityText.contains("No Data"), "missing local evidence is explicit No Data")
     }
 
     private static func testUpdateVersionComparison() throws {

@@ -191,7 +191,9 @@ extension UsagePopoverView {
                 currentSnapshotAvailable: model.snapshot != nil,
                 currentSnapshotIsStale: model.isStale,
                 currentRemainingPercent: model.menuBarRemainingPercent,
-                now: model.currentDate
+                now: model.currentDate,
+                localActivity: model.localProfileActivity(for: profile),
+                observedTokenDelta: model.localObservedTokenDelta(for: profile)
             )
         }
     }
@@ -217,6 +219,11 @@ extension UsagePopoverView {
                 Text(row.subtitle.isEmpty ? row.freshnessText : "\(row.subtitle) · \(row.freshnessText)")
                     .font(.caption2)
                     .foregroundStyle(HUDColorPalette.tertiaryText)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Text(row.activityText)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(allAccountsActivityColor(row.activityState))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -251,6 +258,15 @@ extension UsagePopoverView {
         case .cached: return HUDColorPalette.sevenDay
         case .stale: return HUDColorPalette.warning
         case .unavailable: return HUDColorPalette.tertiaryText
+        }
+    }
+
+    private func allAccountsActivityColor(_ state: AllAccountsLocalActivityState) -> Color {
+        switch state {
+        case .currentLive: return HUDColorPalette.continueAction
+        case .cached: return HUDColorPalette.sevenDay
+        case .stale: return HUDColorPalette.warning
+        case .noData: return HUDColorPalette.tertiaryText
         }
     }
 

@@ -21,7 +21,7 @@ extension UsagePopoverView {
     var tokenActivitySection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("本機 Codex 使用")
+                Text(model.localMachineScopeText)
                     .font(.headline)
                 Spacer()
                 Text("本機 ledger")
@@ -68,6 +68,13 @@ extension UsagePopoverView {
                     .frame(height: 130)
                 }
                 Text("最後觀測：\(model.localTokenUsageLastObservedAt?.formatted(date: .abbreviated, time: .shortened) ?? "尚無本機事件")")
+                    .font(.caption2)
+                    .foregroundStyle(HUDColorPalette.secondaryText)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(model.localActivityScopeText)
+                    .font(.caption.weight(.semibold))
+                Text(model.localProfileActivitySummaryText)
                     .font(.caption2)
                     .foregroundStyle(HUDColorPalette.secondaryText)
             }
