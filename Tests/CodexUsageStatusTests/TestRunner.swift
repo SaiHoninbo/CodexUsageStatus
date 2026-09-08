@@ -73,6 +73,7 @@ struct CodexUsageStatusTests {
             ("local Codex usage artifact parser", testLocalCodexUsageArtifactParser),
             ("desktop activity authority", testDesktopActivityAuthority),
             ("local token usage ledger", testLocalTokenUsageLedger),
+            ("daily Token Hero presentation", testDailyTokenHeroPresentation),
             ("token activity aggregation", testTokenActivityAggregation),
             ("local Token Hero update feedback", testTokenActivityUpdateFeedback),
             ("token reel audio feedback", testTokenReelAudioFeedback),
@@ -1561,11 +1562,18 @@ struct CodexUsageStatusTests {
         try expect(reloaded.snapshot.threads.count == 3, "profile-plus-thread baselines persist to prevent replay")
         try expect(reloaded.snapshot.longestObservedTurnSec == 90, "local longest Turn persists")
 
-        let metrics = LocalTokenUsageLedgerPresentation.metrics(snapshot: reloaded.snapshot)
-        try expect(metrics.first?.label == "本機觀測 token", "HUD Hero identifies the local observation source")
-        try expect(metrics.map(\.label) == ["本機觀測 token", "本機單日峰值", "本機最長 Turn", "本機目前連續", "本機最長連續"], "all five HUD metrics identify machine-local scope")
-        try expect(metrics.map(\.value) == ["295", "200", "1 分 30 秒", "1 天", "3 天"], "all five HUD metrics derive only from the machine ledger")
-        try expect(LocalTokenUsageLedgerPresentation.metrics(snapshot: reloaded.snapshot) == metrics, "account scope cannot alter machine metrics")
+        let metrics = LocalTokenUsageLedgerPresentation.metrics(
+            snapshot: reloaded.snapshot,
+            now: day1,
+            calendar: calendar
+        )
+        try expect(metrics.first?.label == LocalTokenUsageLedgerPresentation.dailyObservedLabel, "HUD Hero identifies today's local observation scope")
+        try expect(metrics.map(\.label) == ["今日累積 token", "本機單日峰值", "本機最長 Turn", "本機目前連續", "本機最長連續"], "all five HUD metrics identify machine-local scope")
+        try expect(metrics.map(\.value) == ["200", "200", "1 分 30 秒", "1 天", "3 天"], "daily Hero and historical metrics derive only from the machine ledger")
+        try expect(
+            LocalTokenUsageLedgerPresentation.metrics(snapshot: reloaded.snapshot, now: day1, calendar: calendar) == metrics,
+            "account scope cannot alter machine metrics"
+        )
 
         try expect(profileStore.deleteProfile(id: profileB.id), "profile B can be deleted")
         let afterProfileDeletion = LocalTokenUsageLedgerStore(fileURL: fileURL)
@@ -1573,14 +1581,21 @@ struct CodexUsageStatusTests {
 
         let feedback = LocalTokenUsageLedgerPresentation.feedback(for: secondTurn, generation: 4)
         try expect(feedback.previousTokens == 175 && feedback.tokens == 200, "reel uses local ledger before/after values")
-        try expect(feedback.changedMetricLabels == [LocalTokenUsageLedgerPresentation.observedLabel], "positive machine delta animates only the Reel Hero")
+        try expect(feedback.changedMetricLabels == [LocalTokenUsageLedgerPresentation.dailyObservedLabel], "positive machine delta animates only the daily Reel Hero")
+        let dailyFeedback = LocalTokenUsageLedgerPresentation.feedback(
+            for: secondTurn,
+            generation: 5,
+            previousHeroTokens: 175,
+            heroTokens: 200
+        )
+        try expect(dailyFeedback.previousTokens == 175 && dailyFeedback.tokens == 200, "reel feedback can carry the daily bucket before/after values")
 
         // Account-history scope is a presentation filter only. A positive
         // machine observation produces identical feedback in either scope;
         // only an explicit scope transition clears the transient event.
         let scopeFeedbacks = AccountScope.allCases.map { scope -> TokenHeroUpdateFeedback in
             _ = scope
-            return LocalTokenUsageLedgerPresentation.feedback(for: secondTurn, generation: 5)
+            return LocalTokenUsageLedgerPresentation.feedback(for: secondTurn, generation: 6)
         }
         let currentScopeFeedback = scopeFeedbacks[0]
         let allScopeFeedback = scopeFeedbacks[1]
@@ -1588,21 +1603,63 @@ struct CodexUsageStatusTests {
         var scopeSoundGate = TokenActivitySoundGate()
         try expect(scopeSoundGate.consume(feedback: currentScopeFeedback, enabled: true), "current scope accepts one local feedback sound")
         try expect(!scopeSoundGate.consume(feedback: allScopeFeedback, enabled: true), "same local generation cannot replay when scope changes")
-        try expect(LocalTokenUsageLedgerPresentation.feedback(for: LocalTokenUsageLedgerUpdate(previousTotalObservedTokens: 200, totalObservedTokens: 200, delta: 0), generation: 6).tokenDelta == 0, "equal local observation has no positive feedback delta")
+        try expect(LocalTokenUsageLedgerPresentation.feedback(for: LocalTokenUsageLedgerUpdate(previousTotalObservedTokens: 200, totalObservedTokens: 200, delta: 0), generation: 7).tokenDelta == 0, "equal local observation has no positive feedback delta")
+    }
+
+    private static func testDailyTokenHeroPresentation() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
+        let day1 = calendar.date(from: DateComponents(year: 2026, month: 9, day: 8, hour: 12))!
+        let day2 = calendar.date(from: DateComponents(year: 2026, month: 9, day: 9, hour: 0, minute: 1))!
+        let snapshot = LocalTokenUsageLedgerSnapshot(
+            totalObservedTokens: 1_000_000_998,
+            threads: [],
+            dailyUsageBuckets: [
+                DailyTokenUsage(startDate: "2026-09-07", tokens: 999),
+                DailyTokenUsage(startDate: "2026-09-08", tokens: 123_456)
+            ],
+            longestObservedTurnSec: nil,
+            lastObservedAt: day1
+        )
+
+        try expect(
+            LocalTokenUsageLedgerPresentation.todayObservedTokens(snapshot: snapshot, now: day1, calendar: calendar) == 123_456,
+            "today helper selects the supplied local calendar day"
+        )
+        let todayMetrics = LocalTokenUsageLedgerPresentation.metrics(snapshot: snapshot, now: day1, calendar: calendar)
+        try expect(todayMetrics.first?.label == "今日累積 token" && todayMetrics.first?.value == "123,456", "today bucket is the Hero value")
+
+        var noToday = snapshot
+        noToday.dailyUsageBuckets = [DailyTokenUsage(startDate: "2026-09-07", tokens: 999)]
+        try expect(
+            LocalTokenUsageLedgerPresentation.metrics(snapshot: noToday, now: day1, calendar: calendar).first?.value == "0",
+            "missing today bucket renders zero without deleting historical buckets"
+        )
+        try expect(
+            LocalTokenUsageLedgerPresentation.metrics(snapshot: snapshot, now: day2, calendar: calendar).first?.value == "0",
+            "next local calendar day starts the Hero at zero"
+        )
+
+        let exactNine = LocalTokenUsageLedgerPresentation.heroTokenCount(999_999_999)
+        let exactBillion = LocalTokenUsageLedgerPresentation.heroTokenCount(1_000_000_000)
+        let boundedOverflow = LocalTokenUsageLedgerPresentation.heroTokenCount(1_000_000_001)
+        try expect(exactNine == "999,999,999", "nine-digit Hero remains exact")
+        try expect(exactBillion == "1,000,000,000", "one-billion Hero remains exact")
+        try expect(boundedOverflow == "10億+", "Hero overflow is bounded and truthful")
     }
 
     private static func testTokenActivityUpdateFeedback() throws {
         let update = LocalTokenUsageLedgerUpdate(
-            previousTotalObservedTokens: 4_829_524_138,
-            totalObservedTokens: 4_831_028_746,
-            delta: 1_504_608
+            previousTotalObservedTokens: 482_952_413,
+            totalObservedTokens: 483_102_874,
+            delta: 150_461
         )
         let event = LocalTokenUsageLedgerPresentation.feedback(for: update, generation: 7)
         try expect(event.generation == 7, "qualifying local observation carries its generation")
         try expect(event.previousTokens == update.previousTotalObservedTokens, "feedback retains the previous local ledger total")
         try expect(event.tokens == update.totalObservedTokens, "feedback retains the final local ledger total")
-        try expect(event.tokenDelta == 1_504_608, "feedback computes the local observed delta")
-        try expect(event.changed(LocalTokenUsageLedgerPresentation.observedLabel), "the local Token Hero is marked for animation")
+        try expect(event.tokenDelta == 150_461, "feedback computes the local observed delta")
+        try expect(event.changed(LocalTokenUsageLedgerPresentation.dailyObservedLabel), "the daily local Token Hero is marked for animation")
         try expect(!event.changed(TokenActivityPresentation.peakLabel), "network history metrics do not pulse for a local ledger event")
         try expect(TokenActivitySoundPolicy.shouldPlay(for: event, enabled: true), "sound preference enables one chime for the event")
         try expect(!TokenActivitySoundPolicy.shouldPlay(for: event, enabled: false), "sound preference disables the chime without disabling animation")
@@ -1622,7 +1679,7 @@ struct CodexUsageStatusTests {
             current: update.totalObservedTokens
         )
         let formattedSlots = slots.map { String($0.currentCharacter) }.joined().replacingOccurrences(of: " ", with: "")
-        try expect(formattedSlots == TokenActivityPresentation.tokenCount(update.totalObservedTokens), "odometer final value exactly matches the formatted local ledger")
+        try expect(formattedSlots == LocalTokenUsageLedgerPresentation.heroTokenCount(update.totalObservedTokens), "odometer final value exactly matches the bounded Hero presentation")
         try expect(slots.contains(where: { $0.isChangedDigit }), "odometer identifies changed numeric slots")
         try expect(slots.contains(where: { $0.currentCharacter == "," && !$0.isChangedDigit }), "odometer keeps separators stable")
 
@@ -2176,7 +2233,8 @@ struct CodexUsageStatusTests {
         let visibleCredits = CreditsBalance(hasCredits: true, unlimited: false, balance: "3.50")
         try expect(HUDAccountInfoVisibilityPolicy.showsRow(credits: visibleCredits, resetCreditCount: nil), "Credits-only information shows the row")
         try expect(HUDAccountInfoVisibilityPolicy.showsRow(credits: nil, resetCreditCount: 2), "Reset-Credit-only information shows the row")
-        try expect(HUDAccountInfoVisibilityPolicy.showsRow(credits: nil, resetCreditCount: 0), "known zero Reset Credit remains visible")
+        try expect(!HUDAccountInfoVisibilityPolicy.showsRow(credits: nil, resetCreditCount: 0), "known zero Reset Credit hides the account-information row when no Credits exist")
+        try expect(HUDAccountInfoVisibilityPolicy.showsRow(credits: visibleCredits, resetCreditCount: 0), "Credits remain visible when Reset Credit is known zero")
         try expect(!HUDAccountInfoVisibilityPolicy.showsRow(credits: nil, resetCreditCount: nil), "no account information hides the row")
         let countOnly = RateLimitResetCredits(availableCount: 2, credits: nil)
         try expect(
@@ -2918,14 +2976,14 @@ struct CodexUsageStatusTests {
     private static func testHUDMetrics() throws {
         let standard = HUDMetrics(scaleLevel: .standard)
         try expectApproximately(standard.panelSize.width, 416, "canonical panel width")
-        try expectApproximately(standard.panelSize.height, 282.4, "canonical panel height derives Token hero and workflow rows")
+        try expectApproximately(standard.panelSize.height, 292.8, "canonical panel height derives Token hero and equal action rows")
         try expect(standard.panelSize.height < 300, "standard two-quota Token hero HUD remains bounded")
         try expectApproximately(standard.contentWidth, 394, "content width follows outer padding")
         try expectApproximately(standard.quotaColumnHeight, 73, "quota rows close to the compact quota budget")
         try expectApproximately(standard.headerHeight, 22, "header height")
         try expectApproximately(standard.headerGap, 5, "header gap")
         try expect(standard.tokenSummaryHeight >= 78, "Token hero has room for idle reel cells and secondary metrics")
-        try expect(standard.workflowActionHeight / standard.actionHeight > 0.7 && standard.workflowActionHeight / standard.actionHeight < 0.8, "workflow cards are 70–80% of primary row")
+        try expectApproximately(standard.workflowActionHeight, standard.actionHeight, "workflow cards share the primary action height")
         try expectApproximately(standard.verticalContentHeight + standard.outerPadding * 2, standard.panelSize.height, "canonical height closes from derived tokens")
         try expect(standard.panelSize(quotaRowCount: 1).height < standard.panelSize(quotaRowCount: 2).height, "one quota row removes empty vertical space")
         try expect(standard.panelSize(quotaRowCount: 3).height > standard.panelSize(quotaRowCount: 2).height, "three quota rows grow only by quota height")
@@ -2945,7 +3003,7 @@ struct CodexUsageStatusTests {
                 3 * metrics.actionCardWidth + (metrics.actionSpacing * 2) <= metrics.contentWidth + 0.01,
                 "action cards fit three columns at every scale level"
             )
-            try expect(metrics.workflowActionHeight < metrics.actionHeight, "workflow row remains subordinate at \(level.displayName)")
+            try expectApproximately(metrics.workflowActionHeight, metrics.actionHeight, "workflow row shares action height at \(level.displayName)")
             try expect(metrics.tokenSummaryHeight >= 40 * metrics.factor, "token summary keeps two rows within the scaled cell budget at \(level.displayName)")
             for rowCount in 1...3 {
                 let dynamicHeight = metrics.verticalContentHeight(for: rowCount) + metrics.outerPadding * 2
@@ -2963,7 +3021,8 @@ struct CodexUsageStatusTests {
                     (CreditsBalance(hasCredits: true, unlimited: false, balance: "10"), nil, true),
                     (CreditsBalance(hasCredits: true, unlimited: false, balance: "10"), 2, true),
                     (nil, 2, true),
-                    (nil, 0, true),
+                    (CreditsBalance(hasCredits: true, unlimited: false, balance: "10"), 0, true),
+                    (nil, 0, false),
                     (nil, nil, false)
                 ]
                 for (credits, resetCount, expectedVisible) in stateMatrix {
@@ -3365,6 +3424,9 @@ struct CodexUsageStatusTests {
         try expect(neon.tokenHeroSurface != neon.panelSurface, "neon token hero has its own semantic surface")
         try expect(light.fiveHourSurface != light.sevenDaySurface, "light sky quota surfaces remain differentiated")
         try expect(mario.tokenHeroSurface != mario.panelSurface, "mario token hero is distinct from the cream panel")
+        try expect(mario.tokenHeroLabel != mario.token, "mario Token Hero label uses a dedicated high-contrast semantic color")
+        try expect(mario.tokenHeroSecondaryText != mario.secondaryText, "mario Token Hero secondary labels use dedicated contrast")
+        try expect(mario.tokenHeroSecondaryValue != mario.primaryText, "mario Token Hero secondary values use dedicated contrast")
         try expect(mario.commitPushForeground != mario.filledActionForeground, "mario yellow commit action uses dark text")
         try expect(neon.filledActionHoverOpacity > neon.filledActionOpacity, "neon action hover is stronger than idle")
         try expect(light.filledActionHoverOpacity > light.filledActionOpacity, "light sky action hover is stronger than idle")

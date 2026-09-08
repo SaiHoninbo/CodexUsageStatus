@@ -24,7 +24,6 @@ struct HUDMetrics: Equatable {
     static let canonicalQuotaGap: CGFloat = 5
     static let canonicalSectionGap: CGFloat = 6
     static let canonicalActionHeight: CGFloat = 38.4
-    static let canonicalWorkflowActionHeight: CGFloat = 28
     static let canonicalWorkflowActionGap: CGFloat = 5
     // Credits and Reset Credits share a non-progress account-information row.
     // Its dividers and breathing room are included so AppKit and SwiftUI keep
@@ -47,7 +46,7 @@ struct HUDMetrics: Equatable {
             + canonicalSectionGap
             + canonicalActionHeight
             + canonicalWorkflowActionGap
-            + canonicalWorkflowActionHeight
+            + canonicalActionHeight
     )
 
     init(scaleLevel: HUDScaleLevel = .standard) {
@@ -88,7 +87,9 @@ struct HUDMetrics: Equatable {
     var quotaGap: CGFloat { Self.canonicalQuotaGap * factor }
     var sectionGap: CGFloat { Self.canonicalSectionGap * factor }
     var actionHeight: CGFloat { Self.canonicalActionHeight * factor }
-    var workflowActionHeight: CGFloat { Self.canonicalWorkflowActionHeight * factor }
+    /// Both action rows use one height authority so labels and hit targets
+    /// remain aligned instead of drifting into a smaller workflow row.
+    var workflowActionHeight: CGFloat { actionHeight }
     var tokenSummaryHeight: CGFloat { Self.canonicalTokenSummaryHeight * factor }
     var tokenSummaryGap: CGFloat { Self.canonicalTokenSummaryGap * factor }
     var workflowActionGap: CGFloat { Self.canonicalWorkflowActionGap * factor }

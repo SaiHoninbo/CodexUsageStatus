@@ -95,6 +95,12 @@ struct HUDThemePalette: Equatable {
     let gptReserveWeekly: Color
     let credits: Color
     let token: Color
+    /// Token Hero-specific semantic colors. These stay independent from the
+    /// global palette so Mario can keep its warm action/quota typography while
+    /// retaining strong contrast on the red Hero surface.
+    let tokenHeroLabel: Color
+    let tokenHeroSecondaryText: Color
+    let tokenHeroSecondaryValue: Color
     let submitAction: Color
     let continueAction: Color
     let fixAction: Color
@@ -138,6 +144,9 @@ struct HUDThemePalette: Equatable {
         gptReserveWeekly: Color(red: 0.30, green: 0.82, blue: 0.74),
         credits: Color(red: 0.64, green: 0.43, blue: 1.0),
         token: Color(red: 0.72, green: 0.43, blue: 1.0),
+        tokenHeroLabel: Color(red: 0.72, green: 0.43, blue: 1.0),
+        tokenHeroSecondaryText: Color.white.opacity(0.82),
+        tokenHeroSecondaryValue: Color.white.opacity(0.96),
         submitAction: Color(red: 0.17, green: 0.31, blue: 0.92),
         continueAction: Color(red: 0.40, green: 0.17, blue: 0.82),
         fixAction: Color(red: 0.82, green: 0.25, blue: 0.10),
@@ -182,6 +191,9 @@ struct HUDThemePalette: Equatable {
         gptReserveWeekly: Color(red: 0.04, green: 0.62, blue: 0.54),
         credits: Color(red: 0.02, green: 0.55, blue: 0.42),
         token: Color(red: 0.03, green: 0.48, blue: 0.86),
+        tokenHeroLabel: Color(red: 0.03, green: 0.48, blue: 0.86),
+        tokenHeroSecondaryText: Color(red: 0.12, green: 0.25, blue: 0.43).opacity(0.92),
+        tokenHeroSecondaryValue: Color(red: 0.04, green: 0.10, blue: 0.23),
         submitAction: Color(red: 0.12, green: 0.52, blue: 0.94),
         continueAction: Color(red: 0.10, green: 0.70, blue: 0.48),
         fixAction: Color(red: 1.0, green: 0.47, blue: 0.14),
@@ -226,6 +238,9 @@ struct HUDThemePalette: Equatable {
         gptReserveWeekly: Color(red: 0.04, green: 0.62, blue: 0.23),
         credits: Color(red: 0.02, green: 0.54, blue: 0.22),
         token: Color(red: 0.96, green: 0.48, blue: 0.02),
+        tokenHeroLabel: Color.white.opacity(0.96),
+        tokenHeroSecondaryText: Color.white.opacity(0.90),
+        tokenHeroSecondaryValue: Color.white.opacity(0.98),
         submitAction: Color(red: 0.03, green: 0.40, blue: 0.95),
         continueAction: Color(red: 0.02, green: 0.65, blue: 0.20),
         fixAction: Color(red: 0.94, green: 0.12, blue: 0.08),

@@ -470,6 +470,7 @@ final class UsageViewModel: ObservableObject {
 
     func refresh() {
         currentDate = Date()
+        refreshHUDTokenActivitySummary()
         refreshAccessibilityPermissionState()
         activeClient.refresh()
     }
@@ -1182,12 +1183,25 @@ final class UsageViewModel: ObservableObject {
             summary = aggregate.map(Self.rangeIndependentTokenSummary)
         }
         let nextMetrics = LocalTokenUsageLedgerPresentation.metrics(
-            snapshot: localTokenUsageLedgerStore.snapshot
+            snapshot: localTokenUsageLedgerStore.snapshot,
+            now: currentDate
         )
         hudTokenActivitySummary = summary
         refreshHUDTokenActivityFetchedAt(fallback: summary?.fetchedAt)
         if hudTokenActivityMetrics != nextMetrics {
             hudTokenActivityMetrics = nextMetrics
+            // A persisted feedback event is only valid for the daily value
+            // that produced it. This clears yesterday's reel at local
+            // midnight (and any superseded event before a new one is set),
+            // while the production callback below immediately installs a
+            // fresh event for the newly observed value.
+            let todayTokens = LocalTokenUsageLedgerPresentation.todayObservedTokens(
+                snapshot: localTokenUsageLedgerStore.snapshot,
+                now: currentDate
+            )
+            if hudTokenActivityFeedback?.tokens != todayTokens {
+                hudTokenActivityFeedback = nil
+            }
         }
 
     }
@@ -1200,6 +1214,10 @@ final class UsageViewModel: ObservableObject {
         // default CODEX_HOME uses the stable nil namespace, while managed
         // homes carry their profile attribution. No account lifetime data is
         // consulted here.
+        let previousHeroTokens = LocalTokenUsageLedgerPresentation.todayObservedTokens(
+            snapshot: localTokenUsageLedgerStore.snapshot,
+            now: record.observedAt
+        )
         guard let update = localTokenUsageLedgerStore.record(
             profileID: profileID,
             threadID: record.threadID,
@@ -1218,7 +1236,12 @@ final class UsageViewModel: ObservableObject {
         hudTokenActivityFeedbackGeneration &+= 1
         let feedback = LocalTokenUsageLedgerPresentation.feedback(
             for: update,
-            generation: hudTokenActivityFeedbackGeneration
+            generation: hudTokenActivityFeedbackGeneration,
+            previousHeroTokens: previousHeroTokens,
+            heroTokens: LocalTokenUsageLedgerPresentation.todayObservedTokens(
+                snapshot: localTokenUsageLedgerStore.snapshot,
+                now: record.observedAt
+            )
         )
         hudTokenActivityFeedback = feedback
         if tokenActivitySoundGate.consume(feedback: feedback, enabled: tokenReelSoundEnabled) {
@@ -1632,6 +1655,10 @@ final class UsageViewModel: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.currentDate = Date()
+                // Re-select the existing local-day ledger bucket on the same
+                // 60-second display cadence. This makes the Hero roll to zero
+                // at local midnight without adding another timer or poll.
+                self.refreshHUDTokenActivitySummary()
                 if self.activeTurn.state == .active, let started = self.activeTurn.startedAt {
                     self.activeTurn.elapsedSeconds = max(0, Int64(self.currentDate.timeIntervalSince(started)))
                     self.activeTurn.receivedAt = self.currentDate

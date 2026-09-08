@@ -57,8 +57,8 @@ struct HUDPresentation: Equatable {
     let isCodexFocused: Bool
     let quotaRowCount: Int
     /// The single account-information-row visibility decision shared by the
-    /// SwiftUI tree and the AppKit panel geometry. A known zero Reset Credit
-    /// count is still information and therefore keeps this row visible.
+    /// SwiftUI tree and the AppKit panel geometry. A zero Reset Credit count
+    /// is intentionally hidden unless the Credits balance itself is displayable.
     let showsAccountInfoRow: Bool
     let resetCreditCount: Int?
     let resetCreditNextExpiryAt: Int64?
@@ -88,7 +88,7 @@ struct HUDPresentation: Equatable {
 /// layout code consumes the resulting boolean without reinterpreting data.
 enum HUDAccountInfoVisibilityPolicy {
     static func showsRow(credits: CreditsBalance?, resetCreditCount: Int?) -> Bool {
-        credits?.isDisplayable == true || resetCreditCount != nil
+        credits?.isDisplayable == true || (resetCreditCount ?? 0) > 0
     }
 }
 
@@ -295,8 +295,11 @@ struct TokenOdometerReelPlan: Equatable {
 /// roll.
 enum TokenOdometerPresentation {
     static func slots(previous: Int64, current: Int64) -> [TokenOdometerSlot] {
-        let oldCharacters = Array(TokenActivityPresentation.tokenCount(previous))
-        let newCharacters = Array(TokenActivityPresentation.tokenCount(current))
+        // Use the same bounded display policy as the daily Token Hero. The
+        // ledger remains exact; only the compact odometer presentation is
+        // capped once the value exceeds its visual budget.
+        let oldCharacters = Array(LocalTokenUsageLedgerPresentation.heroTokenCount(previous))
+        let newCharacters = Array(LocalTokenUsageLedgerPresentation.heroTokenCount(current))
         let width = max(oldCharacters.count, newCharacters.count)
         let oldPadded = Array(repeating: Character(" "), count: width - oldCharacters.count) + oldCharacters
         let newPadded = Array(repeating: Character(" "), count: width - newCharacters.count) + newCharacters

@@ -153,8 +153,13 @@ struct HUDAccountInfoRow: View {
         credits?.isDisplayable == true
     }
 
+    private var visibleResetCreditCount: Int? {
+        guard let resetCreditCount, resetCreditCount > 0 else { return nil }
+        return resetCreditCount
+    }
+
     private var resetColor: Color {
-        (resetCreditCount ?? 0) > 0 ? palette.verificationAction : palette.tertiaryText
+        visibleResetCreditCount == nil ? palette.tertiaryText : palette.verificationAction
     }
 
     var body: some View {
@@ -164,13 +169,13 @@ struct HUDAccountInfoRow: View {
                 if showsCredits {
                     creditsContent
                 }
-                if showsCredits, resetCreditCount != nil {
+                if showsCredits, visibleResetCreditCount != nil {
                     Rectangle()
                         .fill(palette.divider)
                         .frame(width: max(0.6, 0.8 * scaleFactor), height: rowHeight * 0.62)
                 }
-                if let resetCreditCount {
-                    resetCreditContent(count: resetCreditCount)
+                if let visibleResetCreditCount {
+                    resetCreditContent(count: visibleResetCreditCount)
                 }
             }
             .frame(width: width, height: rowHeight, alignment: .leading)
@@ -240,9 +245,9 @@ struct HUDAccountInfoRow: View {
         if showsCredits {
             parts.append(credits?.unlimited == true ? "Credits 無限額度" : "Credits 餘額 \(balanceText)")
         }
-        if let resetCreditCount {
+        if let visibleResetCreditCount {
             let countdown = resetCreditCountdownText.map { "，\($0)" } ?? ""
-            parts.append("重置券 \(resetCreditCount) 張\(countdown)")
+            parts.append("重置券 \(visibleResetCreditCount) 張\(countdown)")
         }
         return parts.joined(separator: "；")
     }
@@ -265,7 +270,10 @@ struct HUDTokenActivitySummaryView: View, Equatable {
     @Environment(\.hudThemePalette) private var palette
 
     private var metrics: [TokenActivityMetric] {
-        summaryMetrics ?? TokenActivityPresentation.metrics(for: nil)
+        summaryMetrics ?? LocalTokenUsageLedgerPresentation.metrics(
+            snapshot: .empty,
+            now: Date()
+        )
     }
 
     static func == (lhs: HUDTokenActivitySummaryView, rhs: HUDTokenActivitySummaryView) -> Bool {
@@ -281,7 +289,7 @@ struct HUDTokenActivitySummaryView: View, Equatable {
     var body: some View {
         HStack(spacing: max(6, 8 * scaleFactor)) {
             lifetimeHero(metrics.first ?? TokenActivityMetric(
-                label: LocalTokenUsageLedgerPresentation.observedLabel,
+                label: LocalTokenUsageLedgerPresentation.dailyObservedLabel,
                 value: "—"
             ))
             Rectangle()
@@ -299,16 +307,16 @@ struct HUDTokenActivitySummaryView: View, Equatable {
         }
         .opacity(isStale ? 0.88 : 1)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("本機 Token 使用與帳號歷史")
+        .accessibilityLabel("本機今日 Token 與帳號歷史")
         .accessibilityValue(metrics.map { "\($0.label) \($0.value)" }.joined(separator: "；") + (isStale ? "；資料較舊" : ""))
-        .help(isStale ? "本機觀測 Token；次要帳號歷史資料較舊" : "本機觀測 Token 與帳號歷史摘要")
+        .help(isStale ? "本機今日觀測 Token；次要帳號歷史資料較舊" : "本機今日觀測 Token 與帳號歷史摘要")
     }
 
     private func lifetimeHero(_ metric: TokenActivityMetric) -> some View {
         VStack(alignment: .leading, spacing: max(2, 3 * scaleFactor)) {
             Label(metric.label, systemImage: "cylinder.split.1x2.fill")
                 .font(.system(size: max(8, 11 * scaleFactor), weight: .semibold, design: .rounded))
-                .foregroundStyle(palette.token)
+                .foregroundStyle(palette.tokenHeroLabel)
             if let feedback {
                 HUDTokenOdometerView(
                     feedback: feedback,
@@ -346,14 +354,14 @@ struct HUDTokenActivitySummaryView: View, Equatable {
     private func secondaryMetricCell(_ metric: TokenActivityMetric) -> some View {
         VStack(alignment: .leading, spacing: max(0.5, 1 * scaleFactor)) {
             Text(metric.label)
-                .font(.system(size: max(6, 8 * scaleFactor), weight: .medium, design: .rounded))
-                .foregroundStyle(palette.secondaryText)
+                .font(.system(size: max(8, 10 * scaleFactor), weight: .semibold, design: .rounded))
+                .foregroundStyle(palette.tokenHeroSecondaryText)
                 .lineLimit(1)
                 .minimumScaleFactor(0.62)
                 .allowsTightening(true)
             Text(metric.value)
-                .font(.system(size: max(8, 11 * scaleFactor), weight: .bold, design: .rounded))
-                .foregroundStyle(palette.primaryText)
+                .font(.system(size: max(9, 12 * scaleFactor), weight: .bold, design: .rounded))
+                .foregroundStyle(palette.tokenHeroSecondaryValue)
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.42)

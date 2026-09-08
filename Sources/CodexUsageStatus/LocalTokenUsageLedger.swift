@@ -331,18 +331,55 @@ final class LocalTokenUsageLedgerStore {
 }
 
 enum LocalTokenUsageLedgerPresentation {
+    /// The history surface keeps the installation-wide scope label, while the
+    /// compact HUD hero is explicitly scoped to the current local calendar
+    /// day. Keeping these labels separate prevents a historical total from
+    /// silently becoming the meaning of the daily hero.
     static let observedLabel = "本機觀測 token"
+    static let dailyObservedLabel = "今日累積 token"
     static let dailyPeakLabel = "本機單日峰值"
     static let longestTurnLabel = "本機最長 Turn"
     static let currentStreakLabel = "本機目前連續"
     static let longestStreakLabel = "本機最長連續"
 
-    static func metrics(snapshot: LocalTokenUsageLedgerSnapshot) -> [TokenActivityMetric] {
+    /// Returns the observed local usage for the supplied local calendar day.
+    /// The ledger's buckets are already installation-scoped and persisted;
+    /// this helper only selects today's bucket for presentation.
+    static func todayObservedTokens(
+        snapshot: LocalTokenUsageLedgerSnapshot,
+        now: Date,
+        calendar: Calendar = .current
+    ) -> Int64 {
+        let components = calendar.dateComponents([.year, .month, .day], from: now)
+        let key = String(format: "%04d-%02d-%02d", components.year ?? 0, components.month ?? 0, components.day ?? 0)
+        return snapshot.dailyUsageBuckets
+            .filter { $0.startDate == key }
+            .reduce(into: Int64(0)) { total, bucket in
+                let (sum, overflow) = total.addingReportingOverflow(max(0, bucket.tokens))
+                total = overflow ? Int64.max : sum
+            }
+    }
+
+    /// The hero has a bounded visual budget. Values remain fully represented
+    /// in the ledger; only the compact display changes once it exceeds the
+    /// nine-digit budget.
+    static func heroTokenCount(_ value: Int64?) -> String {
+        guard let value else { return "—" }
+        guard value <= 1_000_000_000 else { return "10億+" }
+        return TokenActivityPresentation.tokenCount(value)
+    }
+
+    static func metrics(
+        snapshot: LocalTokenUsageLedgerSnapshot,
+        now: Date,
+        calendar: Calendar = .current
+    ) -> [TokenActivityMetric] {
+        let todayTokens = todayObservedTokens(snapshot: snapshot, now: now, calendar: calendar)
         let streaks = streaks(from: snapshot.dailyUsageBuckets)
         return [
             TokenActivityMetric(
-                label: observedLabel,
-                value: TokenActivityPresentation.tokenCount(snapshot.totalObservedTokens)
+                label: dailyObservedLabel,
+                value: heroTokenCount(todayTokens)
             ),
             TokenActivityMetric(
                 label: dailyPeakLabel,
@@ -416,13 +453,17 @@ enum LocalTokenUsageLedgerPresentation {
 
     static func feedback(
         for update: LocalTokenUsageLedgerUpdate,
-        generation: UInt64
+        generation: UInt64,
+        previousHeroTokens: Int64? = nil,
+        heroTokens: Int64? = nil
     ) -> TokenHeroUpdateFeedback {
-        TokenHeroUpdateFeedback(
+        let previous = previousHeroTokens ?? update.previousTotalObservedTokens
+        let current = heroTokens ?? update.totalObservedTokens
+        return TokenHeroUpdateFeedback(
             generation: generation,
-            previousTokens: update.previousTotalObservedTokens,
-            tokens: update.totalObservedTokens,
-            changedMetricLabels: [observedLabel]
+            previousTokens: previous,
+            tokens: current,
+            changedMetricLabels: [dailyObservedLabel]
         )
     }
 }
