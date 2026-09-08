@@ -39,7 +39,8 @@ final class UsageNotificationService: NSObject, UNUserNotificationCenterDelegate
         thresholds: [Int],
         separateWindows: Bool,
         soundEnabled: Bool,
-        profileID: UUID? = nil
+        profileID: UUID? = nil,
+        coveredRapidDrainWindow: RapidDrainCoveredWindow? = nil
     ) {
         guard now.timeIntervalSince(snapshot.receivedAt) <= 2 * 60 else { return }
 
@@ -65,6 +66,23 @@ final class UsageNotificationService: NSObject, UNUserNotificationCenterDelegate
             )
             guard !pendingThresholds.isEmpty else { continue }
 
+            let isCoveredByRapidDrain = coveredRapidDrainWindow.map {
+                RapidDrainNotificationArbitrationPolicy.covers(
+                    snapshotLimitID: snapshot.limitId,
+                    window: window,
+                    coveredWindow: $0
+                )
+            } ?? false
+            if isCoveredByRapidDrain {
+                // A successfully enqueued Rapid Drain notification carries
+                // more information for this same live snapshot. Disposition
+                // the crossed threshold without emitting a duplicate banner.
+                for threshold in pendingThresholds {
+                    markSent(bucket: bucket, threshold: threshold, resetsAt: window.resetsAt)
+                }
+                continue
+            }
+
             let thresholdText = pendingThresholds
                 .sorted(by: >)
                 .map { "\($0)%" }
@@ -84,6 +102,27 @@ final class UsageNotificationService: NSObject, UNUserNotificationCenterDelegate
                 for threshold in pendingThresholds {
                     self?.markSent(bucket: bucket, threshold: threshold, resetsAt: window.resetsAt)
                 }
+            }
+        }
+    }
+
+    func notifyRapidDrain(
+        event: ObservedRapidDrainEvent,
+        soundEnabled: Bool,
+        completion: @escaping (Bool) -> Void
+    ) {
+        let content = UNMutableNotificationContent()
+        content.title = "Codex 用量快速下降"
+        content.body = "5 小時可用量：觀察到下降 \(event.observedDropPercent)%，目前剩餘 \(event.currentRemainingPercent)%。"
+        content.sound = soundEnabled ? .default : nil
+        let request = UNNotificationRequest(
+            identifier: "codex-rapid-drain-\(event.id.uuidString)",
+            content: content,
+            trigger: nil
+        )
+        center.add(request) { error in
+            DispatchQueue.main.async {
+                completion(error == nil)
             }
         }
     }

@@ -34,10 +34,15 @@ final class TurnNotificationService: NSObject, UNUserNotificationCenterDelegate 
         default: eventType = nil
         }
         if let eventType, let turnID = event.turnID, !hasSent(profileID: profileID, turnID: turnID, eventType: eventType) {
-            let body = makeBody(event: event, contentEnabled: preferences.showContentInNotifications)
             let content = UNMutableNotificationContent()
-            content.title = "Codex Turn \(event.state.displayName)"
-            content.body = body
+            content.title = TurnNotificationContentPolicy.title(state: event.state, programName: event.programName)
+            content.body = TurnNotificationContentPolicy.body(
+                elapsedSeconds: event.elapsedSeconds,
+                tokenTotal: event.tokenTotal,
+                content: event.content,
+                errorMessage: event.errorMessage,
+                contentEnabled: preferences.showContentInNotifications
+            )
             content.sound = preferences.soundEnabled ? .default : nil
             let request = UNNotificationRequest(identifier: "codex-turn-\(turnID)-\(eventType)", content: content, trigger: nil)
             center.add(request) { [weak self] error in
@@ -69,20 +74,6 @@ final class TurnNotificationService: NSObject, UNUserNotificationCenterDelegate 
         content.sound = soundEnabled ? .default : nil
         let request = UNNotificationRequest(identifier: "codex-account-switch-\(profileID.uuidString)-\(Int(Date().timeIntervalSince1970))", content: content, trigger: nil)
         center.add(request)
-    }
-
-    private func makeBody(event: TurnActivitySnapshot, contentEnabled: Bool) -> String {
-        var parts: [String] = []
-        if let elapsed = event.elapsedSeconds { parts.append("耗時 \(elapsed) 秒") }
-        if let tokenTotal = event.tokenTotal { parts.append("\(tokenTotal.formatted()) tokens") }
-        if contentEnabled, let content = event.content, !content.isEmpty { parts.append(content) }
-        if let error = event.errorMessage, !error.isEmpty {
-            // Raw App Server errors can contain private context. Only expose
-            // the full text when the user explicitly opted into notification
-            // content; the default notification remains metadata-only.
-            parts.append(contentEnabled ? error : "伺服器回報錯誤")
-        }
-        return parts.joined(separator: " · ")
     }
 
     private func hasSent(profileID: UUID?, turnID: String, eventType: String) -> Bool {

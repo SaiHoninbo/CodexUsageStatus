@@ -76,10 +76,11 @@ rollout／session JSONL 為唯一活動來源。它只觀察開始、目前 turn
 傳輸，但不再與這條可見時間線競爭。觀察器是唯讀的，既有檔案從目前檔尾開始，
 也不會建立第二個 Codex process。
 
-這條路徑採 metadata-first：不讀取或保存 prompt、對話文字、thread title、
-agent message 或 rollout 原始內容。因此在安全內容能力存在前，Turn 通知內容
-選項會停用。Quota、帳號身份、Reset Credit 與其他 App Server 資料仍由本機
-App Server 傳輸提供。
+這條路徑採 metadata-first：不讀取或保存 prompt、對話文字、agent message
+或 rollout 原始內容。為了讓完成通知指出是哪個程序／工作，App 只會唯讀讀取
+本機 `session_index.jsonl` 裡對應 thread 的名稱；UsageStatus 不會保存這個名稱。
+在安全內容能力存在前，Turn 通知內容選項仍會停用。Quota、帳號身份、Reset
+Credit 與其他 App Server 資料仍由本機 App Server 傳輸提供。
 
 ## 帳號與隱私邊界
 

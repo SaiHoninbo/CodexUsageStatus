@@ -118,6 +118,10 @@ struct TurnActivitySnapshot: Equatable {
     var content: String?
     var errorMessage: String?
     var receivedAt: Date
+    /// The user-visible local thread/program name, when Codex has recorded
+    /// one in its metadata-only session index.  This is intentionally kept
+    /// separate from prompt/conversation content.
+    var programName: String? = nil
 
     static let idle = TurnActivitySnapshot(
         state: .idle, threadID: nil, turnID: nil, startedAt: nil,

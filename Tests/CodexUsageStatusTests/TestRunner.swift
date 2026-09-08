@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import CoreGraphics
 import AppKit
 import SwiftUI
@@ -75,6 +76,8 @@ struct CodexUsageStatusTests {
             ("token activity aggregation", testTokenActivityAggregation),
             ("local Token Hero update feedback", testTokenActivityUpdateFeedback),
             ("token reel audio feedback", testTokenReelAudioFeedback),
+            ("rapid drain policy", testRapidDrainPolicy),
+            ("rapid drain content projection", testRapidDrainContentProjection),
             ("status item presentation projection", testStatusItemPresentationProjection),
             ("HUD presentation boundary", testHUDPresentationBoundary),
             ("token activity store replacement and retention", testTokenActivityStoreReplacementAndRetention),
@@ -90,6 +93,7 @@ struct CodexUsageStatusTests {
             ("local profile activity projection", testLocalProfileActivityProjection),
             ("all-account activity scope truth", testAllAccountActivityScopeTruth),
             ("turn activity event decoding", testTurnActivityDecoding),
+            ("turn notification content policy", testTurnNotificationContentPolicy),
             ("account profiles isolate email", testAccountProfilesIsolateEmail),
             ("account read disables refresh token", testAccountReadDisablesRefreshToken),
             ("unknown profile is marked", testUnknownProfileIsMarked),
@@ -1196,6 +1200,27 @@ struct CodexUsageStatusTests {
             CodexLocalUsageArtifactParser.parseSessionThreadID(sessionMeta) == "thread-from-session-meta",
             "session metadata provides the rollout thread identity"
         )
+        let sessionIndexRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-session-index-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: sessionIndexRoot) }
+        try FileManager.default.createDirectory(at: sessionIndexRoot, withIntermediateDirectories: true)
+        let sessionIndex = #"""
+        {"id":"thread-named","thread_name":"舊名稱","updated_at":"2026-09-07T03:18:41Z"}
+        {"id":"thread-named","thread_name":"點了沒 iDino0904主程式 測試用","updated_at":"2026-09-07T03:19:41Z"}
+        {"id":"other-thread","thread_name":"不相關","updated_at":"2026-09-07T03:20:41Z"}
+        """#
+        try Data(sessionIndex.utf8).write(
+            to: sessionIndexRoot.appendingPathComponent("session_index.jsonl"),
+            options: .atomic
+        )
+        try expect(
+            CodexLocalSessionIndex.threadName(for: "thread-named", in: sessionIndexRoot) == "點了沒 iDino0904主程式 測試用",
+            "session index returns the latest thread name"
+        )
+        try expect(
+            CodexLocalSessionIndex.threadName(for: "missing-thread", in: sessionIndexRoot) == nil,
+            "session index does not invent a name for an unknown thread"
+        )
         let completion = Data(#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-complete","started_at":1000,"completed_at":1012.75,"duration_ms":12750}}"#.utf8)
         let completionRecord = try unwrap(
             CodexLocalUsageArtifactParser.parseTurnCompletion(completion, threadID: "thread-from-session-meta"),
@@ -1689,6 +1714,167 @@ struct CodexUsageStatusTests {
         try expect(TokenReelSoundPreference.key != "usage.notifications.soundEnabled", "Token Reel sound does not reuse notification sound preference")
     }
 
+    private static func testRapidDrainPolicy() throws {
+        let profileID = UUID()
+        let resetAt: Int64 = 1_800_000_000
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+
+        func snapshot(
+            remaining: Int,
+            at date: Date,
+            fiveHourCount: Int = 1,
+            duration: Int64? = 300,
+            limitID: String? = "codex"
+        ) -> UsageSnapshot {
+            let primary = RateLimitWindow(
+                usedPercent: 100 - remaining,
+                resetsAt: resetAt,
+                windowDurationMins: duration
+            )
+            let secondary: RateLimitWindow? = fiveHourCount == 2
+                ? RateLimitWindow(usedPercent: 100 - remaining, resetsAt: resetAt, windowDurationMins: 300)
+                : nil
+            return UsageSnapshot(
+                limitId: limitID,
+                limitName: nil,
+                planType: nil,
+                primary: primary,
+                secondary: secondary,
+                individualLimit: nil,
+                rateLimitReachedType: nil,
+                spendControlReached: nil,
+                receivedAt: date
+            )
+        }
+
+        var detector = RapidDrainDetector()
+        try expect(detector.observe(snapshot: snapshot(remaining: 100, at: start), profileID: profileID, at: start) == nil, "first live snapshot establishes baseline")
+        let notice = detector.observe(snapshot: snapshot(remaining: 97, at: start.addingTimeInterval(1)), profileID: profileID, at: start.addingTimeInterval(1))
+        try expect(notice?.severity == .notice && notice?.observedDropPercent == 3, "three-point drop emits notice")
+
+        var thresholdDetector = RapidDrainDetector()
+        _ = thresholdDetector.observe(snapshot: snapshot(remaining: 100, at: start), profileID: profileID, at: start)
+        let rapid = thresholdDetector.observe(snapshot: snapshot(remaining: 95, at: start.addingTimeInterval(1)), profileID: profileID, at: start.addingTimeInterval(1))
+        try expect(rapid?.severity == .rapid, "five-point drop emits rapid")
+
+        var severeDetector = RapidDrainDetector()
+        _ = severeDetector.observe(snapshot: snapshot(remaining: 100, at: start), profileID: profileID, at: start)
+        let severe = severeDetector.observe(snapshot: snapshot(remaining: 90, at: start.addingTimeInterval(1)), profileID: profileID, at: start.addingTimeInterval(1))
+        try expect(severe?.severity == .severe, "ten-point drop emits severe")
+
+        var successorDetector = RapidDrainDetector()
+        _ = successorDetector.observe(snapshot: snapshot(remaining: 42, at: start), profileID: profileID, at: start)
+        let first = successorDetector.observe(snapshot: snapshot(remaining: 31, at: start.addingTimeInterval(1)), profileID: profileID, at: start.addingTimeInterval(1))
+        let continuation = successorDetector.observe(snapshot: snapshot(remaining: 30, at: start.addingTimeInterval(2)), profileID: profileID, at: start.addingTimeInterval(2))
+        let successor = successorDetector.observe(snapshot: snapshot(remaining: 20, at: start.addingTimeInterval(3)), profileID: profileID, at: start.addingTimeInterval(3))
+        try expect(first?.observedDropPercent == 11, "first event measures from rolling baseline")
+        try expect(continuation == nil, "one-point continuation does not replay")
+        try expect(successor?.observedDropPercent == 11 && successor?.baselineRemainingPercent == 31, "successor is measured from last emitted state without replaying every refresh")
+
+        var materialSuccessorDetector = RapidDrainDetector()
+        _ = materialSuccessorDetector.observe(snapshot: snapshot(remaining: 42, at: start), profileID: profileID, at: start)
+        _ = materialSuccessorDetector.observe(snapshot: snapshot(remaining: 31, at: start.addingTimeInterval(1)), profileID: profileID, at: start.addingTimeInterval(1))
+        try expect(materialSuccessorDetector.observe(snapshot: snapshot(remaining: 30, at: start.addingTimeInterval(2)), profileID: profileID, at: start.addingTimeInterval(2)) == nil, "three-point successor drop is below the material threshold")
+        try expect(materialSuccessorDetector.observe(snapshot: snapshot(remaining: 28, at: start.addingTimeInterval(3)), profileID: profileID, at: start.addingTimeInterval(3)) == nil, "four-point successor drop is below the material threshold")
+        try expect(materialSuccessorDetector.observe(snapshot: snapshot(remaining: 27, at: start.addingTimeInterval(4)), profileID: profileID, at: start.addingTimeInterval(4)) == nil, "four-point successor drop remains below the material threshold")
+        let fivePointSuccessor = materialSuccessorDetector.observe(snapshot: snapshot(remaining: 26, at: start.addingTimeInterval(5)), profileID: profileID, at: start.addingTimeInterval(5))
+        try expect(fivePointSuccessor?.observedDropPercent == 5 && fivePointSuccessor?.baselineRemainingPercent == 31 && fivePointSuccessor?.severity == .rapid, "five-point successor drop emits from the last event")
+        try expect(materialSuccessorDetector.observe(snapshot: snapshot(remaining: 25, at: start.addingTimeInterval(6)), profileID: profileID, at: start.addingTimeInterval(6)) == nil, "one-point drop after a severe episode and rapid successor does not replay")
+        let postSuccessor = materialSuccessorDetector.observe(snapshot: snapshot(remaining: 21, at: start.addingTimeInterval(7)), profileID: profileID, at: start.addingTimeInterval(7))
+        try expect(postSuccessor?.observedDropPercent == 5 && postSuccessor?.baselineRemainingPercent == 26 && postSuccessor?.severity == .rapid, "later material successor remains independently admissible")
+
+        var severeSuccessorDetector = RapidDrainDetector()
+        _ = severeSuccessorDetector.observe(snapshot: snapshot(remaining: 42, at: start), profileID: profileID, at: start)
+        _ = severeSuccessorDetector.observe(snapshot: snapshot(remaining: 31, at: start.addingTimeInterval(1)), profileID: profileID, at: start.addingTimeInterval(1))
+        let severeSuccessor = severeSuccessorDetector.observe(snapshot: snapshot(remaining: 21, at: start.addingTimeInterval(2)), profileID: profileID, at: start.addingTimeInterval(2))
+        try expect(severeSuccessor?.observedDropPercent == 10 && severeSuccessor?.baselineRemainingPercent == 31 && severeSuccessor?.severity == .severe, "ten-point successor drop emits severe")
+
+        try expect(
+            RapidDrainDetectorBoundaryPolicy.shouldResetForWorkerState(profileID: profileID, currentProfileID: profileID),
+            "current profile worker state resets Rapid Drain detector"
+        )
+        try expect(
+            !RapidDrainDetectorBoundaryPolicy.shouldResetForWorkerState(profileID: profileID, currentProfileID: UUID()),
+            "non-current worker state cannot reset current Rapid Drain detector"
+        )
+
+        var escalationDetector = RapidDrainDetector()
+        _ = escalationDetector.observe(snapshot: snapshot(remaining: 42, at: start), profileID: profileID, at: start)
+        _ = escalationDetector.observe(snapshot: snapshot(remaining: 39, at: start.addingTimeInterval(1)), profileID: profileID, at: start.addingTimeInterval(1))
+        let escalation = escalationDetector.observe(snapshot: snapshot(remaining: 37, at: start.addingTimeInterval(2)), profileID: profileID, at: start.addingTimeInterval(2))
+        try expect(escalation?.observedDropPercent == 5 && escalation?.baselineRemainingPercent == 42 && escalation?.severity == .rapid, "severity escalation retains the cumulative episode baseline")
+
+        var boundaryDetector = RapidDrainDetector()
+        _ = boundaryDetector.observe(snapshot: snapshot(remaining: 100, at: start), profileID: profileID, at: start)
+        try expect(boundaryDetector.observe(snapshot: snapshot(remaining: 90, at: start.addingTimeInterval(1), duration: 10_080), profileID: profileID, at: start.addingTimeInterval(1)) == nil, "seven-day-only observations are ignored")
+        try expect(boundaryDetector.observe(snapshot: snapshot(remaining: 90, at: start.addingTimeInterval(1.5), duration: nil), profileID: profileID, at: start.addingTimeInterval(1.5)) == nil, "missing window duration is ignored")
+        try expect(boundaryDetector.observe(snapshot: snapshot(remaining: 90, at: start.addingTimeInterval(2)), profileID: profileID, at: start.addingTimeInterval(2)) == nil, "ignored window does not leak into later baseline")
+        try expect(boundaryDetector.observe(snapshot: snapshot(remaining: 80, at: start.addingTimeInterval(3), fiveHourCount: 2), profileID: profileID, at: start.addingTimeInterval(3)) == nil, "duplicate five-hour windows fail closed")
+        try expect(boundaryDetector.observe(snapshot: snapshot(remaining: 80, at: start.addingTimeInterval(4)), profileID: nil, at: start.addingTimeInterval(4)) == nil, "unstable profile identity is ignored")
+
+        var horizonDetector = RapidDrainDetector()
+        _ = horizonDetector.observe(snapshot: snapshot(remaining: 100, at: start), profileID: profileID, at: start)
+        try expect(horizonDetector.observe(snapshot: snapshot(remaining: 90, at: start.addingTimeInterval(301)), profileID: profileID, at: start.addingTimeInterval(301)) == nil, "drop outside the five-minute horizon does not alert")
+
+        var correctionDetector = RapidDrainDetector()
+        _ = correctionDetector.observe(snapshot: snapshot(remaining: 100, at: start), profileID: profileID, at: start)
+        _ = correctionDetector.observe(snapshot: snapshot(remaining: 90, at: start.addingTimeInterval(1)), profileID: profileID, at: start.addingTimeInterval(1))
+        try expect(correctionDetector.observe(snapshot: snapshot(remaining: 99, at: start.addingTimeInterval(2)), profileID: profileID, at: start.addingTimeInterval(2)) == nil, "upward correction rebaselines")
+
+        let foreground = RapidDrainPresentationPolicy.decide(trustedCodexForeground: true, notificationsEnabled: true, notificationAuthorized: true)
+        try expect(foreground.showMenuAlert && !foreground.sendRapidDrainBanner, "trusted Codex foreground suppresses banner only")
+        let background = RapidDrainPresentationPolicy.decide(trustedCodexForeground: false, notificationsEnabled: true, notificationAuthorized: true)
+        try expect(background.showMenuAlert && background.sendRapidDrainBanner, "non-Codex foreground permits banner")
+        let denied = RapidDrainPresentationPolicy.decide(trustedCodexForeground: false, notificationsEnabled: true, notificationAuthorized: false)
+        try expect(denied.showMenuAlert && !denied.sendRapidDrainBanner, "notification denial never suppresses menu alert")
+
+        let content = RapidDrainStatusItemContent(event: severe!)
+        try expect(content.title == "↓10%\n5h", "status title uses interpolated drop value")
+        try expect(content.tooltip.contains("下降 10%") && content.tooltip.contains("剩餘 90%"), "status tooltip uses interpolated values")
+
+        let covered = RapidDrainCoveredWindow(limitID: "codex", durationMins: 300, resetAt: resetAt)
+        let fiveHourWindow = RateLimitWindow(usedPercent: 70, resetsAt: resetAt, windowDurationMins: 300)
+        let sevenDayWindow = RateLimitWindow(usedPercent: 70, resetsAt: resetAt, windowDurationMins: 10_080)
+        let changedResetWindow = RateLimitWindow(usedPercent: 70, resetsAt: resetAt + 1, windowDurationMins: 300)
+        try expect(RapidDrainNotificationArbitrationPolicy.covers(snapshotLimitID: "codex", window: fiveHourWindow, coveredWindow: covered), "matching five-hour window is covered")
+        try expect(!RapidDrainNotificationArbitrationPolicy.covers(snapshotLimitID: "codex", window: sevenDayWindow, coveredWindow: covered), "seven-day threshold is never covered by Rapid Drain")
+        try expect(!RapidDrainNotificationArbitrationPolicy.covers(snapshotLimitID: "codex", window: changedResetWindow, coveredWindow: covered), "different reset identity is never covered")
+
+        let stream = PassthroughSubject<ObservedRapidDrainEvent, Never>()
+        var firstSubscriberEvents = 0
+        var secondSubscriberEvents = 0
+        let firstSubscription = stream.sink { _ in firstSubscriberEvents += 1 }
+        if let notice { stream.send(notice) }
+        let secondSubscription = stream.sink { _ in secondSubscriberEvents += 1 }
+        try expect(firstSubscriberEvents == 1 && secondSubscriberEvents == 0, "Rapid Drain event stream does not replay to later subscribers")
+        _ = firstSubscription
+        _ = secondSubscription
+
+        let normalPlan = RapidDrainAnimationPlan.make(severity: .rapid, reduceMotion: false, drop: 7)
+        try expect(normalPlan.pulseCount == 2 && normalPlan.showsScan && normalPlan.showsShake && normalPlan.expandedWidth == 56, "rapid animation plan uses two bounded pulses")
+        let reducedPlan = RapidDrainAnimationPlan.make(severity: .severe, reduceMotion: true, drop: 12)
+        try expect(reducedPlan.pulseCount == 0 && !reducedPlan.showsScan && !reducedPlan.showsShake && reducedPlan.scale == 1, "Reduce Motion disables scan, shake, and scale")
+    }
+
+    private static func testRapidDrainContentProjection() throws {
+        let event = ObservedRapidDrainEvent(
+            id: UUID(),
+            profileID: UUID(),
+            limitID: "codex",
+            resetAt: 1_800_000_000,
+            baselineRemainingPercent: 42,
+            currentRemainingPercent: 31,
+            observedDropPercent: 11,
+            startAt: Date(timeIntervalSince1970: 1_700_000_000),
+            endAt: Date(timeIntervalSince1970: 1_700_000_060),
+            severity: .severe
+        )
+        let content = RapidDrainStatusItemContent(event: event)
+        try expect(content.title == "↓11%\n5h", "rapid status title contains the observed drop")
+        try expect(content.tooltip.contains("下降 11%"), "rapid status tooltip contains the observed drop")
+        try expect(content.tooltip.contains("剩餘 31%"), "rapid status tooltip contains the current remaining value")
+    }
+
     private static func testStatusItemPresentationProjection() throws {
         let base = StatusItemPresentationSource(
             stackedTitle: "Codex\n86%",
@@ -2031,6 +2217,86 @@ struct CodexUsageStatusTests {
             ]
         ])
         try expect(usage?.tokenTotal == 1234, "thread cumulative token usage")
+    }
+
+    private static func testTurnNotificationContentPolicy() throws {
+        try expect(
+            TurnNotificationContentPolicy.title(state: .completed, programName: "Build release") == "程序完成：Build release",
+            "completed notification includes the program name"
+        )
+        try expect(
+            TurnNotificationContentPolicy.title(state: .failed, programName: "Deploy") == "程序失敗：Deploy",
+            "failed notification includes the program name"
+        )
+        try expect(
+            TurnNotificationContentPolicy.title(state: .interrupted, programName: "Tests") == "程序中斷：Tests",
+            "interrupted notification includes the program name"
+        )
+        try expect(
+            TurnNotificationContentPolicy.title(state: .completed, programName: nil) == "Codex Turn 已完成",
+            "missing program name uses the existing Codex Turn fallback"
+        )
+        try expect(
+            TurnNotificationContentPolicy.title(state: .completed, programName: " \n\t ") == "Codex Turn 已完成",
+            "empty or whitespace program name uses the fallback"
+        )
+        try expect(
+            TurnNotificationContentPolicy.normalizedProgramName("  Alpha\nBeta\tGamma  ") == "Alpha Beta Gamma",
+            "multiline program names normalize to one line"
+        )
+        let longName = String(repeating: "x", count: 120)
+        let truncated = TurnNotificationContentPolicy.normalizedProgramName(longName)
+        try expect(
+            truncated == String(longName.prefix(TurnNotificationContentPolicy.maximumProgramNameLength)) + "…",
+            "long program names are bounded"
+        )
+
+        try expect(
+            TurnNotificationContentPolicy.body(
+                elapsedSeconds: 59,
+                tokenTotal: 657_124,
+                content: nil,
+                errorMessage: nil,
+                contentEnabled: false
+            ) == "耗時 59 秒 · 消耗 657,124 tokens",
+            "elapsed seconds and token total use deterministic metadata formatting"
+        )
+        try expect(
+            TurnNotificationContentPolicy.body(
+                elapsedSeconds: nil,
+                tokenTotal: 657_124,
+                content: nil,
+                errorMessage: nil,
+                contentEnabled: false
+            ) == "消耗 657,124 tokens",
+            "missing elapsed time does not fabricate duration"
+        )
+        try expect(
+            TurnNotificationContentPolicy.body(
+                elapsedSeconds: 59,
+                tokenTotal: nil,
+                content: nil,
+                errorMessage: nil,
+                contentEnabled: false
+            ) == "耗時 59 秒",
+            "missing token total does not fabricate token count"
+        )
+        let metadataOnly = TurnNotificationContentPolicy.body(
+            elapsedSeconds: nil,
+            tokenTotal: nil,
+            content: "private prompt text",
+            errorMessage: "private server details",
+            contentEnabled: false
+        )
+        try expect(metadataOnly == "伺服器回報錯誤", "default notification body remains metadata-only")
+        let optedIn = TurnNotificationContentPolicy.body(
+            elapsedSeconds: nil,
+            tokenTotal: nil,
+            content: "safe detail",
+            errorMessage: "diagnostic",
+            contentEnabled: true
+        )
+        try expect(optedIn == "safe detail · diagnostic", "explicit content preference preserves opt-in details")
     }
 
     private static func testAccountProfilesIsolateEmail() throws {

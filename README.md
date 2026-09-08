@@ -76,10 +76,12 @@ that visible timeline. The observer is read-only, starts existing files at
 their current end, and does not create a second Codex process.
 
 This path is metadata-first: it does not read or persist prompts, conversation
-text, thread titles, agent messages, or raw rollout content. Turn notification
-content is therefore disabled until a safe content capability exists. Quota,
-account identity, Reset Credit, and other App Server-backed data continue to use
-the local App Server transport.
+text, agent messages, or raw rollout content. Completion notifications may read
+the local `session_index.jsonl` name for the finished thread so the notification
+can identify the program/work item; that name is not persisted by UsageStatus.
+Turn notification content remains disabled until a safe content capability
+exists. Quota, account identity, Reset Credit, and other App Server-backed data
+continue to use the local App Server transport.
 
 ## Account and privacy boundary
 

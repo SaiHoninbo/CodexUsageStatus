@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import SwiftUI
 import UserNotifications
 import AppKit
@@ -79,6 +80,10 @@ final class UsageViewModel: ObservableObject {
     @Published var tokenActivityRange: TokenActivityRange = .week
     @Published var accountScope: AccountScope = .current
     @Published private(set) var statusItemPresentation = StatusItemPresentation.placeholder
+    /// Transient Rapid Drain events are deliberately a non-replaying stream;
+    /// the canonical status presentation remains state, while this subject is
+    /// consumed once by the AppDelegate animator.
+    let rapidDrainEvents = PassthroughSubject<ObservedRapidDrainEvent, Never>()
 
     let loginItemManager = LoginItemManager()
 
@@ -118,6 +123,7 @@ final class UsageViewModel: ObservableObject {
     private var hudTokenActivityFeedbackGeneration: UInt64 = 0
     private var tokenActivitySoundGate = TokenActivitySoundGate()
     private let tokenReelAudioPlayer = TokenReelAudioFeedbackPlayer()
+    private var rapidDrainDetector = RapidDrainDetector()
     private var updateCheckTimer: Timer?
     private var pendingUnidentifiedProfileBoundary = false
     private var defaultClientEnabled = true
@@ -216,6 +222,9 @@ final class UsageViewModel: ObservableObject {
             guard self.defaultClientEnabled else { return }
             if self.connectionState != state { self.connectionState = state }
             if state == .offline, self.accountHealthState != .offline { self.accountHealthState = .offline }
+            if state == .offline || state == .error || state == .stopped {
+                self.rapidDrainDetector.reset()
+            }
             if let message, !message.isEmpty {
                 if self.errorMessage != message { self.errorMessage = message }
             } else if state == .connected, self.errorMessage != nil {
@@ -231,6 +240,7 @@ final class UsageViewModel: ObservableObject {
             guard let self else { return }
             guard self.defaultClientEnabled else { return }
             guard !self.pendingUnidentifiedProfileBoundary else { return }
+            let rapidDrainEvent = self.observeRapidDrain(snapshot: snapshot, profileID: self.currentProfileID)
             let semanticChange = self.snapshot.map { !$0.hasSameContent(as: snapshot) } ?? true
             // Freshness metadata remains published so stale badges and HUD
             // visibility stay correct; the semantic quota projections,
@@ -250,18 +260,10 @@ final class UsageViewModel: ObservableObject {
             // written only after the semantic quota payload changes.
             self.historyStore.record(snapshot: snapshot, connectionState: .connected, now: snapshot.receivedAt)
             self.syncHistoryState()
-            guard self.notificationsEnabled,
-                  (self.notificationAuthorizationStatus == .authorized || self.notificationAuthorizationStatus == .provisional),
-                  self.connectionState != .offline,
-                  self.connectionState != .error,
-                  self.connectionState != .stopped else { return }
-            self.notificationService.evaluate(
+            self.evaluateLiveNotifications(
                 snapshot: snapshot,
-                now: Date(),
-                thresholds: self.notificationThresholds,
-                separateWindows: self.separateWindowNotifications,
-                soundEnabled: self.notificationSoundEnabled,
-                profileID: self.currentProfileID
+                profileID: self.currentProfileID,
+                rapidDrainEvent: rapidDrainEvent
             )
         }
         client.onTokenActivityState = { [weak self] state, message in
@@ -300,6 +302,7 @@ final class UsageViewModel: ObservableObject {
         client.onAccountBoundary = { [weak self] in
             guard let self else { return }
             guard self.defaultClientEnabled else { return }
+            self.rapidDrainDetector.reset()
             self.pendingUnidentifiedProfileBoundary = true
             self.snapshot = nil
             self.lastUpdated = nil
@@ -433,6 +436,7 @@ final class UsageViewModel: ObservableObject {
     func stop() {
         isStopping = true
         defaultClientEnabled = false
+        rapidDrainDetector.reset()
         displayTimer?.invalidate()
         displayTimer = nil
         updateCheckTimer?.invalidate()
@@ -520,6 +524,7 @@ final class UsageViewModel: ObservableObject {
     func selectProfile(id: UUID) {
         guard let profile = profileStore.profile(for: id), currentProfileID != id else { return }
         switchToProfile(profile)
+        rapidDrainDetector.reset()
         currentProfileID = id
         defaults.set(id.uuidString, forKey: PreferenceKey.activeProfile)
         accountProfiles = profileStore.accountProfiles()
@@ -938,6 +943,12 @@ final class UsageViewModel: ObservableObject {
             // current-profile projection guard so another queued worker can
             // claim that slot immediately.
             if state == .stopped || state == .offline || state == .error {
+                if RapidDrainDetectorBoundaryPolicy.shouldResetForWorkerState(
+                    profileID: id,
+                    currentProfileID: self.currentProfileID
+                ) {
+                    self.rapidDrainDetector.reset()
+                }
                 self.scheduleManagedWorkers(preferredID: self.currentProfileID)
             }
             guard self.currentProfileID == id else { return }
@@ -950,6 +961,12 @@ final class UsageViewModel: ObservableObject {
         worker.onSnapshot = { [weak self] _, snapshot in
             guard let self else { return }
             guard self.workerGenerations[id] == generation else { return }
+            let rapidDrainEvent: ObservedRapidDrainEvent?
+            if self.currentProfileID == id {
+                rapidDrainEvent = self.observeRapidDrain(snapshot: snapshot, profileID: id)
+            } else {
+                rapidDrainEvent = nil
+            }
             let semanticChange = self.managedSnapshots[id].map { !$0.hasSameContent(as: snapshot) } ?? true
             self.managedSnapshots[id] = snapshot
             if semanticChange {
@@ -958,18 +975,10 @@ final class UsageViewModel: ObservableObject {
             }
             if self.currentProfileID == id {
                 guard self.applySnapshot(snapshot, to: self) else { return }
-                guard self.notificationsEnabled,
-                      self.notificationAuthorizationStatus == .authorized || self.notificationAuthorizationStatus == .provisional,
-                      self.connectionState != .offline,
-                      self.connectionState != .error,
-                      self.connectionState != .stopped else { return }
-                self.notificationService.evaluate(
+                self.evaluateLiveNotifications(
                     snapshot: snapshot,
-                    now: Date(),
-                    thresholds: self.notificationThresholds,
-                    separateWindows: self.separateWindowNotifications,
-                    soundEnabled: self.notificationSoundEnabled,
-                    profileID: id
+                    profileID: id,
+                    rapidDrainEvent: rapidDrainEvent
                 )
             }
         }
@@ -1035,6 +1044,7 @@ final class UsageViewModel: ObservableObject {
             // every profile-scoped cache at that boundary so switching away
             // and back cannot resurrect the previous identity's payload.
             self.managedSnapshots[id] = nil
+            if self.currentProfileID == id { self.rapidDrainDetector.reset() }
             self.managedTokenActivities[id] = nil
             self.managedTokenActivityLastFetchedAt[id] = nil
             self.managedAccountHealth[id] = nil
@@ -1253,7 +1263,8 @@ final class UsageViewModel: ObservableObject {
                 tokenTotal: nil,
                 content: nil,
                 errorMessage: nil,
-                receivedAt: event.observedAt
+                receivedAt: event.observedAt,
+                programName: event.programName
             )
 
         case .tokenUpdated:
@@ -1266,6 +1277,9 @@ final class UsageViewModel: ObservableObject {
                   let tokenTotal = event.turnTokenTotal else { return }
             activeTurn.tokenTotal = tokenTotal
             activeTurn.receivedAt = event.observedAt
+            if activeTurn.programName == nil, let programName = event.programName {
+                activeTurn.programName = programName
+            }
 
         case .completed, .failed, .interrupted:
             guard CodexLocalTurnActivityAuthority.acceptsTerminal(
@@ -1300,7 +1314,8 @@ final class UsageViewModel: ObservableObject {
                 tokenTotal: activeTurn.tokenTotal,
                 content: nil,
                 errorMessage: message,
-                receivedAt: event.observedAt
+                receivedAt: event.observedAt,
+                programName: event.programName ?? activeTurn.programName
             )
             // Rollouts intentionally expose metadata only. Never pass the
             // opt-in content preference into this source's notification path.
@@ -1729,6 +1744,7 @@ final class UsageViewModel: ObservableObject {
     }
 
     private func switchToProfile(_ profile: AccountProfile) {
+        rapidDrainDetector.reset()
         migrateLegacyIfNeeded(to: profile)
         historyStore = HistoryStore(
             fileURL: profileStore.historyURL(for: profile),
@@ -1822,6 +1838,64 @@ final class UsageViewModel: ObservableObject {
             soundEnabled: notificationSoundEnabled,
             profileID: currentProfileID
         )
+    }
+
+    private func observeRapidDrain(snapshot: UsageSnapshot, profileID: UUID?) -> ObservedRapidDrainEvent? {
+        guard let event = rapidDrainDetector.observe(snapshot: snapshot, profileID: profileID, at: snapshot.receivedAt) else {
+            return nil
+        }
+        rapidDrainEvents.send(event)
+        return event
+    }
+
+    private func evaluateLiveNotifications(
+        snapshot: UsageSnapshot,
+        profileID: UUID?,
+        rapidDrainEvent: ObservedRapidDrainEvent?
+    ) {
+        guard notificationsEnabled,
+              (notificationAuthorizationStatus == .authorized || notificationAuthorizationStatus == .provisional),
+              connectionState != .offline,
+              connectionState != .error,
+              connectionState != .stopped else { return }
+
+        let trustedCodexForeground = NSWorkspace.shared.frontmostApplication.map(CodexApplicationPolicy.isCodexApplication) ?? false
+        let decision = RapidDrainPresentationPolicy.decide(
+            trustedCodexForeground: trustedCodexForeground,
+            notificationsEnabled: notificationsEnabled,
+            notificationAuthorized: true
+        )
+
+        guard let rapidDrainEvent, decision.sendRapidDrainBanner else {
+            notificationService.evaluate(
+                snapshot: snapshot,
+                now: Date(),
+                thresholds: notificationThresholds,
+                separateWindows: separateWindowNotifications,
+                soundEnabled: notificationSoundEnabled,
+                profileID: profileID
+            )
+            return
+        }
+
+        notificationService.notifyRapidDrain(event: rapidDrainEvent, soundEnabled: notificationSoundEnabled) { [weak self] succeeded in
+            guard let self else { return }
+            self.notificationService.evaluate(
+                snapshot: snapshot,
+                now: Date(),
+                thresholds: self.notificationThresholds,
+                separateWindows: self.separateWindowNotifications,
+                soundEnabled: self.notificationSoundEnabled,
+                profileID: profileID,
+                coveredRapidDrainWindow: succeeded
+                    ? RapidDrainCoveredWindow(
+                        limitID: rapidDrainEvent.limitID,
+                        durationMins: 300,
+                        resetAt: rapidDrainEvent.resetAt
+                    )
+                    : nil
+            )
+        }
     }
 
     private static func loadThresholds(from defaults: UserDefaults) -> [Int] {

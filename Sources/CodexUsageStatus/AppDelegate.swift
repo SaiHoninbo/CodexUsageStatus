@@ -10,14 +10,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var localClickMonitor: Any?
     private var model: UsageViewModel!
     private var statusItemObservation: AnyCancellable?
+    private var rapidDrainEventObservation: AnyCancellable?
     private var statusItemUpdateTask: Task<Void, Never>?
     private var terminationReplyPending = false
     private var floatingHUD: FloatingHUDPanelController!
+    private var rapidDrainAnimator: RapidDrainStatusItemAnimator!
     private let popoverSelectionController = PopoverSelectionController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        rapidDrainAnimator = RapidDrainStatusItemAnimator(statusItem: statusItem)
         if let button = statusItem.button {
             button.target = self
             button.action = #selector(togglePopover(_:))
@@ -83,6 +86,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] _ in
                 self?.scheduleStatusItemUpdate()
             }
+        rapidDrainEventObservation = model.rapidDrainEvents
+            .sink { [weak self] event in
+                guard let self else { return }
+                self.rapidDrainAnimator.animate(
+                    event: event,
+                    reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                )
+            }
         model.start()
         updateStatusItem()
     }
@@ -92,6 +103,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         removeLocalClickMonitor()
         statusItemUpdateTask?.cancel()
         statusItemUpdateTask = nil
+        rapidDrainEventObservation?.cancel()
+        rapidDrainEventObservation = nil
+        rapidDrainAnimator?.stop()
         floatingHUD?.stop()
         model?.stop()
     }
@@ -201,6 +215,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateStatusItem() {
         guard let button = statusItem?.button, let model else { return }
+        if let rapidDrainAnimator {
+            rapidDrainAnimator.updateCanonical(model.statusItemPresentation)
+            return
+        }
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.alignment = .center
         // The menu bar button is only about 22pt tall. Tight line metrics keep

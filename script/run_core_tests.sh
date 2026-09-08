@@ -13,7 +13,9 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/TokenActivityStore.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/LocalTokenUsageLedger.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/CodexLocalUsageObserver.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/TurnNotificationContentPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDPresentation.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/RapidDrainPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/TokenReelAudioFeedback.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/AccountModels.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/ProfileStore.swift" \

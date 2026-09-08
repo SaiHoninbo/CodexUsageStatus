@@ -45,6 +45,10 @@ struct CodexLocalTurnActivityEvent: Equatable, Sendable {
     let durationSeconds: Int64?
     let turnTokenTotal: Int64?
     let observedAt: Date
+    /// Read from the metadata-only CODEX_HOME session index for terminal
+    /// events. It is never copied into the local ledger or persisted by this
+    /// observer.
+    var programName: String? = nil
 }
 
 struct CodexLocalTurnObservationCapabilities: Equatable, Sendable {
@@ -230,6 +234,43 @@ enum CodexLocalUsageArtifactParser {
         default:
             return nil
         }
+    }
+}
+
+/// Read-only access to Codex's append-only session name index.  Codex keeps
+/// thread names outside the rollout JSONL so a completion notification can
+/// identify the finished work without reading prompt or conversation text.
+enum CodexLocalSessionIndex {
+    private struct Entry: Decodable {
+        let id: String?
+        let threadName: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case threadName = "thread_name"
+        }
+    }
+
+    static func threadName(for threadID: String, in codexHomeURL: URL) -> String? {
+        guard !threadID.isEmpty else { return nil }
+        let indexURL = codexHomeURL.appendingPathComponent("session_index.jsonl")
+        guard let data = try? Data(contentsOf: indexURL) else { return nil }
+
+        // The index is append-only and the latest matching row wins. Scanning
+        // from the end avoids returning an obsolete name after a rename.
+        for line in data.split(separator: 0x0A, omittingEmptySubsequences: true).reversed() {
+            guard let entry = try? JSONDecoder().decode(Entry.self, from: Data(line)),
+                  entry.id == threadID,
+                  let rawName = entry.threadName else { continue }
+            let name = rawName
+                .components(separatedBy: .whitespacesAndNewlines)
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { continue }
+            return name
+        }
+        return nil
     }
 }
 
@@ -587,6 +628,16 @@ final class CodexLocalUsageObserver {
                                 ))
                             }
                             if let activity = CodexLocalUsageArtifactParser.parseTurnActivity(lineData, threadID: threadID) {
+                                let programName: String?
+                                switch activity.kind {
+                                case .completed, .failed, .interrupted:
+                                    programName = CodexLocalSessionIndex.threadName(
+                                        for: activity.threadID,
+                                        in: root.codexHomeURL
+                                    )
+                                case .started, .tokenUpdated:
+                                    programName = nil
+                                }
                                 turnActivities.append(CodexLocalTurnActivityEvent(
                                     profileID: root.profileID,
                                     physicalRootURL: root.codexHomeURL,
@@ -597,7 +648,8 @@ final class CodexLocalUsageObserver {
                                     completedAt: activity.completedAt,
                                     durationSeconds: activity.durationSeconds,
                                     turnTokenTotal: nil,
-                                    observedAt: activity.observedAt
+                                    observedAt: activity.observedAt,
+                                    programName: programName
                                 ))
                             }
                             if let completion = CodexLocalUsageArtifactParser.parseTurnCompletion(
