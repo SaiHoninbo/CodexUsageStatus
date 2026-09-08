@@ -5,6 +5,7 @@ import SwiftUI
 extension UsagePopoverView {
     var overviewTab: some View {
         VStack(alignment: .leading, spacing: 8) {
+            overviewUpdateCard
             quotaSummarySection
             overviewTurnActivity
 
@@ -27,6 +28,92 @@ extension UsagePopoverView {
 
             quickActions
         }
+    }
+
+    @ViewBuilder
+    private var overviewUpdateCard: some View {
+        switch model.updateState {
+        case .available(let release):
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .foregroundStyle(HUDColorPalette.sevenDay)
+                    Text("Codex Usage Status \(release.version) 可用")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer(minLength: 0)
+                }
+                if !release.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text(release.notes)
+                        .font(.caption2)
+                        .foregroundStyle(HUDColorPalette.secondaryText)
+                        .lineLimit(2)
+                }
+                HStack(spacing: 10) {
+                    Button(AppUpdatePresentationPolicy.installationButtonTitle) { model.beginAppUpdate() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    Button("查看更新內容") { model.openUpdateReleasePage() }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+            }
+            .padding(9)
+            .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(HUDColorPalette.sevenDay.opacity(0.45), lineWidth: 0.8) }
+        case .downloading(let progress):
+            updateProgressCard(title: "正在下載更新…", progress: progress)
+        case .verifying:
+            updateProgressCard(title: "正在驗證更新…", progress: nil)
+        case .installing:
+            updateProgressCard(title: "正在安裝更新…", progress: nil)
+        case .relaunching:
+            updateProgressCard(title: "即將重新啟動…", progress: nil)
+        case .error(let message):
+            VStack(alignment: .leading, spacing: 6) {
+                Label("更新失敗", systemImage: "exclamationmark.triangle.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(HUDColorPalette.warning)
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(HUDColorPalette.secondaryText)
+                    .lineLimit(2)
+                HStack(spacing: 10) {
+                    Button("重試") { model.checkForUpdates() }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                    Button("開啟 Release") { model.openUpdateReleasePage() }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+            }
+            .padding(9)
+            .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(HUDColorPalette.warning.opacity(0.4), lineWidth: 0.8) }
+        case .idle, .checking, .upToDate:
+            EmptyView()
+        }
+    }
+
+    private func updateProgressCard(title: String, progress: Double?) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                Spacer(minLength: 0)
+                if let progress {
+                    Text("\(Int(progress * 100))%")
+                        .font(.caption2.monospacedDigit())
+                }
+            }
+            if let progress {
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+            }
+        }
+        .padding(9)
+        .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(HUDColorPalette.border, lineWidth: 0.8) }
     }
 
     var overviewAccountControls: some View {

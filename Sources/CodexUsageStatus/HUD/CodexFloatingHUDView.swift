@@ -4,6 +4,7 @@ import SwiftUI
 struct CodexFloatingHUDView: View {
     private enum UpdateFeedbackKind {
         case checking
+        case processing
         case upToDate
         case available
         case error
@@ -37,7 +38,6 @@ struct CodexFloatingHUDView: View {
     let quotaRowCountChanged: (Int) -> Void
     let accountInfoRowVisibilityChanged: (Bool) -> Void
     let checkForUpdates: () -> Void
-    let cancelUpdateCheck: () -> Void
     let openReleasePage: () -> Void
     /// Keeps the non-activating AppKit panel appearance in lockstep with the
     /// SwiftUI theme without recreating the panel or changing its geometry.
@@ -221,23 +221,9 @@ struct CodexFloatingHUDView: View {
         updateFeedback = UpdateFeedback(
             kind: .checking,
             title: "正在檢查更新…",
-            message: "正在連線到 GitHub Release"
+            message: "正在檢查 Sparkle 更新來源"
         )
         checkForUpdates()
-    }
-
-    private func cancelUpdateCheckAction() {
-        // End the HUD's local feedback immediately, then let the shared
-        // view model/service finish cancelling the URLSession task.  This
-        // keeps the button responsive even if the request's cancellation
-        // callback is delayed by the system.
-        cancelUpdateCheck()
-        updateCheckRequested = false
-        updateFeedback = UpdateFeedback(
-            kind: .error,
-            title: "更新檢查已取消",
-            message: "更新檢查已取消。"
-        )
     }
 
     private func presentUpdateFeedback(for state: AppUpdateState) {
@@ -264,6 +250,30 @@ struct CodexFloatingHUDView: View {
                 kind: .error,
                 title: "更新檢查失敗",
                 message: message
+            )
+        case .downloading:
+            updateFeedback = UpdateFeedback(
+                kind: .processing,
+                title: "正在下載更新…",
+                message: "Sparkle 正在處理更新。"
+            )
+        case .verifying:
+            updateFeedback = UpdateFeedback(
+                kind: .processing,
+                title: "正在驗證更新…",
+                message: "Sparkle 正在驗證更新。"
+            )
+        case .installing:
+            updateFeedback = UpdateFeedback(
+                kind: .processing,
+                title: "正在安裝更新…",
+                message: "Sparkle 正在安裝更新。"
+            )
+        case .relaunching:
+            updateFeedback = UpdateFeedback(
+                kind: .processing,
+                title: "即將重新啟動…",
+                message: "Sparkle 即將重新啟動 App。"
             )
         case .idle, .checking:
             break
@@ -292,8 +302,8 @@ struct CodexFloatingHUDView: View {
             case .checking:
                 ProgressView()
                     .controlSize(.small)
-                Button("取消") { cancelUpdateCheckAction() }
-                    .buttonStyle(.bordered)
+            case .processing:
+                ProgressView()
                     .controlSize(.small)
             case .available:
                 Button("開啟 Release") { openReleasePage() }
@@ -325,6 +335,7 @@ struct CodexFloatingHUDView: View {
     private func updateFeedbackIcon(for kind: UpdateFeedbackKind) -> String {
         switch kind {
         case .checking: return "arrow.down.circle"
+        case .processing: return "arrow.down.circle"
         case .upToDate: return "checkmark.circle.fill"
         case .available: return "sparkles"
         case .error: return "exclamationmark.triangle.fill"
@@ -333,7 +344,7 @@ struct CodexFloatingHUDView: View {
 
     private func updateFeedbackColor(for kind: UpdateFeedbackKind) -> Color {
         switch kind {
-        case .checking: return .accentColor
+        case .checking, .processing: return .accentColor
         case .upToDate: return .green
         case .available: return .orange
         case .error: return .red
@@ -890,10 +901,10 @@ struct CodexFloatingHUDView: View {
                 Button(action: openReleasePage) {
                     Label("開啟 Release 頁面 \(release.version)", systemImage: "safari")
                 }
+            case .downloading, .verifying, .installing, .relaunching:
+                Label("Sparkle 更新處理中", systemImage: "arrow.down.circle")
             case .checking:
-                Button(action: cancelUpdateCheckAction) {
-                    Label("取消更新檢查", systemImage: "xmark.circle")
-                }
+                Label("正在檢查 Sparkle 更新", systemImage: "arrow.down.circle")
             case .upToDate:
                 Label("目前已是最新版本", systemImage: "checkmark.circle")
             case .error(let message):

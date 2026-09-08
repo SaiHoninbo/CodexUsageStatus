@@ -45,10 +45,26 @@ OUTPUT_ZIP="$OUTPUT_DIR/$APP_NAME.app.zip"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
+APP_FRAMEWORKS="$APP_CONTENTS/Frameworks"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 ICONSET_DIR="$ROOT_DIR/Resources/AppIcon.iconset"
 ICON_FILE="$ROOT_DIR/Resources/AppIcon.icns"
+SPARKLE_FRAMEWORK_SOURCE="$ROOT_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+SPARKLE_FEED_URL="https://github.com/SaiHoninbo/CodexUsageStatus/releases/latest/download/appcast.xml"
+SPARKLE_PUBLIC_ED_KEY="${CODEX_SPARKLE_PUBLIC_ED_KEY:-}"
+
+# Formal Sparkle releases must embed the maintainer-provided Ed25519 public
+# key. Never generate a key here and never log its value; the matching private
+# key belongs exclusively in the release infrastructure.
+if [[ "${CODEX_RELEASE_MODE:-0}" == "1" && -z "$SPARKLE_PUBLIC_ED_KEY" ]]; then
+  echo "release mode requires CODEX_SPARKLE_PUBLIC_ED_KEY; refusing unsigned Sparkle metadata" >&2
+  exit 3
+fi
+if [[ -n "$SPARKLE_PUBLIC_ED_KEY" ]] && ! [[ "$SPARKLE_PUBLIC_ED_KEY" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]; then
+  echo "CODEX_SPARKLE_PUBLIC_ED_KEY must be base64-shaped" >&2
+  exit 3
+fi
 ## Release bundles must not carry developer-local source/object paths in
 ## embedded debug information. The shipped app is not a debug artifact, so
 ## omit DWARF entirely rather than publishing machine-specific paths.
@@ -65,6 +81,19 @@ mkdir -p "$APP_MACOS" "$APP_RESOURCES"
 cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
 
+# Sparkle's SwiftPM product is a binary framework. SwiftPM links the
+# executable, but this repository assembles the final .app manually, so the
+# framework and its installer payload must be embedded explicitly.
+if [[ ! -d "$SPARKLE_FRAMEWORK_SOURCE" ]]; then
+  echo "Sparkle.framework was not produced at $SPARKLE_FRAMEWORK_SOURCE" >&2
+  exit 4
+fi
+mkdir -p "$APP_FRAMEWORKS"
+COPYFILE_DISABLE=1 ditto --norsrc "$SPARKLE_FRAMEWORK_SOURCE" "$APP_FRAMEWORKS/Sparkle.framework"
+if ! otool -l "$APP_BINARY" | rg -q '@executable_path/../Frameworks'; then
+  install_name_tool -add_rpath '@executable_path/../Frameworks' "$APP_BINARY"
+fi
+
 if [[ -d "$ICONSET_DIR" ]]; then
   # Some CommandLineTools/iconutil combinations reject an otherwise valid
   # iconset (the app remains fully functional without an embedded icns).
@@ -80,6 +109,23 @@ if [[ -d "$ICONSET_DIR" ]]; then
   fi
 elif [[ -f "$ICON_FILE" ]]; then
   cp "$ICON_FILE" "$APP_RESOURCES/AppIcon.icns"
+fi
+
+if [[ "${CODEX_RELEASE_MODE:-0}" == "1" ]]; then
+  RELEASE_SIGNING_IDENTITY="${CODEX_RELEASE_SIGNING_IDENTITY:-}"
+  if [[ -z "$RELEASE_SIGNING_IDENTITY" || "$RELEASE_SIGNING_IDENTITY" == "-" ]]; then
+    echo "release mode requires CODEX_RELEASE_SIGNING_IDENTITY; refusing ad-hoc signing" >&2
+    exit 3
+  fi
+  SIGNING_IDENTITY="$RELEASE_SIGNING_IDENTITY"
+else
+  SIGNING_IDENTITY="-"
+fi
+
+SPARKLE_PUBLIC_KEY_PLIST=""
+if [[ -n "$SPARKLE_PUBLIC_ED_KEY" ]]; then
+  SPARKLE_PUBLIC_KEY_PLIST="  <key>SUPublicEDKey</key>
+  <string>$SPARKLE_PUBLIC_ED_KEY</string>"
 fi
 
 cat > "$INFO_PLIST" <<PLIST
@@ -104,13 +150,22 @@ cat > "$INFO_PLIST" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>2.4.72</string>
+  <string>2.4.73</string>
   <key>CFBundleVersion</key>
-  <string>92</string>
+  <string>93</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
   <key>LSUIElement</key>
   <true/>
+  <key>SUFeedURL</key>
+  <string>$SPARKLE_FEED_URL</string>
+  <key>SUEnableAutomaticChecks</key>
+  <false/>
+  <key>SUAutomaticallyUpdate</key>
+  <false/>
+  <key>SUAllowsAutomaticUpdates</key>
+  <false/>
+${SPARKLE_PUBLIC_KEY_PLIST}
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSPrincipalClass</key>
@@ -120,16 +175,24 @@ cat > "$INFO_PLIST" <<PLIST
 PLIST
 
 xattr -cr "$APP_BUNDLE"
-if [[ "${CODEX_RELEASE_MODE:-0}" == "1" ]]; then
-  RELEASE_SIGNING_IDENTITY="${CODEX_RELEASE_SIGNING_IDENTITY:-}"
-  if [[ -z "$RELEASE_SIGNING_IDENTITY" || "$RELEASE_SIGNING_IDENTITY" == "-" ]]; then
-    echo "release mode requires CODEX_RELEASE_SIGNING_IDENTITY; refusing ad-hoc signing" >&2
-    exit 3
-  fi
-  codesign --force --deep --options runtime --sign "$RELEASE_SIGNING_IDENTITY" "$APP_BUNDLE"
-else
-  codesign --force --deep --sign - "$APP_BUNDLE"
+
+# Sign nested Sparkle code before the containing framework and application.
+# This keeps the signing order explicit instead of treating --deep as the
+# integration proof. The outer --deep pass below is retained as a final
+# consistency check for the complete bundle.
+SPARKLE_BUNDLE="$APP_FRAMEWORKS/Sparkle.framework"
+for nested in "$SPARKLE_BUNDLE/Versions/B/XPCServices"/*.xpc; do
+  [[ -e "$nested" ]] || continue
+  codesign --force --deep --options runtime --sign "$SIGNING_IDENTITY" "$nested"
+done
+if [[ -d "$SPARKLE_BUNDLE/Versions/B/Updater.app" ]]; then
+  codesign --force --deep --options runtime --sign "$SIGNING_IDENTITY" "$SPARKLE_BUNDLE/Versions/B/Updater.app"
 fi
+if [[ -f "$SPARKLE_BUNDLE/Versions/B/Autoupdate" ]]; then
+  codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$SPARKLE_BUNDLE/Versions/B/Autoupdate"
+fi
+codesign --force --deep --options runtime --sign "$SIGNING_IDENTITY" "$SPARKLE_BUNDLE"
+codesign --force --deep --options runtime --sign "$SIGNING_IDENTITY" "$APP_BUNDLE"
 codesign --verify --deep --strict --verbose=4 "$APP_BUNDLE"
 
 if [[ "$SHOULD_PACKAGE" == 1 ]]; then

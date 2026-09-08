@@ -21,6 +21,7 @@ final class UsageViewModel: ObservableObject {
     @Published private(set) var historySamples: [HistorySample] = []
     @Published private(set) var historyErrorMessage: String?
     @Published private(set) var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
+    @Published private(set) var accessibilityPermissionState: AccessibilityPermissionState = .unavailable
     @Published private(set) var notificationsEnabled: Bool
     @Published private(set) var separateWindowNotifications: Bool
     @Published private(set) var notificationSoundEnabled: Bool
@@ -174,6 +175,7 @@ final class UsageViewModel: ObservableObject {
         separateWindowNotifications = defaults.object(forKey: PreferenceKey.separateWindows) as? Bool ?? true
         notificationSoundEnabled = defaults.object(forKey: PreferenceKey.soundEnabled) as? Bool ?? false
         tokenReelSoundEnabled = TokenReelSoundPreference.load(from: defaults)
+        accessibilityPermissionState = AccessibilityPermissionPolicy.current()
         notificationThresholds = Self.loadThresholds(from: defaults)
         notifyOnTurnSuccess = defaults.object(forKey: PreferenceKey.turnSuccess) as? Bool ?? false
         notifyOnTurnFailure = defaults.object(forKey: PreferenceKey.turnFailure) as? Bool ?? true
@@ -205,6 +207,9 @@ final class UsageViewModel: ObservableObject {
         )
         accountManagementService.onLoginOutput = { [weak self] profileID, output in
             self?.loginStates[profileID] = output
+        }
+        updateService.onStateChange = { [weak self] state in
+            self?.updateState = state
         }
         client.onStateChange = { [weak self] state, message in
             guard let self else { return }
@@ -358,6 +363,7 @@ final class UsageViewModel: ObservableObject {
 
     func start() {
         isStopping = false
+        updateService.start()
         loginItemManager.refresh()
         loginItemManager.registerIfNeeded()
         startDisplayTimer()
@@ -460,7 +466,16 @@ final class UsageViewModel: ObservableObject {
 
     func refresh() {
         currentDate = Date()
+        refreshAccessibilityPermissionState()
         activeClient.refresh()
+    }
+
+    func refreshAccessibilityPermissionState() {
+        accessibilityPermissionState = AccessibilityPermissionPolicy.current()
+    }
+
+    func openAccessibilitySettings() {
+        AccessibilityPermissionPolicy.openSettings()
     }
 
     func refreshTokenActivity() {
@@ -485,21 +500,13 @@ final class UsageViewModel: ObservableObject {
         updateState = updateService.state
     }
 
-    func cancelUpdateCheck() {
-        guard updateState == .checking || updateService.state == .checking else { return }
-
-        // Publish the terminal state synchronously.  The service callback is
-        // also wired below for callers that observe the service directly;
-        // assigning here prevents a non-responding URLSession cancellation
-        // from leaving the UI's local state stuck on `.checking`.
-        updateService.cancelCheck { [weak self] state in
-            self?.updateState = state
-        }
-        updateState = updateService.state
-    }
-
     func openUpdateReleasePage() {
         updateService.openReleasePage()
+    }
+
+    func beginAppUpdate() {
+        updateService.beginInstall()
+        updateState = updateService.state
     }
 
     func setAccountScope(_ scope: AccountScope) {

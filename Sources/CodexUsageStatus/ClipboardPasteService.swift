@@ -467,7 +467,7 @@ enum ClipboardPasteService {
     }
 
     private static func isEventPostingAuthorized() -> Bool {
-        AXIsProcessTrusted() || CGPreflightPostEventAccess()
+        AccessibilityPermissionPolicy.current() == .trusted
     }
 
     private static func promptForAccessibilityPermissionIfNeeded() {
@@ -489,7 +489,7 @@ enum ClipboardPasteService {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "需要輔助功能權限"
-        alert.informativeText = "要替你把剪貼簿貼到 Codex，請在「系統設定 → 隱私權與安全性 → 輔助功能」允許目前正在使用的 CodexUsageStatus.app。若清單裡已有同名舊項目，請先移除舊項目，再從目前這個 App 加入；更新或搬移 App 後，完成設定要完全退出並重新開啟一次。"
+        alert.informativeText = "要替你把剪貼簿貼到 Codex，請在「系統設定 → 隱私權與安全性 → 輔助功能」允許目前正在使用的 CodexUsageStatus.app。正常的正式簽章更新會保留 App 身份；只有權限狀態確實失效時才需要重新處理。"
         alert.addButton(withTitle: "開啟輔助功能設定")
         alert.addButton(withTitle: "稍後")
         let response = alert.runModal()
@@ -499,10 +499,7 @@ enum ClipboardPasteService {
     }
 
     private static func openAccessibilitySettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else {
-            return
-        }
-        NSWorkspace.shared.open(url)
+        AccessibilityPermissionPolicy.openSettings()
     }
 
     private static func isCodexApplication(_ application: NSRunningApplication) -> Bool {

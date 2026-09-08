@@ -60,9 +60,17 @@ account identifiers and local paths before submitting.
 
 ## Maintainer release boundary
 
-The app's update checker reads latest-release metadata and opens the official
-GitHub Release page. It never downloads, extracts, executes, replaces, or
-relaunches an app bundle.
+The app uses Sparkle 2 as its single in-app update authority. Sparkle owns the
+HTTPS appcast/download, Ed25519 archive validation, extraction, replacement,
+termination and relaunch lifecycle. CodexUsageStatus only presents the shared
+update state and release-notes fallback in its Overview and Settings surfaces.
+The appcast and Sparkle public verification key are release infrastructure;
+private update-signing material must never enter this repository or an app
+bundle. Formal packaging accepts the public key only through the external
+`CODEX_SPARKLE_PUBLIC_ED_KEY` input and refuses release mode when it is absent;
+the script never generates or prints key material. If the signed appcast
+infrastructure is unavailable, the app leaves the installed bundle untouched
+and exposes the official GitHub Release page as a manual fallback.
 
 The `candidate` mode is disposable runtime evidence under `/private/tmp`; it is
 ad-hoc signed and is never a release artifact. The default local `package` mode

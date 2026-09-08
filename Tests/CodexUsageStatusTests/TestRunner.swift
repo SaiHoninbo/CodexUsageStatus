@@ -96,6 +96,9 @@ struct CodexUsageStatusTests {
             ("managed profile has isolated CODEX_HOME", testManagedProfileHasIsolatedCodexHome),
             ("managed profile imports auth atomically", testManagedProfileImportsAuth),
             ("update version comparison", testUpdateVersionComparison),
+            ("update state presentation", testUpdateStatePresentation),
+            ("update authority and packaging policy", testUpdateAuthorityAndPackagingPolicy),
+            ("accessibility permission policy", testAccessibilityPermissionPolicy),
             ("HUD context menu policy", testHUDContextMenuPolicy),
             ("usage popover tabs and app version", testUsagePopoverTabsAndAppVersion),
             ("first click event delivery", testFirstClickEventDelivery),
@@ -2751,6 +2754,104 @@ struct CodexUsageStatusTests {
         try expect(HUDUpdateBadgeState.error("2.4.51").isActionable, "error badge retries check")
         try expect(!HUDUpdateBadgeState.version("2.4.51").isActionable, "version badge is informational")
         try expect(!HUDUpdateBadgeState.checking.isActionable, "checking badge is disabled")
+    }
+
+    private static func testUpdateStatePresentation() throws {
+        let release = AppUpdateRelease(
+            version: "2.5.0",
+            tagName: "v2.5.0",
+            name: "Codex Usage Status 2.5.0",
+            releaseURL: URL(string: "https://github.com/SaiHoninbo/CodexUsageStatus/releases/tag/v2.5.0")!,
+            notes: "修正更新流程",
+            publishedAt: nil
+        )
+        try expect(AppUpdateState.available(release).release?.version == "2.5.0", "available retains target release")
+        try expect(AppUpdateState.downloading(progress: 0.5).isBusy, "download state is busy")
+        try expect(AppUpdateState.verifying(release).isBusy, "verify state is busy")
+        try expect(AppUpdateState.installing(release).isBusy, "install state is busy")
+        try expect(AppUpdateState.relaunching(release).isBusy, "relaunch state is busy")
+        try expect(!AppUpdateState.error("network").isBusy, "error state is terminal")
+    }
+
+    private static func testUpdateAuthorityAndPackagingPolicy() throws {
+        try expect(
+            AppUpdateIntentPolicy.intent(for: .startup) == .informationProbe,
+            "startup discovery uses an informational probe"
+        )
+        try expect(
+            AppUpdateIntentPolicy.intent(for: .periodic) == .informationProbe,
+            "periodic discovery uses an informational probe"
+        )
+        try expect(
+            AppUpdateIntentPolicy.intent(for: .manualCheck) == .informationProbe,
+            "manual check updates the compact state without forcing install UI"
+        )
+        try expect(
+            AppUpdateIntentPolicy.intent(for: .installation) == .foregroundUpdateFlow,
+            "installation uses the foreground Sparkle flow"
+        )
+
+        let publicKey = String(repeating: "A", count: 43) + "="
+        try expect(
+            SparkleReleaseConfigurationPolicy.permitsPackaging(releaseMode: false, publicEDKey: nil),
+            "candidate packaging may omit the release public key"
+        )
+        try expect(
+            SparkleReleaseConfigurationPolicy.permitsPackaging(releaseMode: true, publicEDKey: publicKey),
+            "formal packaging accepts an externally supplied public key"
+        )
+        try expect(
+            !SparkleReleaseConfigurationPolicy.permitsPackaging(releaseMode: true, publicEDKey: nil),
+            "formal packaging fails closed without a public key"
+        )
+        try expect(
+            !SparkleReleaseConfigurationPolicy.isValidPublicEDKey("not a key"),
+            "invalid public-key input is rejected"
+        )
+        try expect(
+            SparkleReleaseConfigurationPolicy.publicKeyInfoPlistKey == "SUPublicEDKey",
+            "public key uses Sparkle's Info.plist key"
+        )
+
+        let official = URL(string: "https://github.com/SaiHoninbo/CodexUsageStatus/releases/tag/v2.5.0")!
+        let arbitrary = URL(string: "https://evil.example/update")!
+        try expect(
+            AppUpdateReleasePolicy.safeReleaseURL(official) == official,
+            "official release URL remains available"
+        )
+        try expect(
+            AppUpdateReleasePolicy.safeReleaseURL(arbitrary) == AppUpdateReleasePolicy.officialReleasesURL,
+            "arbitrary appcast URL falls back to official releases"
+        )
+
+        try expect(
+            AppUpdatePresentationPolicy.installationButtonTitle == "開始更新",
+            "standard user-driver wording does not promise silent replacement"
+        )
+        try expect(!AppUpdatePresentationPolicy.canCancel(.checking), "informational probe has no fake cancel action")
+        try expect(
+            !AppUpdatePresentationPolicy.canCancel(.downloading(progress: nil)),
+            "download does not expose a fake cancel action"
+        )
+        try expect(
+            !AppUpdatePresentationPolicy.canCancel(.installing(nil)),
+            "installation does not expose a fake cancel action"
+        )
+    }
+
+    private static func testAccessibilityPermissionPolicy() throws {
+        try expect(
+            AccessibilityPermissionPolicy.state(axTrusted: true, eventPostingAuthorized: false) == .trusted,
+            "AX trust is sufficient"
+        )
+        try expect(
+            AccessibilityPermissionPolicy.state(axTrusted: false, eventPostingAuthorized: true) == .trusted,
+            "event-post authorization is sufficient"
+        )
+        try expect(
+            AccessibilityPermissionPolicy.state(axTrusted: false, eventPostingAuthorized: false) == .notTrusted,
+            "missing permissions are reported without mutation"
+        )
     }
 
     private static func testCodexPromptShortcuts() throws {

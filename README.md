@@ -40,7 +40,7 @@ Most monitoring features do not require Accessibility permission. Enable Accessi
 - **Paste clipboard**: sends `⌘V` to the foreground Codex window.
 - **Paste and submit**: sends `⌘V`, waits for the paste to finish, then sends one Return/Enter.
 
-Open **System Settings → Privacy & Security → Accessibility** and enable `CodexUsageStatus.app`. If the app was moved or replaced, macOS may show a new permission entry; remove an obsolete entry and enable the current app path.
+Open **System Settings → Privacy & Security → Accessibility** and enable `CodexUsageStatus.app` when paste/event posting is not trusted. A correctly signed in-app update keeps the app identity stable, so do not routinely remove and re-add the entry; only follow the remediation when the app reports that permission is actually unavailable.
 
 Notification permission is optional. Quota and token activity continue to work if notifications are denied.
 
@@ -96,12 +96,21 @@ The app talks to the local Codex App Server over its stdio interface. It does no
 
 ## Updates
 
-The app checks the GitHub `latest release` endpoint at startup and periodically while running. When a newer version is available:
+The app uses Sparkle 2 as its single in-app update authority. It checks the
+signed appcast at startup and periodically while running. When a newer version
+is available:
 
-1. The app shows an update state in the popover and may display one notification for that release.
-2. You choose **Open Release** to review the official GitHub Release and download it manually.
+1. The app shows a compact update state in the Overview and a detailed state in Settings, and may display one notification for that release.
+2. **開始更新** hands the authenticated confirmation, download, signature verification, installation, termination, and relaunch flow to Sparkle.
+3. **View Release Notes** opens the official GitHub Release page for review.
 
-The app never downloads, extracts, replaces, or relaunches itself. Manual installation is performed by the user through Finder. Release metadata is accepted only when the version is path-safe and the link is an HTTPS URL on this repository's GitHub Releases page.
+The app does not perform a second direct GitHub download path. If the signed
+appcast or matching release asset is unavailable, Sparkle leaves the installed
+bundle unchanged and the official Release page remains available as a manual
+fallback. The appcast URL, Ed25519 public key, and release signing material are
+release infrastructure; private signing keys never belong in this repo or an
+app bundle. Formal packaging must provide the maintainer's public key through
+`CODEX_SPARKLE_PUBLIC_ED_KEY`; release mode refuses to build when it is absent.
 
 ### Release requirements for maintainers
 
@@ -181,7 +190,7 @@ Confirm that the currently running copy of `CodexUsageStatus.app` is enabled und
 
 ### The update checker says no release is available
 
-A maintainer must publish a GitHub Release first. The release should contain the exact asset name `CodexUsageStatus.app.zip`; the app only opens the official release page and does not fetch the asset itself.
+A maintainer must publish the signed Sparkle appcast and matching GitHub Release asset first. The app checks the official repository's `releases/latest/download/appcast.xml` and only installs updates through Sparkle's authenticated path. The official Release page remains available as a manual fallback when the feed is unavailable.
 
 ### macOS says the app cannot be opened
 

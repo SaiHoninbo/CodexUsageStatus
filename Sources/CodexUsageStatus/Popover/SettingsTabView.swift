@@ -249,6 +249,25 @@ extension UsagePopoverView {
             Button("重設 HUD 位置") { resetHUDPosition() }
                 .buttonStyle(.link)
                 .font(.caption)
+            HStack(spacing: 8) {
+                Label("輔助功能", systemImage: model.accessibilityPermissionState == .trusted ? "checkmark.circle.fill" : "exclamationmark.triangle")
+                    .foregroundStyle(model.accessibilityPermissionState == .trusted ? HUDColorPalette.continueAction : HUDColorPalette.warning)
+                Text(model.accessibilityPermissionState.displayName)
+                    .font(.caption2)
+                    .foregroundStyle(HUDColorPalette.secondaryText)
+                Spacer(minLength: 0)
+                if model.accessibilityPermissionState != .trusted {
+                    Button("開啟設定") { model.openAccessibilitySettings() }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+            }
+            Text(model.accessibilityPermissionState == .trusted
+                ? "已可使用 HUD 剪貼簿操作。"
+                : "只有需要替你把內容貼到 Codex 時才需要；正式簽章更新通常會保留此權限。")
+                .font(.caption2)
+                .foregroundStyle(HUDColorPalette.tertiaryText)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -327,19 +346,24 @@ extension UsagePopoverView {
 
             switch model.updateState {
             case .idle:
-                Text("啟動後會檢查 GitHub Release。")
+                Text("啟動後會檢查 Sparkle 更新來源。")
                     .font(.body)
                     .foregroundStyle(HUDColorPalette.secondaryText)
             case .checking:
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
-                    Text("正在檢查 GitHub 更新…")
+                    Text("正在檢查更新…")
                         .font(.body)
                         .foregroundStyle(HUDColorPalette.secondaryText)
                     Spacer()
-                    Button("取消") { model.cancelUpdateCheck() }
-                        .buttonStyle(.link)
-                        .font(.subheadline)
+                }
+            case .downloading, .verifying, .installing, .relaunching:
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("正在處理更新…")
+                        .font(.body)
+                        .foregroundStyle(HUDColorPalette.secondaryText)
+                    Spacer()
                 }
             case .upToDate:
                 Text("目前已是最新版本。")
@@ -347,9 +371,14 @@ extension UsagePopoverView {
                     .foregroundStyle(HUDColorPalette.continueAction)
             case .available(let release):
                 updateReleaseDetails(release)
-                Button("開啟 Release") { model.openUpdateReleasePage() }
-                    .buttonStyle(.link)
-                    .font(.subheadline)
+                HStack(spacing: 10) {
+                    Button(AppUpdatePresentationPolicy.installationButtonTitle) { model.beginAppUpdate() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    Button("查看更新內容") { model.openUpdateReleasePage() }
+                        .buttonStyle(.link)
+                        .font(.subheadline)
+                }
             case .error(let message):
                 Text(message)
                     .font(.body)
@@ -370,7 +399,7 @@ extension UsagePopoverView {
     @ViewBuilder
     private var updateStatusLabel: some View {
         switch model.updateState {
-        case .checking:
+        case .checking, .downloading, .verifying, .installing, .relaunching:
             Text("處理中").font(.subheadline).foregroundStyle(HUDColorPalette.secondaryText)
         case .available:
             Text("有新版").font(.subheadline).foregroundStyle(HUDColorPalette.sevenDay)

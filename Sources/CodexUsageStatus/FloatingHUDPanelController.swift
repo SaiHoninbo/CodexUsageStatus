@@ -184,7 +184,6 @@ final class FloatingHUDPanelController: NSObject {
             quotaRowCountChanged: { [weak self] count in self?.setQuotaRowCount(count) },
             accountInfoRowVisibilityChanged: { [weak self] visible in self?.setAccountInfoRowVisibility(visible) },
             checkForUpdates: { [weak self] in self?.model.checkForUpdates() },
-            cancelUpdateCheck: { [weak self] in self?.model.cancelUpdateCheck() },
             openReleasePage: { [weak self] in self?.model.openUpdateReleasePage() },
             setHUDThemeAppearance: { [weak self] appearance in
                 self?.applyHUDAppearance(appearance)

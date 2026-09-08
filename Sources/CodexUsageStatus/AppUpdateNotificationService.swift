@@ -12,7 +12,7 @@ final class AppUpdateNotificationService {
             guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else { return }
             let content = UNMutableNotificationContent()
             content.title = "Codex Usage Status 有新版本"
-            content.body = "版本 \(release.version) 已可用。請在 App 內按「開啟 Release 頁面」查看更新。"
+            content.body = "版本 \(release.version) 已可用。請在 App 內開始更新；Sparkle 會引導安裝與重新啟動。"
             content.sound = soundEnabled ? .default : nil
             let request = UNNotificationRequest(
                 identifier: "codex-update-\(release.version)",
