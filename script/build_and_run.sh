@@ -122,6 +122,30 @@ else
   SIGNING_IDENTITY="-"
 fi
 
+# An ad-hoc local package cannot satisfy hardened-runtime library validation
+# for Sparkle's precompiled nested code: the app and framework have no shared
+# Team ID.  Keep hardened runtime for explicit formal signing identities, but
+# omit the runtime option for the local ad-hoc lane so the installed package
+# remains launchable.  Formal release mode still fails closed without a real
+# Developer ID identity and Sparkle key.
+sign_deep() {
+  local target="$1"
+  if [[ "$SIGNING_IDENTITY" == "-" ]]; then
+    codesign --force --deep --sign "$SIGNING_IDENTITY" "$target"
+  else
+    codesign --force --deep --options runtime --sign "$SIGNING_IDENTITY" "$target"
+  fi
+}
+
+sign_plain() {
+  local target="$1"
+  if [[ "$SIGNING_IDENTITY" == "-" ]]; then
+    codesign --force --sign "$SIGNING_IDENTITY" "$target"
+  else
+    codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$target"
+  fi
+}
+
 SPARKLE_PUBLIC_KEY_PLIST=""
 if [[ -n "$SPARKLE_PUBLIC_ED_KEY" ]]; then
   SPARKLE_PUBLIC_KEY_PLIST="  <key>SUPublicEDKey</key>
@@ -183,16 +207,16 @@ xattr -cr "$APP_BUNDLE"
 SPARKLE_BUNDLE="$APP_FRAMEWORKS/Sparkle.framework"
 for nested in "$SPARKLE_BUNDLE/Versions/B/XPCServices"/*.xpc; do
   [[ -e "$nested" ]] || continue
-  codesign --force --deep --options runtime --sign "$SIGNING_IDENTITY" "$nested"
+  sign_deep "$nested"
 done
 if [[ -d "$SPARKLE_BUNDLE/Versions/B/Updater.app" ]]; then
-  codesign --force --deep --options runtime --sign "$SIGNING_IDENTITY" "$SPARKLE_BUNDLE/Versions/B/Updater.app"
+  sign_deep "$SPARKLE_BUNDLE/Versions/B/Updater.app"
 fi
 if [[ -f "$SPARKLE_BUNDLE/Versions/B/Autoupdate" ]]; then
-  codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$SPARKLE_BUNDLE/Versions/B/Autoupdate"
+  sign_plain "$SPARKLE_BUNDLE/Versions/B/Autoupdate"
 fi
-codesign --force --deep --options runtime --sign "$SIGNING_IDENTITY" "$SPARKLE_BUNDLE"
-codesign --force --deep --options runtime --sign "$SIGNING_IDENTITY" "$APP_BUNDLE"
+sign_deep "$SPARKLE_BUNDLE"
+sign_deep "$APP_BUNDLE"
 codesign --verify --deep --strict --verbose=4 "$APP_BUNDLE"
 
 if [[ "$SHOULD_PACKAGE" == 1 ]]; then
