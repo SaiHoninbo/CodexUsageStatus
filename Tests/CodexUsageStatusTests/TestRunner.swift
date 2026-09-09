@@ -3199,6 +3199,8 @@ struct CodexUsageStatusTests {
         )
         try expect(AppUpdateState.available(release).release?.version == "2.5.0", "available retains target release")
         try expect(AppUpdateState.checking.isBusy, "release check state is busy")
+        try expect(AppUpdateState.downloading(release).isBusy, "download state is busy")
+        try expect(AppUpdateState.installing(release).isBusy, "install state is busy")
         try expect(!AppUpdateState.error("network").isBusy, "error state is terminal")
     }
 
@@ -3226,9 +3228,35 @@ struct CodexUsageStatusTests {
         )
 
         try expect(
-            AppUpdatePresentationPolicy.releaseButtonTitle == "開啟 Release",
+            AppUpdatePresentationPolicy.installButtonTitle == "下載並覆蓋",
+            "update UI exposes one-click official asset install"
+        )
+        try expect(
+            AppUpdatePresentationPolicy.releaseButtonTitle == "查看 Release",
             "update UI makes the GitHub Release action explicit"
         )
+        let release = AppUpdateRelease(
+            version: "2.5.0",
+            tagName: "v2.5.0",
+            name: "Codex Usage Status 2.5.0",
+            releaseURL: official,
+            notes: "",
+            publishedAt: nil
+        )
+        try expect(
+            AppUpdateReleasePolicy.assetURL(for: release)?.absoluteString ==
+                "https://github.com/SaiHoninbo/CodexUsageStatus/releases/download/v2.5.0/CodexUsageStatus.app.zip",
+            "updates derive only the fixed official GitHub asset URL"
+        )
+        let unsafe = AppUpdateRelease(
+            version: "2.5.0",
+            tagName: "v2.5.0/evil",
+            name: "unsafe",
+            releaseURL: official,
+            notes: "",
+            publishedAt: nil
+        )
+        try expect(AppUpdateReleasePolicy.assetURL(for: unsafe) == nil, "unsafe release tags cannot form an asset path")
     }
 
     private static func testAccessibilityPermissionPolicy() throws {

@@ -400,20 +400,34 @@ extension UsagePopoverView {
             case .available(let release):
                 updateReleaseDetails(release)
                 HStack(spacing: 10) {
-                    Button(AppUpdatePresentationPolicy.releaseButtonTitle) {
-                        acknowledgeAction("正在開啟 Release", control: "settings.release")
-                        PopoverInteractionTrace.started("settings.release")
-                        model.openUpdateReleasePage()
+                    Button(AppUpdatePresentationPolicy.installButtonTitle) {
+                        acknowledgeAction("正在下載並覆蓋更新", control: "settings.installUpdate")
+                        PopoverInteractionTrace.started("settings.installUpdate")
+                        model.installUpdate(release)
                     }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
-                    Button("查看更新內容") {
+                    Button(AppUpdatePresentationPolicy.releaseButtonTitle) {
                         acknowledgeAction("正在開啟更新內容", control: "settings.release")
                         PopoverInteractionTrace.started("settings.release")
                         model.openUpdateReleasePage()
                     }
                         .buttonStyle(.link)
                         .font(.subheadline)
+                }
+            case .downloading(let release):
+                HStack(spacing: 7) {
+                    ProgressView().controlSize(.small)
+                    Text("正在下載 Codex Usage Status \(release.version)…")
+                        .font(.body)
+                        .foregroundStyle(HUDColorPalette.secondaryText)
+                }
+            case .installing(let release):
+                HStack(spacing: 7) {
+                    ProgressView().controlSize(.small)
+                    Text("正在覆蓋並重新啟動 \(release.version)…")
+                        .font(.body)
+                        .foregroundStyle(HUDColorPalette.secondaryText)
                 }
             case .error(let message):
                 Text(message)
@@ -443,7 +457,7 @@ extension UsagePopoverView {
     @ViewBuilder
     private var updateStatusLabel: some View {
         switch model.updateState {
-        case .checking:
+        case .checking, .downloading, .installing:
             Text("處理中").font(.subheadline).foregroundStyle(HUDColorPalette.secondaryText)
         case .available:
             Text("有新版").font(.subheadline).foregroundStyle(HUDColorPalette.sevenDay)

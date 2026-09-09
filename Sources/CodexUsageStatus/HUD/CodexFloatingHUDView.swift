@@ -14,6 +14,7 @@ struct CodexFloatingHUDView: View {
         let kind: UpdateFeedbackKind
         let title: String
         let message: String
+        let release: AppUpdateRelease?
     }
 
     @ObservedObject var model: UsageViewModel
@@ -37,6 +38,7 @@ struct CodexFloatingHUDView: View {
     let quotaRowCountChanged: (Int) -> Void
     let accountInfoRowVisibilityChanged: (Bool) -> Void
     let checkForUpdates: () -> Void
+    let installUpdate: (AppUpdateRelease) -> Void
     let openReleasePage: () -> Void
     /// Keeps the non-activating AppKit panel appearance in lockstep with the
     /// SwiftUI theme without recreating the panel or changing its geometry.
@@ -222,7 +224,8 @@ struct CodexFloatingHUDView: View {
         updateFeedback = UpdateFeedback(
             kind: .checking,
             title: "正在檢查更新…",
-            message: "正在檢查 GitHub Release"
+            message: "正在檢查 GitHub Release",
+            release: nil
         )
         checkForUpdates()
     }
@@ -236,23 +239,26 @@ struct CodexFloatingHUDView: View {
             updateFeedback = UpdateFeedback(
                 kind: .upToDate,
                 title: "更新檢查完成",
-                message: "目前已是最新版本。"
+                message: "目前已是最新版本。",
+                release: nil
             )
         case .available(let release):
             updateCheckRequested = false
             updateFeedback = UpdateFeedback(
                 kind: .available,
                 title: "有新版本可用",
-                message: "發現 Codex Usage Status \(release.version)"
+                message: "發現 Codex Usage Status \(release.version)",
+                release: release
             )
         case .error(let message):
             updateCheckRequested = false
             updateFeedback = UpdateFeedback(
                 kind: .error,
                 title: "更新檢查失敗",
-                message: message
+                message: message,
+                release: nil
             )
-        case .idle, .checking:
+        case .idle, .checking, .downloading, .installing:
             break
         }
     }
@@ -280,7 +286,9 @@ struct CodexFloatingHUDView: View {
                 ProgressView()
                     .controlSize(.small)
             case .available:
-                Button("開啟 Release") { openReleasePage() }
+                Button(AppUpdatePresentationPolicy.installButtonTitle) {
+                    if let release = feedback.release { installUpdate(release) }
+                }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
             case .error:
@@ -878,11 +886,18 @@ struct CodexFloatingHUDView: View {
 
             switch model.updateState {
             case .available(let release):
+                Button(action: { installUpdate(release) }) {
+                    Label(AppUpdatePresentationPolicy.installButtonTitle + " \(release.version)", systemImage: "arrow.down.circle.fill")
+                }
                 Button(action: openReleasePage) {
                     Label("開啟 Release 頁面 \(release.version)", systemImage: "safari")
                 }
             case .checking:
                 Label("正在檢查 GitHub Release", systemImage: "arrow.down.circle")
+            case .downloading(let release):
+                Label("正在下載 \(release.version)", systemImage: "arrow.down.circle")
+            case .installing(let release):
+                Label("正在覆蓋並重新啟動 \(release.version)", systemImage: "arrow.triangle.2.circlepath")
             case .upToDate:
                 Label("目前已是最新版本", systemImage: "checkmark.circle")
             case .error(let message):

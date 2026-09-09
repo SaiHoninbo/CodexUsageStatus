@@ -509,6 +509,10 @@ final class UsageViewModel: ObservableObject {
         updateService.openReleasePage()
     }
 
+    func installUpdate(_ release: AppUpdateRelease) {
+        updateService.install(release)
+    }
+
     func setAccountScope(_ scope: AccountScope) {
         guard accountScope != scope else { return }
         accountScope = scope

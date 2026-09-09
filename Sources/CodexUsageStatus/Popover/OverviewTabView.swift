@@ -117,14 +117,14 @@ extension UsagePopoverView {
                         .lineLimit(2)
                 }
                 HStack(spacing: 10) {
-                    Button(AppUpdatePresentationPolicy.releaseButtonTitle) {
-                        acknowledgeAction("正在開啟 Release", control: "overview.release")
-                        PopoverInteractionTrace.started("overview.release")
-                        model.openUpdateReleasePage()
+                    Button(AppUpdatePresentationPolicy.installButtonTitle) {
+                        acknowledgeAction("正在下載並覆蓋更新", control: "overview.installUpdate")
+                        PopoverInteractionTrace.started("overview.installUpdate")
+                        model.installUpdate(release)
                     }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
-                    Button("查看更新內容") {
+                    Button(AppUpdatePresentationPolicy.releaseButtonTitle) {
                         acknowledgeAction("正在開啟更新內容", control: "overview.release")
                         PopoverInteractionTrace.started("overview.release")
                         model.openUpdateReleasePage()
@@ -136,6 +136,10 @@ extension UsagePopoverView {
             .padding(9)
             .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
             .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(HUDColorPalette.sevenDay.opacity(0.45), lineWidth: 0.8) }
+        case .downloading(let release):
+            updateInFlightCard(release: release, message: "正在下載官方 GitHub Release…")
+        case .installing(let release):
+            updateInFlightCard(release: release, message: "正在準備覆蓋並重新啟動…")
         case .error(let message):
             let alert = SettingsAlertPresentation.updateFailure(message: message)
             VStack(alignment: .leading, spacing: 6) {
@@ -169,6 +173,23 @@ extension UsagePopoverView {
         case .idle, .checking, .upToDate:
             EmptyView()
         }
+    }
+
+    private func updateInFlightCard(release: AppUpdateRelease, message: String) -> some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Codex Usage Status \(release.version)")
+                    .font(.subheadline.weight(.semibold))
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(HUDColorPalette.secondaryText)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(9)
+        .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(HUDColorPalette.sevenDay.opacity(0.45), lineWidth: 0.8) }
     }
 
     var overviewAccountControls: some View {

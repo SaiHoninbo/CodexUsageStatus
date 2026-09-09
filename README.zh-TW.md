@@ -100,9 +100,13 @@ App 透過 stdio 介面連接本機 Codex App Server，不使用私有網路端�
 App 啟動時以及執行期間會定期檢查 GitHub 的 `latest release`。發現新版本時：
 
 1. Popover 顯示更新狀態，並可能對該版本顯示一次通知。
-2. 由使用者按下「開啟 Release」，在官方 GitHub Release 頁面檢視並手動下載。
+2. 使用者按下「下載並覆蓋」後，App 會從官方 GitHub Release 下載固定的
+   `CodexUsageStatus.app.zip`，驗證 bundle、版本與 code signature，再關閉舊版、覆蓋並重新啟動新版。
+   「查看 Release」仍保留為手動更新 fallback。
 
-App 不會自行下載、解壓、替換或重新啟動自己；安裝由使用者透過 Finder 手動完成。只有版本格式安全且連結是本 repository GitHub Releases 的 HTTPS 網址時，才會接受更新 metadata。
+App 不使用 Mac App Store 或 Sparkle appcast。只有固定的本 repository GitHub
+Release asset、相容 bundle identifier、更新版本與有效 code signature 才會被接受；
+非官方 URL、危險 archive path 或不相容 App 會拒絕更新。
 
 ### 維護者發布規則
 
@@ -179,7 +183,7 @@ ad-hoc signing。將產出的 ZIP 發布到 GitHub Release，仍是維護者另�
 
 ### 更新檢查顯示沒有正式版本
 
-維護者必須先建立 GitHub Release，建議包含名稱完全一致的 `CodexUsageStatus.app.zip`；App 只會開啟官方 Release 頁面，不會自行下載 asset。Commit 或 source ZIP 都不算正式 Release。
+維護者必須先建立 GitHub Release，並提供名稱完全一致的 `CodexUsageStatus.app.zip`；App 只會從固定的官方 asset 下載並驗證更新。Commit 或 source ZIP 都不算正式 Release。
 
 ### macOS 顯示無法打開 App
 

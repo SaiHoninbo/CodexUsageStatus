@@ -102,13 +102,13 @@ The app checks the official GitHub Release API at startup and periodically while
 running. When a newer version is available:
 
 1. The app shows a compact update state in the Overview and a detailed state in Settings, and may display one notification for that release.
-2. **開啟 Release** opens the verified official GitHub Release page, where the user can review notes and download the release ZIP manually.
+2. **下載並覆蓋** downloads the fixed `CodexUsageStatus.app.zip` asset from the verified official GitHub Release, validates the bundle and signature, replaces the running app, and relaunches the new version. **查看 Release** remains available as the manual fallback.
 
-The app does not use the Mac App Store, Sparkle appcast, or an app-owned download
-and replacement path. Version discovery is read-only: the app accepts only a
-semantic version and HTTPS release URL from the official repository, and keeps
-the installed bundle unchanged. GitHub Releases remains the distribution and
-manual update authority.
+The app does not use the Mac App Store or Sparkle appcast. Version discovery and
+installation accept only the fixed official repository and its
+`CodexUsageStatus.app.zip` asset; arbitrary release URLs, archive paths, bundle
+identifiers, versions, and invalid code signatures are rejected. GitHub Releases
+remains the only distribution and update authority.
 
 ### Release requirements for maintainers
 
@@ -190,8 +190,8 @@ Confirm that the currently running copy of `CodexUsageStatus.app` is enabled und
 
 The app reads the official GitHub `releases/latest` API endpoint. Confirm that a
 published, non-draft Release exists in the repository and that the latest tag
-uses a semantic version. The **開啟 Release** action always remains available as
-the manual update path.
+uses a semantic version. The **查看 Release** action always remains available as
+the manual update fallback.
 
 ### macOS says the app cannot be opened
 
