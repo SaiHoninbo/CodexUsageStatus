@@ -149,7 +149,7 @@ extension UsagePopoverView {
                 .padding(9)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(PopoverImmediateButtonStyle())
+            .buttonStyle(PopoverImmediateButtonStyle(controlID: "disclosure.\(title)"))
             .accessibilityValue(isExpanded.wrappedValue ? "已展開" : "已收合")
 
             if isExpanded.wrappedValue {

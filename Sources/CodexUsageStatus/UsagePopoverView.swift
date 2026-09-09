@@ -39,7 +39,6 @@ struct UsagePopoverView: View {
             VStack(alignment: .leading, spacing: 16) {
                 header
                 tabBar
-                actionAcknowledgementView
                 tabContent
             }
             .padding(20)
@@ -54,6 +53,15 @@ struct UsagePopoverView: View {
         .foregroundStyle(HUDColorPalette.primaryText)
         .background(.regularMaterial)
         .preferredColorScheme(.dark)
+        // Feedback is deliberately an overlay.  Inserting it into the
+        // content VStack changes the measured height and makes AppKit resize
+        // the popover on every click, which feels like a missed/slow action.
+        .overlay(alignment: .topTrailing) {
+            actionAcknowledgementView
+                .padding(.top, 8)
+                .padding(.trailing, 20)
+                .allowsHitTesting(false)
+        }
         .onPreferenceChange(PopoverContentHeightPreferenceKey.self) { height in
             guard height > 0, abs(height - measuredContentHeight) > 0.5 else { return }
             measuredContentHeight = height
@@ -99,9 +107,10 @@ struct UsagePopoverView: View {
                     Label(tab.title, systemImage: tab.systemImage)
                         .font(.caption2.weight(.semibold))
                         .lineLimit(1)
-                        .frame(maxWidth: .infinity, minHeight: 26)
+                        .frame(maxWidth: .infinity, minHeight: PopoverInteractionPolicy.tabCellMinimumHeight)
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(PopoverImmediateButtonStyle())
+                .buttonStyle(PopoverImmediateButtonStyle(controlID: "tab.\(tab.rawValue)"))
                 .foregroundStyle(selectedTab == tab ? HUDColorPalette.primaryText : HUDColorPalette.secondaryText)
                 .background(
                     selectedTab == tab ? HUDColorPalette.controlSurface : Color.clear,
@@ -126,6 +135,9 @@ struct UsagePopoverView: View {
             }
             .font(.caption2.weight(.medium))
             .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(HUDColorPalette.controlSurface.opacity(0.96), in: Capsule())
             .transition(.opacity)
             .accessibilityLabel(actionAcknowledgement)
         }

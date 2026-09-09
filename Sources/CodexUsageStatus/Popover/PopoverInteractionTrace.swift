@@ -6,6 +6,10 @@ import OSLog
 enum PopoverInteractionTrace {
     private static let logger = Logger(subsystem: "com.openai.codex-usage-status", category: "popover-interaction")
 
+    static func pressed(_ control: String) {
+        logger.debug("popover control pressed: \(control, privacy: .public)")
+    }
+
     static func accepted(_ control: String) {
         logger.debug("popover action accepted: \(control, privacy: .public)")
     }

@@ -106,6 +106,7 @@ struct CodexUsageStatusTests {
             ("accessibility permission policy", testAccessibilityPermissionPolicy),
             ("HUD context menu policy", testHUDContextMenuPolicy),
             ("usage popover tabs and app version", testUsagePopoverTabsAndAppVersion),
+            ("popover interaction hit targets", testPopoverInteractionHitTargets),
             ("settings alert presentation", testSettingsAlertPresentation),
             ("HUD alert projection", testHUDAlertProjection),
             ("first click event delivery", testFirstClickEventDelivery),
@@ -2843,6 +2844,21 @@ struct CodexUsageStatusTests {
         try expect(
             ProductSettingsRoute.destination(from: .settings) == .settings,
             "repeated Settings requests are idempotent at the destination"
+        )
+    }
+
+    private static func testPopoverInteractionHitTargets() throws {
+        try expect(
+            PopoverInteractionPolicy.tabCellMinimumHeight >= 34,
+            "tab cells expose a stable full-cell vertical hit target"
+        )
+        try expect(
+            !PopoverInteractionPolicy.feedbackAffectsContentHeight,
+            "accepted feedback does not participate in popover height measurement"
+        )
+        try expect(
+            PopoverInteractionPolicy.actionExecutesOnMouseUp,
+            "popover actions retain mouse-up execution semantics"
         )
     }
 
