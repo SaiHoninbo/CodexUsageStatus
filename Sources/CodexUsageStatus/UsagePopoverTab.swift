@@ -6,6 +6,7 @@ import Combine
 enum UsagePopoverTab: String, CaseIterable, Identifiable {
     case overview
     case history
+    case accounts
     case settings
 
     var id: String { rawValue }
@@ -14,6 +15,7 @@ enum UsagePopoverTab: String, CaseIterable, Identifiable {
         switch self {
         case .overview: return "概覽"
         case .history: return "歷史"
+        case .accounts: return "帳號"
         case .settings: return "設定"
         }
     }
@@ -22,6 +24,7 @@ enum UsagePopoverTab: String, CaseIterable, Identifiable {
         switch self {
         case .overview: return "gauge.with.dots.needle.33percent"
         case .history: return "chart.xyaxis.line"
+        case .accounts: return "person.2"
         case .settings: return "gearshape"
         }
     }

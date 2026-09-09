@@ -16,6 +16,14 @@ extension UsagePopoverView {
         .padding(12)
         .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay { RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(HUDColorPalette.border, lineWidth: 0.7) }
+        .onChange(of: model.tokenActivityRange) { _, range in
+            acknowledgeAction("每日 Token 範圍已切換", control: "history.tokenRange")
+            PopoverInteractionTrace.started("history.tokenRange.\(range.rawValue)")
+        }
+        .onChange(of: model.historyRange) { _, range in
+            acknowledgeAction("用量歷史範圍已切換", control: "history.quotaRange")
+            PopoverInteractionTrace.started("history.quotaRange.\(range.rawValue)")
+        }
     }
 
     var tokenActivitySection: some View {
@@ -182,6 +190,8 @@ extension UsagePopoverView {
                     .foregroundStyle(HUDColorPalette.tertiaryText)
                 Spacer()
                 Button("清除歷史", role: .destructive) {
+                    acknowledgeAction("已開啟清除歷史確認", control: "history.clearConfirmation")
+                    PopoverInteractionTrace.started("history.clearConfirmation")
                     showClearHistoryConfirmation = true
                 }
                 .buttonStyle(.link)

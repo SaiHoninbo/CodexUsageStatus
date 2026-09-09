@@ -7,7 +7,7 @@ import SwiftUI
 extension UsagePopoverView {
     var settingsTab: some View {
         VStack(alignment: .leading, spacing: 7) {
-            accountManagementSection
+            settingsAlertSummary
             disclosureSection(
                 title: "通知",
                 systemImage: "bell.badge",
@@ -49,82 +49,87 @@ extension UsagePopoverView {
         }
     }
 
-    var accountManagementSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label("帳號管理", systemImage: "person.2")
-                .font(.subheadline.weight(.semibold))
-            VStack(alignment: .leading, spacing: 5) {
-                ForEach(model.accountProfiles) { profile in
-                    HStack(spacing: 8) {
-                        Image(systemName: profile.id == model.currentProfileID ? "checkmark.circle.fill" : "person.crop.circle")
-                            .foregroundStyle(profile.id == model.currentProfileID ? HUDColorPalette.continueAction : HUDColorPalette.secondaryText)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(model.accountProfileDisplay(for: profile).title)
-                                .font(.caption.weight(.semibold))
-                            Text(model.accountProfileDisplay(for: profile).subtitle)
-                                .font(.caption2)
-                                .foregroundStyle(HUDColorPalette.tertiaryText)
-                            Text(model.profileStatusText(profile))
-                                .font(.caption2)
-                                .foregroundStyle(HUDColorPalette.tertiaryText)
-                        }
-                        Spacer()
-                        if profile.isManaged {
-                            Button("登入") { model.startOfficialLogin(for: profile.id) }
-                                .buttonStyle(.link)
-                                .font(.caption2)
-                                .disabled(model.loginStates[profile.id]?.hasPrefix("正在") == true)
-                            Button(role: .destructive) {
-                                profilePendingRemoval = profile
-                                showRemoveProfileConfirmation = true
-                            } label: {
-                                Image(systemName: "trash")
-                            }
-                            .buttonStyle(.plain)
-                            .help("刪除受管帳號")
-                        }
-                    }
-                    if let state = model.loginStates[profile.id] {
-                        Text(state)
-                            .font(.caption2)
-                            .foregroundStyle(state.contains("失敗") || state.contains("找不到") ? HUDColorPalette.warning : HUDColorPalette.secondaryText)
-                            .padding(.leading, 26)
-                    }
-                    if profile.id != model.accountProfiles.last?.id {
-                        Rectangle()
-                            .fill(HUDColorPalette.divider)
-                            .frame(height: 0.6)
-                            .padding(.leading, 26)
-                    }
-                }
+    @ViewBuilder
+    var settingsAlertSummary: some View {
+        let alerts = settingsAlerts
+        if !alerts.isEmpty {
+            VStack(alignment: .leading, spacing: 7) {
+                Label("需要處理", systemImage: "exclamationmark.triangle.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(HUDColorPalette.warning)
 
-                HStack(spacing: 8) {
-                    Button {
-                        _ = model.createManagedProfile()
-                    } label: {
-                        Label("新增帳號", systemImage: "person.badge.plus")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-
-                    Button {
-                        model.importProfileForCurrentAccount()
-                    } label: {
-                        Label("匯入 Codex profile", systemImage: "square.and.arrow.down")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                ForEach(alerts) { alert in
+                    settingsAlertRow(alert)
                 }
-                Text("每個帳號使用獨立 CODEX_HOME 與 App Server；切換不會改動系統 ~/.codex。")
+            }
+            .padding(10)
+            .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay { RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(HUDColorPalette.warning.opacity(0.45), lineWidth: 0.8) }
+        }
+    }
+
+    var settingsAlerts: [SettingsAlertPresentation] {
+        SettingsAlertPresentation.make(
+            accessibilityPermissionState: model.accessibilityPermissionState,
+            notificationAuthorizationStatus: model.notificationAuthorizationStatus,
+            updateState: model.updateState,
+            connectionState: model.connectionState,
+            isStale: model.isStale,
+            dataAgeText: model.dataAgeText,
+            accountHealthErrorMessage: model.accountHealthErrorMessage,
+            profileStoreErrorMessage: model.profileStoreErrorMessage,
+            loginStates: model.loginStates,
+            historyErrorMessage: model.historyErrorMessage
+        )
+    }
+
+    private func settingsAlertRow(_ alert: SettingsAlertPresentation) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            Image(systemName: alert.severity == .error ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                .foregroundStyle(alert.severity == .error ? HUDColorPalette.error : HUDColorPalette.warning)
+                .frame(width: 17)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(alert.title)
+                    .font(.caption.weight(.semibold))
+                Text(alert.message)
                     .font(.caption2)
-                    .foregroundStyle(HUDColorPalette.tertiaryText)
+                    .foregroundStyle(HUDColorPalette.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(.top, 3)
+            Spacer(minLength: 6)
+            if let actionTitle = alert.actionTitle {
+                Button(actionTitle) {
+                    handleSettingsAlert(alert)
+                }
+                .buttonStyle(.link)
+                .font(.caption2.weight(.semibold))
+                .fixedSize()
+            }
         }
-        .padding(9)
-        .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(HUDColorPalette.border, lineWidth: 0.7) }
+        .padding(.vertical, 3)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func handleSettingsAlert(_ alert: SettingsAlertPresentation) {
+        guard let action = alert.action else { return }
+        acknowledgeAction("已接受：\(alert.title)", control: "alert.\(alert.id)")
+        PopoverInteractionTrace.started("alert.\(alert.id)")
+        switch action {
+        case .accounts:
+            selectionController.select(.accounts)
+        case .accessibility:
+            model.openAccessibilitySettings()
+        case .notifications:
+            if model.notificationAuthorizationStatus == .notDetermined {
+                model.requestNotificationPermission()
+            } else {
+                openNotificationSettings()
+            }
+        case .update:
+            model.checkForUpdates()
+        case .refresh:
+            model.refresh()
+        }
     }
 
     func disclosureSection<Content: View>(
@@ -133,15 +138,34 @@ extension UsagePopoverView {
         isExpanded: Binding<Bool>,
         @ViewBuilder content: @escaping () -> Content
     ) -> some View {
-        DisclosureGroup(isExpanded: isExpanded) {
-            content()
-                .padding(.top, 6)
-        } label: {
-            Label(title, systemImage: systemImage)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(HUDColorPalette.primaryText)
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                acknowledgeAction(isExpanded.wrappedValue ? "\(title)已收合" : "\(title)已展開", control: "disclosure.\(title)")
+                PopoverInteractionTrace.started("disclosure.\(title)")
+                isExpanded.wrappedValue.toggle()
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: isExpanded.wrappedValue ? "chevron.down" : "chevron.right")
+                        .font(.caption2.weight(.bold))
+                        .frame(width: 12)
+                    Label(title, systemImage: systemImage)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(HUDColorPalette.primaryText)
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(9)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PopoverImmediateButtonStyle())
+            .accessibilityValue(isExpanded.wrappedValue ? "已展開" : "已收合")
+
+            if isExpanded.wrappedValue {
+                content()
+                    .padding(.horizontal, 9)
+                    .padding(.bottom, 9)
+            }
         }
-        .padding(9)
         .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(HUDColorPalette.border, lineWidth: 0.7) }
     }
@@ -211,11 +235,19 @@ extension UsagePopoverView {
                     .foregroundStyle(HUDColorPalette.secondaryText)
                 Spacer()
                 if model.notificationAuthorizationStatus == .denied {
-                    Button("開啟系統設定") { openNotificationSettings() }
+                    Button("開啟系統設定") {
+                        acknowledgeAction("正在開啟通知設定", control: "settings.notificationSettings")
+                        PopoverInteractionTrace.started("settings.notificationSettings")
+                        openNotificationSettings()
+                    }
                         .buttonStyle(.link)
                         .font(.caption)
                 } else if model.notificationAuthorizationStatus == .notDetermined {
-                    Button("允許通知") { model.requestNotificationPermission() }
+                    Button("允許通知") {
+                        acknowledgeAction("通知權限請求已送出", control: "settings.requestNotifications")
+                        PopoverInteractionTrace.started("settings.requestNotifications")
+                        model.requestNotificationPermission()
+                    }
                         .buttonStyle(.link)
                         .font(.caption)
                 }
@@ -242,11 +274,19 @@ extension UsagePopoverView {
                 .font(.caption2)
                 .foregroundStyle(HUDColorPalette.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
-            Button("試聽 Reel 音效") { model.previewTokenReelSound() }
+            Button("試聽 Reel 音效") {
+                acknowledgeAction("試聽已接受", control: "settings.previewReel")
+                PopoverInteractionTrace.started("settings.previewReel")
+                model.previewTokenReelSound()
+            }
                 .buttonStyle(.link)
                 .font(.caption)
                 .disabled(!model.tokenReelSoundEnabled)
-            Button("重設 HUD 位置") { resetHUDPosition() }
+            Button("重設 HUD 位置") {
+                acknowledgeAction("HUD 位置已重設", control: "settings.resetHUD")
+                PopoverInteractionTrace.started("settings.resetHUD")
+                resetHUDPosition()
+            }
                 .buttonStyle(.link)
                 .font(.caption)
             HStack(spacing: 8) {
@@ -257,7 +297,11 @@ extension UsagePopoverView {
                     .foregroundStyle(HUDColorPalette.secondaryText)
                 Spacer(minLength: 0)
                 if model.accessibilityPermissionState != .trusted {
-                    Button("開啟設定") { model.openAccessibilitySettings() }
+                    Button("開啟設定") {
+                        acknowledgeAction("正在開啟輔助功能設定", control: "settings.accessibilitySettings")
+                        PopoverInteractionTrace.started("settings.accessibilitySettings")
+                        model.openAccessibilitySettings()
+                    }
                         .buttonStyle(.link)
                         .font(.caption)
                 }
@@ -372,10 +416,18 @@ extension UsagePopoverView {
             case .available(let release):
                 updateReleaseDetails(release)
                 HStack(spacing: 10) {
-                    Button(AppUpdatePresentationPolicy.installationButtonTitle) { model.beginAppUpdate() }
+                    Button(AppUpdatePresentationPolicy.installationButtonTitle) {
+                        acknowledgeAction("更新已接受", control: "settings.update")
+                        PopoverInteractionTrace.started("settings.update")
+                        model.beginAppUpdate()
+                    }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
-                    Button("查看更新內容") { model.openUpdateReleasePage() }
+                    Button("查看更新內容") {
+                        acknowledgeAction("正在開啟更新內容", control: "settings.release")
+                        PopoverInteractionTrace.started("settings.release")
+                        model.openUpdateReleasePage()
+                    }
                         .buttonStyle(.link)
                         .font(.subheadline)
                 }
@@ -385,10 +437,18 @@ extension UsagePopoverView {
                     .foregroundStyle(HUDColorPalette.warning)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
-                    Button("重試") { model.checkForUpdates() }
+                    Button("重試") {
+                        acknowledgeAction("已接受：重新檢查更新", control: "settings.retryUpdate")
+                        PopoverInteractionTrace.started("settings.retryUpdate")
+                        model.checkForUpdates()
+                    }
                         .buttonStyle(.link)
                         .font(.subheadline)
-                    Button("開啟 GitHub") { model.openUpdateReleasePage() }
+                    Button("開啟 GitHub") {
+                        acknowledgeAction("正在開啟 GitHub", control: "settings.github")
+                        PopoverInteractionTrace.started("settings.github")
+                        model.openUpdateReleasePage()
+                    }
                         .buttonStyle(.link)
                         .font(.subheadline)
                 }
@@ -447,10 +507,21 @@ extension UsagePopoverView {
 
     var actions: some View {
         HStack {
-            Button("Refresh") { model.refresh() }
-            Button("Open Codex") { openCodex() }
+            Button("Refresh") {
+                acknowledgeAction("重新整理已接受", control: "settings.refresh")
+                PopoverInteractionTrace.started("settings.refresh")
+                model.refresh()
+            }
+            Button("Open Codex") {
+                acknowledgeAction("正在開啟 Codex", control: "settings.openCodex")
+                PopoverInteractionTrace.started("settings.openCodex")
+                openCodex()
+            }
             Spacer()
-            Button("Quit") { quit() }
+            Button("Quit") {
+                PopoverInteractionTrace.accepted("settings.quit")
+                quit()
+            }
         }
         .buttonStyle(.bordered)
         .controlSize(.small)

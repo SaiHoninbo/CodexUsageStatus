@@ -62,9 +62,10 @@ Codex Usage Status 是 macOS 選單列用量 HUD，用來監控本機 Codex App 
 - HUD 任意位置按右鍵可開啟原生操作選單（重新整理、帳號範圍、更新頻率、剪貼簿、更新檢查與位置重設）
 - GitHub Releases 更新檢查
 
-Popover 固定收斂為三個分頁：「概覽」顯示目前配額與快速操作；「歷史」顯示
-quota 與 Token Activity 趨勢；「設定」集中 HUD、通知、帳號管理、同步與更新。
-App 不執行直接 Git client，也不再輪詢第三方 Feed。
+Popover 固定收斂為四個分頁：「概覽」顯示目前配額與快速操作；「歷史」顯示
+quota 與 Token Activity 趨勢；「帳號」負責完整 profile 管理與各帳號本機活動；
+「設定」集中全域 HUD、通知、同步與更新。App 不執行直接 Git client，也不再輪詢
+第三方 Feed。
 
 選單列主文字固定以目前作用中帳號的 quota 為主，例如 `Codex 78%`。Token Activity 與 reset credit 詳情會留在 popover，不會取代最重要的 quota 摘要。
 

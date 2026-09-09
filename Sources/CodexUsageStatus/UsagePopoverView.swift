@@ -29,6 +29,8 @@ struct UsagePopoverView: View {
     @State var isSyncExpanded = false
     @State var isUpdateExpanded = false
     @State var isMetadataExpanded = false
+    @State var actionAcknowledgement: String?
+    @State var actionAcknowledgementToken = UUID()
 
     var selectedTab: UsagePopoverTab { selectionController.selectedTab }
 
@@ -37,6 +39,7 @@ struct UsagePopoverView: View {
             VStack(alignment: .leading, spacing: 16) {
                 header
                 tabBar
+                actionAcknowledgementView
                 tabContent
             }
             .padding(20)
@@ -87,6 +90,7 @@ struct UsagePopoverView: View {
         HStack(spacing: 4) {
             ForEach(UsagePopoverTab.allCases) { tab in
                 Button {
+                    acknowledgeAction("\(tab.title)已開啟", control: "tab.\(tab.rawValue)")
                     selectionController.select(tab)
                 } label: {
                     Label(tab.title, systemImage: tab.systemImage)
@@ -94,7 +98,7 @@ struct UsagePopoverView: View {
                         .lineLimit(1)
                         .frame(maxWidth: .infinity, minHeight: 26)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PopoverImmediateButtonStyle())
                 .foregroundStyle(selectedTab == tab ? HUDColorPalette.primaryText : HUDColorPalette.secondaryText)
                 .background(
                     selectedTab == tab ? HUDColorPalette.controlSurface : Color.clear,
@@ -109,12 +113,30 @@ struct UsagePopoverView: View {
     }
 
     @ViewBuilder
+    private var actionAcknowledgementView: some View {
+        if let actionAcknowledgement {
+            HStack(spacing: 5) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(HUDColorPalette.continueAction)
+                Text(actionAcknowledgement)
+                    .foregroundStyle(HUDColorPalette.secondaryText)
+            }
+            .font(.caption2.weight(.medium))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .transition(.opacity)
+            .accessibilityLabel(actionAcknowledgement)
+        }
+    }
+
+    @ViewBuilder
     private var tabContent: some View {
         switch selectedTab {
         case .overview:
             overviewTab
         case .history:
             historyTab
+        case .accounts:
+            accountsTab
         case .settings:
             settingsTab
         }
@@ -172,6 +194,20 @@ struct UsagePopoverView: View {
     func creditDate(_ timestamp: Int64?) -> String {
         guard let timestamp else { return "未知" }
         return Date(timeIntervalSince1970: TimeInterval(timestamp)).formatted(date: .abbreviated, time: .shortened)
+    }
+
+    func acknowledgeAction(_ message: String, control: String) {
+        PopoverInteractionTrace.accepted(control)
+        actionAcknowledgement = message
+        let token = UUID()
+        actionAcknowledgementToken = token
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            guard actionAcknowledgementToken == token else { return }
+            withAnimation(.easeOut(duration: 0.12)) {
+                actionAcknowledgement = nil
+            }
+        }
     }
 
     private var connectionIcon: String {

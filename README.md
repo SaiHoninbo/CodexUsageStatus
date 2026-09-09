@@ -58,11 +58,11 @@ Notification permission is optional. Quota and token activity continue to work i
 - A native right-click HUD menu for refresh, account scope, sync cadence, clipboard actions, update checks, and HUD reset
 - Update checks for new GitHub Releases
 
-The popover is intentionally organized into three sections: **Overview** for
+The popover is intentionally organized into four sections: **Overview** for
 current quota and quick actions, **History** for quota and Token Activity
-trends, and **Settings** for HUD, notifications, account management, sync,
-and updates. The app does not run a direct Git client or a third-party Feed
-poller.
+trends, **Accounts** for complete profile management and per-account local
+activity, and **Settings** for global HUD, notifications, sync, and updates.
+The app does not run a direct Git client or a third-party Feed poller.
 
 The menu-bar title stays focused on the active account's quota, for example `Codex 78%`. Token activity and reset-credit details remain in the popover instead of replacing the quota summary.
 

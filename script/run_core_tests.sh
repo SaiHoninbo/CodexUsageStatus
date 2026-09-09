@@ -40,6 +40,7 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/InteractiveHostingView.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/AppUpdateService.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/AccessibilityPermissionHealth.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/SettingsAlertPresentation.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDUpdateBadgePolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDColorPalette.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDThemePalette.swift" \

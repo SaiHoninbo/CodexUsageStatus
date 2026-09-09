@@ -49,10 +49,18 @@ extension UsagePopoverView {
                         .lineLimit(2)
                 }
                 HStack(spacing: 10) {
-                    Button(AppUpdatePresentationPolicy.installationButtonTitle) { model.beginAppUpdate() }
+                    Button(AppUpdatePresentationPolicy.installationButtonTitle) {
+                        acknowledgeAction("更新已接受", control: "overview.update")
+                        PopoverInteractionTrace.started("overview.update")
+                        model.beginAppUpdate()
+                    }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
-                    Button("查看更新內容") { model.openUpdateReleasePage() }
+                    Button("查看更新內容") {
+                        acknowledgeAction("正在開啟更新內容", control: "overview.release")
+                        PopoverInteractionTrace.started("overview.release")
+                        model.openUpdateReleasePage()
+                    }
                         .buttonStyle(.link)
                         .font(.caption)
                 }
@@ -69,19 +77,28 @@ extension UsagePopoverView {
         case .relaunching:
             updateProgressCard(title: "即將重新啟動…", progress: nil)
         case .error(let message):
+            let alert = SettingsAlertPresentation.updateFailure(message: message)
             VStack(alignment: .leading, spacing: 6) {
-                Label("更新失敗", systemImage: "exclamationmark.triangle.fill")
+                Label(alert.title, systemImage: "exclamationmark.triangle.fill")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(HUDColorPalette.warning)
-                Text(message)
+                Text(alert.message)
                     .font(.caption2)
                     .foregroundStyle(HUDColorPalette.secondaryText)
                     .lineLimit(2)
                 HStack(spacing: 10) {
-                    Button("重試") { model.checkForUpdates() }
+                    Button(alert.actionTitle ?? "重試") {
+                        acknowledgeAction("已接受：重新檢查更新", control: "overview.retryUpdate")
+                        PopoverInteractionTrace.started("overview.retryUpdate")
+                        model.checkForUpdates()
+                    }
                         .buttonStyle(.link)
                         .font(.caption)
-                    Button("開啟 Release") { model.openUpdateReleasePage() }
+                    Button("開啟 Release") {
+                        acknowledgeAction("正在開啟 Release", control: "overview.release")
+                        PopoverInteractionTrace.started("overview.release")
+                        model.openUpdateReleasePage()
+                    }
                         .buttonStyle(.link)
                         .font(.caption)
                 }
@@ -137,6 +154,8 @@ extension UsagePopoverView {
                     Menu {
                         ForEach(model.accountProfiles) { profile in
                             Button {
+                                acknowledgeAction("正在切換帳號", control: "overview.switchAccount")
+                                PopoverInteractionTrace.started("overview.switchAccount")
                                 model.selectProfile(id: profile.id)
                             } label: {
                                 HStack(alignment: .top, spacing: 8) {
@@ -148,7 +167,11 @@ extension UsagePopoverView {
                             }
                         }
                         Divider()
-                        Button("新增受管帳號") { _ = model.createManagedProfile() }
+                        Button("新增受管帳號") {
+                            acknowledgeAction("新增帳號已接受", control: "overview.createAccount")
+                            PopoverInteractionTrace.started("overview.createAccount")
+                            _ = model.createManagedProfile()
+                        }
                     } label: {
                         Label("切換帳號", systemImage: "person.crop.circle.badge.plus")
                             .font(.caption.weight(.semibold))
@@ -226,14 +249,14 @@ extension UsagePopoverView {
                     }
                     allAccountsUsageRows
                     Button {
-                        selectionController.select(.settings)
+                        selectionController.select(.accounts)
                     } label: {
                         Label("前往帳號管理", systemImage: "arrow.right")
                             .frame(maxWidth: .infinity, alignment: .trailing)
                     }
                     .buttonStyle(.link)
                     .font(.caption.weight(.semibold))
-                    .accessibilityHint("前往設定中的帳號管理")
+                    .accessibilityHint("前往帳號頁面的完整帳號管理")
                 }
             }
         }
@@ -324,6 +347,8 @@ extension UsagePopoverView {
                     .foregroundStyle(allAccountsUsageRowColor(row))
                 if !row.isCurrent {
                     Button("切換並刷新") {
+                        acknowledgeAction("正在切換並刷新", control: "overview.switchAndRefresh")
+                        PopoverInteractionTrace.started("overview.switchAndRefresh")
                         model.selectProfile(id: row.profileID)
                         model.setAccountScope(.current)
                     }
@@ -463,6 +488,8 @@ extension UsagePopoverView {
     var quickActions: some View {
         HStack(spacing: 8) {
             Button {
+                acknowledgeAction("重新整理已接受", control: "overview.refresh")
+                PopoverInteractionTrace.started("overview.refresh")
                 model.refresh()
             } label: {
                 Label("重新整理", systemImage: "arrow.clockwise")
@@ -472,6 +499,8 @@ extension UsagePopoverView {
             .controlSize(.small)
 
             Button {
+                acknowledgeAction("正在開啟 Codex", control: "overview.openCodex")
+                PopoverInteractionTrace.started("overview.openCodex")
                 openCodex()
             } label: {
                 Label("開啟 Codex", systemImage: "arrow.up.right.square")
@@ -518,6 +547,8 @@ extension UsagePopoverView {
                         }
                     }
                     Button(model.resetCreditOperationState == .consuming ? "使用中…" : "使用所選 Reset Credit") {
+                        acknowledgeAction("已開啟 Reset Credit 確認", control: "resetCredit.confirmation")
+                        PopoverInteractionTrace.started("resetCredit.confirmation")
                         showResetCreditConfirmation = true
                     }
                     .buttonStyle(.borderedProminent)
@@ -539,6 +570,10 @@ extension UsagePopoverView {
                     .foregroundStyle(model.resetCreditOperationState == .error ? HUDColorPalette.warning : HUDColorPalette.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+        .onChange(of: model.selectedResetCreditID) { _, _ in
+            acknowledgeAction("Reset Credit 選擇已接受", control: "resetCredit.selection")
+            PopoverInteractionTrace.started("resetCredit.selection")
         }
     }
 

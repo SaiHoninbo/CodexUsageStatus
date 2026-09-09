@@ -106,6 +106,7 @@ struct CodexUsageStatusTests {
             ("accessibility permission policy", testAccessibilityPermissionPolicy),
             ("HUD context menu policy", testHUDContextMenuPolicy),
             ("usage popover tabs and app version", testUsagePopoverTabsAndAppVersion),
+            ("settings alert presentation", testSettingsAlertPresentation),
             ("first click event delivery", testFirstClickEventDelivery),
             ("HUD paste acknowledgement policy", testHUDPasteAcknowledgementPolicy),
             ("popover presentation appearance policy", testPopoverPresentationAppearancePolicy),
@@ -2817,9 +2818,10 @@ struct CodexUsageStatusTests {
 
     private static func testUsagePopoverTabsAndAppVersion() throws {
         try expect(
-            UsagePopoverTab.allCases.map(\.rawValue) == ["overview", "history", "settings"],
-            "usage popover exposes the three product tabs"
+            UsagePopoverTab.allCases.map(\.rawValue) == ["overview", "history", "accounts", "settings"],
+            "usage popover exposes the four product tabs"
         )
+        try expect(UsagePopoverTab.accounts.title == "帳號", "accounts has a dedicated tab")
         try expect(UsagePopoverTab.settings.title == "設定", "settings has a dedicated tab")
         try expect(UsagePopoverTab.overview.title == "概覽", "overview is the default product tab")
         try expect(AppVersion.label == "v\(AppVersion.current)", "app version label is derived from bundle version")
@@ -2832,6 +2834,49 @@ struct CodexUsageStatusTests {
             ProductSettingsRoute.destination(from: .settings) == .settings,
             "repeated Settings requests are idempotent at the destination"
         )
+    }
+
+    private static func testSettingsAlertPresentation() throws {
+        let profileID = UUID(uuidString: "00000000-0000-0000-0000-000000000021")!
+        let alerts = SettingsAlertPresentation.make(
+            accessibilityPermissionState: .notTrusted,
+            notificationAuthorizationStatus: .denied,
+            updateState: .error("無法取得更新資訊"),
+            connectionState: .connected,
+            isStale: true,
+            dataAgeText: "剛剛更新",
+            accountHealthErrorMessage: nil,
+            profileStoreErrorMessage: nil,
+            loginStates: [profileID: "登入失敗：需要重新授權"],
+            historyErrorMessage: "歷史資料無法讀取"
+        )
+
+        try expect(
+            alerts.map(\.id) == ["account-login", "accessibility", "notifications-denied", "update", "stale-data", "history"],
+            "settings alerts use deterministic actionable ordering"
+        )
+        try expect(alerts.first?.action == .accounts, "account issues route to the Accounts tab")
+        try expect(alerts.contains { $0.action == .accessibility }, "accessibility remediation is surfaced")
+        try expect(alerts.contains { $0.action == .notifications }, "notification permission remediation is surfaced")
+        try expect(alerts.contains { $0.action == .update }, "update remediation is surfaced")
+        let sharedUpdateAlert = SettingsAlertPresentation.updateFailure(message: "網路錯誤")
+        try expect(sharedUpdateAlert.title == "更新檢查失敗", "Overview and Settings share update failure wording")
+        try expect(sharedUpdateAlert.message == "網路錯誤", "shared update failure preserves the updater's factual message")
+        try expect(sharedUpdateAlert.severity == .warning && sharedUpdateAlert.action == .update, "shared update failure preserves severity and remediation")
+
+        let quiet = SettingsAlertPresentation.make(
+            accessibilityPermissionState: .trusted,
+            notificationAuthorizationStatus: .authorized,
+            updateState: .upToDate,
+            connectionState: .connected,
+            isStale: false,
+            dataAgeText: "剛剛更新",
+            accountHealthErrorMessage: nil,
+            profileStoreErrorMessage: nil,
+            loginStates: [:],
+            historyErrorMessage: nil
+        )
+        try expect(quiet.isEmpty, "healthy settings do not show a warning summary")
     }
 
     private static func testFirstClickEventDelivery() throws {
