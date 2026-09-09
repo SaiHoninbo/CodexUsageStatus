@@ -17,24 +17,33 @@ enum AppUpdateState: Equatable {
     case checking
     case upToDate
     case available(AppUpdateRelease)
-    case downloading(progress: Double?)
-    case verifying(AppUpdateRelease?)
-    case installing(AppUpdateRelease?)
-    case relaunching(AppUpdateRelease?)
     case error(String)
 
     var release: AppUpdateRelease? {
-        switch self {
-        case .available(let release): return release
-        case .verifying(let release), .installing(let release), .relaunching(let release): return release
-        default: return nil
-        }
+        if case .available(let release) = self { return release }
+        return nil
     }
 
     var isBusy: Bool {
+        if case .checking = self { return true }
+        return false
+    }
+}
+
+enum AppUpdateError: LocalizedError {
+    case noRelease
+    case invalidResponse
+    case checkTimedOut
+    case checkCancelled
+    case httpStatus(Int)
+
+    var errorDescription: String? {
         switch self {
-        case .checking, .downloading, .verifying, .installing, .relaunching: return true
-        default: return false
+        case .noRelease: return "GitHub 尚未發布正式 Release。"
+        case .invalidResponse: return "GitHub 更新資訊格式無法辨識。"
+        case .checkTimedOut: return "更新檢查逾時，請確認網路後重試。"
+        case .checkCancelled: return "更新檢查已取消。"
+        case .httpStatus(let status): return "GitHub 更新服務回應錯誤（HTTP \(status)）。"
         }
     }
 }
@@ -66,6 +75,7 @@ enum AppVersionComparator {
 
 enum AppUpdateReleasePolicy {
     static let officialReleasesURL = URL(string: "https://github.com/SaiHoninbo/CodexUsageStatus/releases")!
+    static let latestReleaseAPIURL = URL(string: "https://api.github.com/repos/SaiHoninbo/CodexUsageStatus/releases/latest")!
 
     static func safeReleaseURL(_ candidate: URL?) -> URL {
         guard let candidate, isOfficialReleaseURL(candidate) else {
@@ -88,9 +98,6 @@ enum AppUpdateReleasePolicy {
         let components = decodedPath
             .split(separator: "/", omittingEmptySubsequences: true)
             .map(String.init)
-        // Reject dot-segments before comparing the repository prefix. URL
-        // consumers may canonicalize `releases/../evil` outside the trusted
-        // release area even though its raw path starts with that prefix.
         guard !components.contains(where: { $0 == "." || $0 == ".." }),
               components.count >= 3,
               components[0].lowercased() == "saihoninbo",
@@ -100,105 +107,161 @@ enum AppUpdateReleasePolicy {
     }
 }
 
-enum AppUpdateCheckIntent: Equatable {
-    case informationProbe
-    case foregroundUpdateFlow
-}
-
-enum AppUpdateRequest: Equatable {
-    case startup
-    case periodic
-    case manualCheck
-    case installation
-}
-
-enum AppUpdateIntentPolicy {
-    static func intent(for request: AppUpdateRequest) -> AppUpdateCheckIntent {
-        switch request {
-        case .startup, .periodic, .manualCheck:
-            return .informationProbe
-        case .installation:
-            return .foregroundUpdateFlow
-        }
-    }
-}
-
-enum SparkleReleaseConfigurationPolicy {
-    static let publicKeyInfoPlistKey = "SUPublicEDKey"
-
-    /// Checks the transport shape only. Sparkle performs the cryptographic
-    /// verification against the signed appcast at runtime.
-    static func isValidPublicEDKey(_ value: String?) -> Bool {
-        guard let value else { return false }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
-        return trimmed.range(of: #"^[A-Za-z0-9+/]+={0,2}$"#, options: .regularExpression) != nil
-    }
-
-    static func permitsPackaging(releaseMode: Bool, publicEDKey: String?) -> Bool {
-        !releaseMode || isValidPublicEDKey(publicEDKey)
-    }
-}
-
 enum AppUpdatePresentationPolicy {
-    static let installationButtonTitle = "開始更新"
-
-    static func canCancel(_ state: AppUpdateState) -> Bool {
-        // The product uses Sparkle's informational probe for checks. That
-        // API does not expose an app-owned cancellation handle; cancellation
-        // during Sparkle's foreground download/install flow belongs to its
-        // standard user driver. Do not render a misleading button here.
-        return false
-    }
+    static let releaseButtonTitle = "開啟 Release"
 }
 
-#if canImport(Sparkle)
 @MainActor
 final class AppUpdateService: NSObject {
-    private(set) var state: AppUpdateState = .idle
+    private struct ReleaseResponse: Decodable {
+        let tagName: String
+        let name: String?
+        let htmlURL: URL
+        let body: String?
+        let publishedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case tagName = "tag_name"
+            case name
+            case htmlURL = "html_url"
+            case body
+            case publishedAt = "published_at"
+        }
+    }
+
     var onStateChange: ((AppUpdateState) -> Void)?
-    private var completion: ((AppUpdateState) -> Void)?
-    private let sparkleEngine: SparkleUpdateEngine
+
+    private let endpoint = AppUpdateReleasePolicy.latestReleaseAPIURL
+    private let repositoryURL = AppUpdateReleasePolicy.officialReleasesURL
+    private let session: URLSession
+    private let checkTimeout: TimeInterval
+    private(set) var state: AppUpdateState = .idle
+    private var checkTask: URLSessionDataTask?
+    private var checkTimeoutTimer: Timer?
+    private var checkGeneration: UInt64 = 0
+    private var checkCompletion: ((AppUpdateState) -> Void)?
+
+    init(session: URLSession = .shared, checkTimeout: TimeInterval = 20) {
+        self.session = session
+        self.checkTimeout = max(0.1, checkTimeout)
+        super.init()
+    }
 
     var currentVersion: String { AppVersion.current }
 
-    override init() {
-        sparkleEngine = SparkleUpdateEngine()
-        super.init()
-        sparkleEngine.onStateChange = { [weak self] state in self?.finish(state) }
-    }
-
-    func start() {
-        sparkleEngine.start()
-    }
+    /// GitHub Release checks have no separate updater startup phase. The
+    /// hook preserves UsageViewModel's deferred startup sequencing.
+    func start() {}
 
     func check(completion: ((AppUpdateState) -> Void)? = nil) {
-        self.completion = completion
+        invalidateCheck(notify: false)
+        checkGeneration &+= 1
+        let generation = checkGeneration
+        checkCompletion = completion
         state = .checking
         onStateChange?(.checking)
-        sparkleEngine.probeForUpdateInformation()
-    }
 
-    func beginInstall() {
-        // Sparkle's standard user driver presents the authenticated update
-        // flow after this user-initiated check finds a valid appcast item.
-        finish(.checking)
-        sparkleEngine.beginForegroundUpdateFlow()
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "GET"
+        request.timeoutInterval = checkTimeout
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("CodexUsageStatus/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+
+        let task = session.dataTask(with: request) { [weak self] data, response, error in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard generation == self.checkGeneration, self.state == .checking else { return }
+                if let error {
+                    self.finishCheck(.error("更新檢查失敗：\(error.localizedDescription)"))
+                    return
+                }
+                if let http = response as? HTTPURLResponse, http.statusCode == 404 {
+                    self.finishCheck(.error(AppUpdateError.noRelease.localizedDescription))
+                    return
+                }
+                if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                    self.finishCheck(.error(AppUpdateError.httpStatus(http.statusCode).localizedDescription))
+                    return
+                }
+                guard let data else {
+                    self.finishCheck(.error(AppUpdateError.invalidResponse.localizedDescription))
+                    return
+                }
+                do {
+                    let decoder = JSONDecoder()
+                    decoder.dateDecodingStrategy = .iso8601
+                    let payload = try decoder.decode(ReleaseResponse.self, from: data)
+                    let version = payload.tagName.replacingOccurrences(of: "^v", with: "", options: .regularExpression)
+                    guard AppUpdateReleasePolicy.isSafeVersion(version),
+                          AppUpdateReleasePolicy.isOfficialReleaseURL(payload.htmlURL) else {
+                        self.finishCheck(.error(AppUpdateError.invalidResponse.localizedDescription))
+                        return
+                    }
+                    let release = AppUpdateRelease(
+                        version: version,
+                        tagName: payload.tagName,
+                        name: payload.name?.isEmpty == false ? payload.name! : payload.tagName,
+                        releaseURL: payload.htmlURL,
+                        notes: payload.body ?? "",
+                        publishedAt: payload.publishedAt
+                    )
+                    guard AppVersionComparator.isNewer(release.version, than: self.currentVersion) else {
+                        self.finishCheck(.upToDate)
+                        return
+                    }
+                    self.finishCheck(.available(release))
+                } catch {
+                    self.finishCheck(.error("更新資訊無法解析：\(error.localizedDescription)"))
+                }
+            }
+        }
+        checkTask = task
+        task.resume()
+
+        let timer = Timer(timeInterval: checkTimeout, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.timeoutCheck(generation: generation)
+            }
+        }
+        checkTimeoutTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     func openReleasePage() {
-        NSWorkspace.shared.open(
-            state.release?.releaseURL
-                ?? AppUpdateReleasePolicy.officialReleasesURL
-        )
+        NSWorkspace.shared.open(state.release?.releaseURL ?? repositoryURL)
     }
 
-    private func finish(_ newState: AppUpdateState, completion: ((AppUpdateState) -> Void)? = nil) {
+    private func finishCheck(_ newState: AppUpdateState, completion: ((AppUpdateState) -> Void)? = nil) {
+        checkTimeoutTimer?.invalidate()
+        checkTimeoutTimer = nil
+        checkTask = nil
         state = newState
         onStateChange?(newState)
-        let callback = completion ?? self.completion
-        self.completion = nil
+        let callback = completion ?? checkCompletion
+        checkCompletion = nil
         callback?(newState)
     }
+
+    private func timeoutCheck(generation: UInt64) {
+        guard generation == checkGeneration, state == .checking else { return }
+        checkGeneration &+= 1
+        checkTask?.cancel()
+        checkTask = nil
+        finishCheck(.error(AppUpdateError.checkTimedOut.localizedDescription))
+    }
+
+    private func invalidateCheck(notify: Bool) {
+        guard state == .checking || checkTask != nil || checkTimeoutTimer != nil else { return }
+        checkGeneration &+= 1
+        checkTask?.cancel()
+        checkTask = nil
+        checkTimeoutTimer?.invalidate()
+        checkTimeoutTimer = nil
+        if notify {
+            finishCheck(.error(AppUpdateError.checkCancelled.localizedDescription))
+        } else {
+            checkCompletion = nil
+        }
+    }
 }
-#endif

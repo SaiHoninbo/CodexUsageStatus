@@ -509,11 +509,6 @@ final class UsageViewModel: ObservableObject {
         updateService.openReleasePage()
     }
 
-    func beginAppUpdate() {
-        updateService.beginInstall()
-        updateState = updateService.state
-    }
-
     func setAccountScope(_ scope: AccountScope) {
         guard accountScope != scope else { return }
         accountScope = scope

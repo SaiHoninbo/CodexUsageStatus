@@ -3136,51 +3136,20 @@ struct CodexUsageStatusTests {
             publishedAt: nil
         )
         try expect(AppUpdateState.available(release).release?.version == "2.5.0", "available retains target release")
-        try expect(AppUpdateState.downloading(progress: 0.5).isBusy, "download state is busy")
-        try expect(AppUpdateState.verifying(release).isBusy, "verify state is busy")
-        try expect(AppUpdateState.installing(release).isBusy, "install state is busy")
-        try expect(AppUpdateState.relaunching(release).isBusy, "relaunch state is busy")
+        try expect(AppUpdateState.checking.isBusy, "release check state is busy")
         try expect(!AppUpdateState.error("network").isBusy, "error state is terminal")
     }
 
     private static func testUpdateAuthorityAndPackagingPolicy() throws {
         try expect(
-            AppUpdateIntentPolicy.intent(for: .startup) == .informationProbe,
-            "startup discovery uses an informational probe"
+            AppUpdateReleasePolicy.latestReleaseAPIURL.absoluteString ==
+                "https://api.github.com/repos/SaiHoninbo/CodexUsageStatus/releases/latest",
+            "update checks use the official GitHub latest-release API"
         )
         try expect(
-            AppUpdateIntentPolicy.intent(for: .periodic) == .informationProbe,
-            "periodic discovery uses an informational probe"
-        )
-        try expect(
-            AppUpdateIntentPolicy.intent(for: .manualCheck) == .informationProbe,
-            "manual check updates the compact state without forcing install UI"
-        )
-        try expect(
-            AppUpdateIntentPolicy.intent(for: .installation) == .foregroundUpdateFlow,
-            "installation uses the foreground Sparkle flow"
-        )
-
-        let publicKey = String(repeating: "A", count: 43) + "="
-        try expect(
-            SparkleReleaseConfigurationPolicy.permitsPackaging(releaseMode: false, publicEDKey: nil),
-            "candidate packaging may omit the release public key"
-        )
-        try expect(
-            SparkleReleaseConfigurationPolicy.permitsPackaging(releaseMode: true, publicEDKey: publicKey),
-            "formal packaging accepts an externally supplied public key"
-        )
-        try expect(
-            !SparkleReleaseConfigurationPolicy.permitsPackaging(releaseMode: true, publicEDKey: nil),
-            "formal packaging fails closed without a public key"
-        )
-        try expect(
-            !SparkleReleaseConfigurationPolicy.isValidPublicEDKey("not a key"),
-            "invalid public-key input is rejected"
-        )
-        try expect(
-            SparkleReleaseConfigurationPolicy.publicKeyInfoPlistKey == "SUPublicEDKey",
-            "public key uses Sparkle's Info.plist key"
+            AppUpdateReleasePolicy.officialReleasesURL.absoluteString ==
+                "https://github.com/SaiHoninbo/CodexUsageStatus/releases",
+            "manual updates use the official GitHub Release page"
         )
 
         let official = URL(string: "https://github.com/SaiHoninbo/CodexUsageStatus/releases/tag/v2.5.0")!
@@ -3191,21 +3160,12 @@ struct CodexUsageStatusTests {
         )
         try expect(
             AppUpdateReleasePolicy.safeReleaseURL(arbitrary) == AppUpdateReleasePolicy.officialReleasesURL,
-            "arbitrary appcast URL falls back to official releases"
+            "arbitrary update URL falls back to official releases"
         )
 
         try expect(
-            AppUpdatePresentationPolicy.installationButtonTitle == "開始更新",
-            "standard user-driver wording does not promise silent replacement"
-        )
-        try expect(!AppUpdatePresentationPolicy.canCancel(.checking), "informational probe has no fake cancel action")
-        try expect(
-            !AppUpdatePresentationPolicy.canCancel(.downloading(progress: nil)),
-            "download does not expose a fake cancel action"
-        )
-        try expect(
-            !AppUpdatePresentationPolicy.canCancel(.installing(nil)),
-            "installation does not expose a fake cancel action"
+            AppUpdatePresentationPolicy.releaseButtonTitle == "開啟 Release",
+            "update UI makes the GitHub Release action explicit"
         )
     }
 

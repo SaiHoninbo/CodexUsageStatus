@@ -390,21 +390,13 @@ extension UsagePopoverView {
 
             switch model.updateState {
             case .idle:
-                Text("啟動後會檢查 Sparkle 更新來源。")
+                Text("啟動後會檢查 GitHub Release。")
                     .font(.body)
                     .foregroundStyle(HUDColorPalette.secondaryText)
             case .checking:
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
                     Text("正在檢查更新…")
-                        .font(.body)
-                        .foregroundStyle(HUDColorPalette.secondaryText)
-                    Spacer()
-                }
-            case .downloading, .verifying, .installing, .relaunching:
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text("正在處理更新…")
                         .font(.body)
                         .foregroundStyle(HUDColorPalette.secondaryText)
                     Spacer()
@@ -416,10 +408,10 @@ extension UsagePopoverView {
             case .available(let release):
                 updateReleaseDetails(release)
                 HStack(spacing: 10) {
-                    Button(AppUpdatePresentationPolicy.installationButtonTitle) {
-                        acknowledgeAction("更新已接受", control: "settings.update")
-                        PopoverInteractionTrace.started("settings.update")
-                        model.beginAppUpdate()
+                    Button(AppUpdatePresentationPolicy.releaseButtonTitle) {
+                        acknowledgeAction("正在開啟 Release", control: "settings.release")
+                        PopoverInteractionTrace.started("settings.release")
+                        model.openUpdateReleasePage()
                     }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
@@ -459,7 +451,7 @@ extension UsagePopoverView {
     @ViewBuilder
     private var updateStatusLabel: some View {
         switch model.updateState {
-        case .checking, .downloading, .verifying, .installing, .relaunching:
+        case .checking:
             Text("處理中").font(.subheadline).foregroundStyle(HUDColorPalette.secondaryText)
         case .available:
             Text("有新版").font(.subheadline).foregroundStyle(HUDColorPalette.sevenDay)

@@ -49,10 +49,10 @@ extension UsagePopoverView {
                         .lineLimit(2)
                 }
                 HStack(spacing: 10) {
-                    Button(AppUpdatePresentationPolicy.installationButtonTitle) {
-                        acknowledgeAction("更新已接受", control: "overview.update")
-                        PopoverInteractionTrace.started("overview.update")
-                        model.beginAppUpdate()
+                    Button(AppUpdatePresentationPolicy.releaseButtonTitle) {
+                        acknowledgeAction("正在開啟 Release", control: "overview.release")
+                        PopoverInteractionTrace.started("overview.release")
+                        model.openUpdateReleasePage()
                     }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
@@ -68,14 +68,6 @@ extension UsagePopoverView {
             .padding(9)
             .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
             .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(HUDColorPalette.sevenDay.opacity(0.45), lineWidth: 0.8) }
-        case .downloading(let progress):
-            updateProgressCard(title: "正在下載更新…", progress: progress)
-        case .verifying:
-            updateProgressCard(title: "正在驗證更新…", progress: nil)
-        case .installing:
-            updateProgressCard(title: "正在安裝更新…", progress: nil)
-        case .relaunching:
-            updateProgressCard(title: "即將重新啟動…", progress: nil)
         case .error(let message):
             let alert = SettingsAlertPresentation.updateFailure(message: message)
             VStack(alignment: .leading, spacing: 6) {
@@ -109,28 +101,6 @@ extension UsagePopoverView {
         case .idle, .checking, .upToDate:
             EmptyView()
         }
-    }
-
-    private func updateProgressCard(title: String, progress: Double?) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text(title)
-                    .font(.caption.weight(.semibold))
-                Spacer(minLength: 0)
-                if let progress {
-                    Text("\(Int(progress * 100))%")
-                        .font(.caption2.monospacedDigit())
-                }
-            }
-            if let progress {
-                ProgressView(value: progress)
-                    .progressViewStyle(.linear)
-            }
-        }
-        .padding(9)
-        .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(HUDColorPalette.border, lineWidth: 0.8) }
     }
 
     var overviewAccountControls: some View {

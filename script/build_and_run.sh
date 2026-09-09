@@ -50,21 +50,6 @@ APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 ICONSET_DIR="$ROOT_DIR/Resources/AppIcon.iconset"
 ICON_FILE="$ROOT_DIR/Resources/AppIcon.icns"
-SPARKLE_FRAMEWORK_SOURCE="$ROOT_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
-SPARKLE_FEED_URL="https://github.com/SaiHoninbo/CodexUsageStatus/releases/latest/download/appcast.xml"
-SPARKLE_PUBLIC_ED_KEY="${CODEX_SPARKLE_PUBLIC_ED_KEY:-}"
-
-# Formal Sparkle releases must embed the maintainer-provided Ed25519 public
-# key. Never generate a key here and never log its value; the matching private
-# key belongs exclusively in the release infrastructure.
-if [[ "${CODEX_RELEASE_MODE:-0}" == "1" && -z "$SPARKLE_PUBLIC_ED_KEY" ]]; then
-  echo "release mode requires CODEX_SPARKLE_PUBLIC_ED_KEY; refusing unsigned Sparkle metadata" >&2
-  exit 3
-fi
-if [[ -n "$SPARKLE_PUBLIC_ED_KEY" ]] && ! [[ "$SPARKLE_PUBLIC_ED_KEY" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]; then
-  echo "CODEX_SPARKLE_PUBLIC_ED_KEY must be base64-shaped" >&2
-  exit 3
-fi
 ## Release bundles must not carry developer-local source/object paths in
 ## embedded debug information. The shipped app is not a debug artifact, so
 ## omit DWARF entirely rather than publishing machine-specific paths.
@@ -80,19 +65,6 @@ BUILD_BINARY="$(swift build --disable-sandbox --show-bin-path -c release "${SWIF
 mkdir -p "$APP_MACOS" "$APP_RESOURCES"
 cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
-
-# Sparkle's SwiftPM product is a binary framework. SwiftPM links the
-# executable, but this repository assembles the final .app manually, so the
-# framework and its installer payload must be embedded explicitly.
-if [[ ! -d "$SPARKLE_FRAMEWORK_SOURCE" ]]; then
-  echo "Sparkle.framework was not produced at $SPARKLE_FRAMEWORK_SOURCE" >&2
-  exit 4
-fi
-mkdir -p "$APP_FRAMEWORKS"
-COPYFILE_DISABLE=1 ditto --norsrc "$SPARKLE_FRAMEWORK_SOURCE" "$APP_FRAMEWORKS/Sparkle.framework"
-if ! otool -l "$APP_BINARY" | rg -q '@executable_path/../Frameworks'; then
-  install_name_tool -add_rpath '@executable_path/../Frameworks' "$APP_BINARY"
-fi
 
 if [[ -d "$ICONSET_DIR" ]]; then
   # Some CommandLineTools/iconutil combinations reject an otherwise valid
@@ -122,12 +94,9 @@ else
   SIGNING_IDENTITY="-"
 fi
 
-# An ad-hoc local package cannot satisfy hardened-runtime library validation
-# for Sparkle's precompiled nested code: the app and framework have no shared
-# Team ID.  Keep hardened runtime for explicit formal signing identities, but
-# omit the runtime option for the local ad-hoc lane so the installed package
-# remains launchable.  Formal release mode still fails closed without a real
-# Developer ID identity and Sparkle key.
+# Keep hardened runtime for explicit formal signing identities. Local
+# development packages remain ad-hoc signed and launchable for this app's
+# GitHub Release/manual-update distribution path.
 sign_deep() {
   local target="$1"
   if [[ "$SIGNING_IDENTITY" == "-" ]]; then
@@ -145,12 +114,6 @@ sign_plain() {
     codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$target"
   fi
 }
-
-SPARKLE_PUBLIC_KEY_PLIST=""
-if [[ -n "$SPARKLE_PUBLIC_ED_KEY" ]]; then
-  SPARKLE_PUBLIC_KEY_PLIST="  <key>SUPublicEDKey</key>
-  <string>$SPARKLE_PUBLIC_ED_KEY</string>"
-fi
 
 cat > "$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -174,22 +137,13 @@ cat > "$INFO_PLIST" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>2.4.75</string>
+  <string>2.4.76</string>
   <key>CFBundleVersion</key>
-  <string>95</string>
+  <string>96</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
   <key>LSUIElement</key>
   <true/>
-  <key>SUFeedURL</key>
-  <string>$SPARKLE_FEED_URL</string>
-  <key>SUEnableAutomaticChecks</key>
-  <false/>
-  <key>SUAutomaticallyUpdate</key>
-  <false/>
-  <key>SUAllowsAutomaticUpdates</key>
-  <false/>
-${SPARKLE_PUBLIC_KEY_PLIST}
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSPrincipalClass</key>
@@ -200,22 +154,6 @@ PLIST
 
 xattr -cr "$APP_BUNDLE"
 
-# Sign nested Sparkle code before the containing framework and application.
-# This keeps the signing order explicit instead of treating --deep as the
-# integration proof. The outer --deep pass below is retained as a final
-# consistency check for the complete bundle.
-SPARKLE_BUNDLE="$APP_FRAMEWORKS/Sparkle.framework"
-for nested in "$SPARKLE_BUNDLE/Versions/B/XPCServices"/*.xpc; do
-  [[ -e "$nested" ]] || continue
-  sign_deep "$nested"
-done
-if [[ -d "$SPARKLE_BUNDLE/Versions/B/Updater.app" ]]; then
-  sign_deep "$SPARKLE_BUNDLE/Versions/B/Updater.app"
-fi
-if [[ -f "$SPARKLE_BUNDLE/Versions/B/Autoupdate" ]]; then
-  sign_plain "$SPARKLE_BUNDLE/Versions/B/Autoupdate"
-fi
-sign_deep "$SPARKLE_BUNDLE"
 sign_deep "$APP_BUNDLE"
 codesign --verify --deep --strict --verbose=4 "$APP_BUNDLE"
 

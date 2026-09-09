@@ -98,21 +98,17 @@ The app talks to the local Codex App Server over its stdio interface. It does no
 
 ## Updates
 
-The app uses Sparkle 2 as its single in-app update authority. It checks the
-signed appcast at startup and periodically while running. When a newer version
-is available:
+The app checks the official GitHub Release API at startup and periodically while
+running. When a newer version is available:
 
 1. The app shows a compact update state in the Overview and a detailed state in Settings, and may display one notification for that release.
-2. **開始更新** hands the authenticated confirmation, download, signature verification, installation, termination, and relaunch flow to Sparkle.
-3. **View Release Notes** opens the official GitHub Release page for review.
+2. **開啟 Release** opens the verified official GitHub Release page, where the user can review notes and download the release ZIP manually.
 
-The app does not perform a second direct GitHub download path. If the signed
-appcast or matching release asset is unavailable, Sparkle leaves the installed
-bundle unchanged and the official Release page remains available as a manual
-fallback. The appcast URL, Ed25519 public key, and release signing material are
-release infrastructure; private signing keys never belong in this repo or an
-app bundle. Formal packaging must provide the maintainer's public key through
-`CODEX_SPARKLE_PUBLIC_ED_KEY`; release mode refuses to build when it is absent.
+The app does not use the Mac App Store, Sparkle appcast, or an app-owned download
+and replacement path. Version discovery is read-only: the app accepts only a
+semantic version and HTTPS release URL from the official repository, and keeps
+the installed bundle unchanged. GitHub Releases remains the distribution and
+manual update authority.
 
 ### Release requirements for maintainers
 
@@ -192,7 +188,10 @@ Confirm that the currently running copy of `CodexUsageStatus.app` is enabled und
 
 ### The update checker says no release is available
 
-A maintainer must publish the signed Sparkle appcast and matching GitHub Release asset first. The app checks the official repository's `releases/latest/download/appcast.xml` and only installs updates through Sparkle's authenticated path. The official Release page remains available as a manual fallback when the feed is unavailable.
+The app reads the official GitHub `releases/latest` API endpoint. Confirm that a
+published, non-draft Release exists in the repository and that the latest tag
+uses a semantic version. The **開啟 Release** action always remains available as
+the manual update path.
 
 ### macOS says the app cannot be opened
 

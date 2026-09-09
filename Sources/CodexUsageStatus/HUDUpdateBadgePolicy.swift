@@ -26,7 +26,7 @@ enum HUDUpdateBadgePolicy {
         switch updateState {
         case .available(let release):
             return .available(release.version)
-        case .checking, .downloading, .verifying, .installing, .relaunching:
+        case .checking:
             return .checking
         case .error:
             return .error(currentVersion)
