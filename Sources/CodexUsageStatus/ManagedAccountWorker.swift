@@ -15,6 +15,7 @@ final class ManagedAccountWorker: Identifiable {
     var onAccountHealthState: ((UUID, AccountHealthState, String?) -> Void)?
     var onAccountBoundary: ((UUID) -> Void)?
     var onTurnEvent: ((UUID, TurnActivitySnapshot) -> Void)?
+    var onTurnPlanUpdated: ((UUID, TurnPlanEnvelope) -> Void)?
     var onTurnTokenUsage: ((UUID, String, String, Int64?) -> Void)?
 
     init(
@@ -45,6 +46,7 @@ final class ManagedAccountWorker: Identifiable {
         client.onAccountHealthState = { [weak self] state, message in self?.onAccountHealthState?(id, state, message) }
         client.onAccountBoundary = { [weak self] in self?.onAccountBoundary?(id) }
         client.onTurnEvent = { [weak self] event in self?.onTurnEvent?(id, event) }
+        client.onTurnPlanUpdated = { [weak self] envelope in self?.onTurnPlanUpdated?(id, envelope) }
         client.onTurnTokenUsage = { [weak self] threadID, turnID, total in
             self?.onTurnTokenUsage?(id, threadID, turnID, total)
         }

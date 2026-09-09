@@ -18,6 +18,7 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/RapidDrainPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/TokenReelAudioFeedback.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/AccountModels.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/TurnPlanProgressPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/ProfileStore.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/CodexCLIResolver.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/CodexAppServerClient.swift" \

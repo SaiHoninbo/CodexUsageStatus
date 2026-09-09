@@ -177,6 +177,7 @@ struct CodexFloatingHUDView: View {
             profileID: model.currentProfileID,
             accountEmail: displayedAccountEmail,
             plan: displayedPlan,
+            turnProgressText: model.hudTurnProgressText,
             identityEmail: model.currentAccountEmail,
             identityPlan: model.accountHealth?.identity.planType ?? model.snapshot?.planType,
             quota: displayedPresentation,
@@ -505,6 +506,16 @@ struct CodexFloatingHUDView: View {
                 .accessibilityElement()
                 .accessibilityLabel("目前登入 Email")
                 .accessibilityValue(presentation.accountEmail ?? "未提供 Email")
+            if let turnProgressText = presentation.turnProgressText {
+                Text(turnProgressText)
+                    .font(.system(size: max(9, metrics.quotaPrimaryTextSize * 0.78), weight: .semibold, design: .rounded))
+                    .foregroundStyle(selectedHUDPalette.sevenDay)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.62)
+                    .allowsTightening(true)
+                    .accessibilityLabel("Codex Turn 進度")
+                    .accessibilityValue(turnProgressText)
+            }
             if let plan = presentation.plan {
                 HUDPlanBadge(plan: plan, height: metrics.headerHeight)
             }

@@ -63,6 +63,7 @@ final class CodexAppServerClient {
     var onAccountHealthState: ((AccountHealthState, String?) -> Void)?
     var onAccountBoundary: (() -> Void)?
     var onTurnEvent: ((TurnActivitySnapshot) -> Void)?
+    var onTurnPlanUpdated: ((TurnPlanEnvelope) -> Void)?
     var onTurnTokenUsage: ((String, String, Int64?) -> Void)?
 
     private enum PendingRequest {
@@ -498,6 +499,14 @@ final class CodexAppServerClient {
                 // rollout/session metadata is its sole visible Turn source,
                 // so prompt/content fields are never parsed here.
                 onTurnEvent(event)
+            } else if method == "turn/plan/updated",
+                      let onTurnPlanUpdated,
+                      let params = message.object["params"],
+                      let envelope = TurnPlanCodec.decodeEnvelope(params: params) {
+                // The plan payload is intentionally decoded in two stages.
+                // Keep generic protocol logs metadata-only; step text and
+                // provider explanation never enter diagnostics.
+                onTurnPlanUpdated(envelope)
             } else if method == "thread/tokenUsage/updated",
                       let onTurnTokenUsage,
                       let params = message.object["params"],

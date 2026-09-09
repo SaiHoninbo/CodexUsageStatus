@@ -534,6 +534,29 @@ extension UsagePopoverView {
                     .font(.caption)
                     .foregroundStyle(HUDColorPalette.secondaryText)
                     .lineLimit(1)
+                    if let planText = model.activeTurnPlanProgress.compactText {
+                        Text(planText)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(HUDColorPalette.sevenDay)
+                        if let currentStep = model.activeTurnPlanProgress.currentStepText,
+                           let normalized = TurnPlanCodec.normalizedStepText(currentStep) {
+                            Text("目前：\(normalized)")
+                                .font(.caption2)
+                                .foregroundStyle(HUDColorPalette.secondaryText)
+                                .lineLimit(1)
+                        } else if model.activeTurnPlanProgress.hasMultipleInProgress {
+                            Text("目前：多個步驟進行中")
+                                .font(.caption2)
+                                .foregroundStyle(HUDColorPalette.secondaryText)
+                                .lineLimit(1)
+                        }
+                        if let remaining = model.activeTurnPlanProgress.remainingStepCount, remaining == 1 {
+                            Text("目前計畫剩 1 步")
+                                .font(.caption2)
+                                .foregroundStyle(HUDColorPalette.tertiaryText)
+                                .lineLimit(1)
+                        }
+                    }
                 }
                 .padding(10)
                 .background(HUDColorPalette.controlSurface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))

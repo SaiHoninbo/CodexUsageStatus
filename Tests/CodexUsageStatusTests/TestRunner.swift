@@ -94,6 +94,9 @@ struct CodexUsageStatusTests {
             ("local profile activity projection", testLocalProfileActivityProjection),
             ("all-account activity scope truth", testAllAccountActivityScopeTruth),
             ("turn activity event decoding", testTurnActivityDecoding),
+            ("turn plan decoding and progress", testTurnPlanDecodingAndProgress),
+            ("turn plan rejection and terminal semantics", testTurnPlanRejectionAndTerminalSemantics),
+            ("turn plan admission identity and invalidation", testTurnPlanAdmissionIdentityAndInvalidation),
             ("turn notification content policy", testTurnNotificationContentPolicy),
             ("account profiles isolate email", testAccountProfilesIsolateEmail),
             ("account read disables refresh token", testAccountReadDisablesRefreshToken),
@@ -1995,6 +1998,7 @@ struct CodexUsageStatusTests {
                 profileID: effectiveProfileID,
                 accountEmail: "person@example.com",
                 plan: "Plus",
+                turnProgressText: nil,
                 identityEmail: "person@example.com",
                 identityPlan: "Plus",
                 quota: HUDDualQuotaPresentation(
@@ -2279,6 +2283,18 @@ struct CodexUsageStatusTests {
         ])
         try expect(event?.state == .active, "turn started state")
         try expect(event?.content == "hello", "turn content")
+        let completedEvent = TurnActivityCodec.decodeEvent(method: "turn/completed", params: [
+            "threadId": "thread-1", "turn": ["id": "turn-1", "status": "completed"]
+        ])
+        let failedEvent = TurnActivityCodec.decodeEvent(method: "turn/completed", params: [
+            "threadId": "thread-1", "turn": ["id": "turn-1", "status": "failed"]
+        ])
+        let interruptedEvent = TurnActivityCodec.decodeEvent(method: "turn/completed", params: [
+            "threadId": "thread-1", "turn": ["id": "turn-1", "status": "interrupted"]
+        ])
+        try expect(completedEvent?.state == .completed, "turn/completed completed status is terminal authority")
+        try expect(failedEvent?.state == .failed, "turn/completed failed status is terminal authority")
+        try expect(interruptedEvent?.state == .interrupted, "turn/completed interrupted status is terminal authority")
         let usage = TurnActivityCodec.decodeTokenUsage(params: [
             "threadId": "thread-1", "turnId": "turn-1",
             "tokenUsage": [
@@ -2287,6 +2303,283 @@ struct CodexUsageStatusTests {
             ]
         ])
         try expect(usage?.tokenTotal == 1234, "thread cumulative token usage")
+    }
+
+    private static func testTurnPlanDecodingAndProgress() throws {
+        let profileID = UUID()
+        let envelope = TurnPlanCodec.decodeEnvelope(params: [
+            "turnId": "turn-1",
+            "threadId": "thread-1",
+            "explanation": "ignored",
+            "items": [],
+            "plan": [
+                ["step": "分析", "status": "completed"],
+                ["step": "\n  執行\t整合測試 ", "status": "inProgress"],
+                ["step": "測試", "status": "pending"]
+            ]
+        ])
+        try expect(envelope?.turnID == "turn-1", "plan envelope decodes turn identity")
+        try expect(envelope?.optionalThreadID == "thread-1", "optional thread extension is available")
+        let steps = envelope.flatMap(TurnPlanCodec.decodeSteps(from:))
+        try expect(steps?.count == 3, "plan entries decode as a complete snapshot")
+        let snapshot = TurnPlanSnapshot(
+            profileID: profileID,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            steps: steps ?? []
+        )
+        let progress = TurnPlanProgressPolicy.make(from: snapshot)
+        try expect(progress.completedCount == 1 && progress.totalCount == 3, "completed count uses only completed steps")
+        try expect(progress.percentage == 33, "plan percentage uses nearest-integer rounding")
+        try expect(progress.currentStepText == "\n  執行\t整合測試 ", "raw current step remains in the snapshot")
+        try expect(
+            TurnPlanCodec.normalizedStepText(progress.currentStepText) == "執行 整合測試",
+            "current step presentation normalizes whitespace"
+        )
+        try expect(TurnPlanProgressPolicy.hudText(state: .active, progress: progress) == "Codex · 1/3", "HUD uses compact step count")
+        try expect(TurnPlanProgressPolicy.hudText(state: .completed, progress: progress) == nil, "terminal Turn has no active HUD progress")
+
+        let pending = TurnPlanSnapshot(
+            profileID: profileID,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            steps: [
+                TurnPlanStep(text: "A", status: .pending),
+                TurnPlanStep(text: "B", status: .pending)
+            ]
+        )
+        let pendingProgress = TurnPlanProgressPolicy.make(from: pending)
+        try expect(pendingProgress.hasPlanAuthority && pendingProgress.percentage == 0, "non-empty all-pending plan has authoritative zero percent")
+        try expect(TurnPlanProgressPolicy.make(from: nil) == .unknown, "missing plan has unknown progress")
+        try expect(
+            TurnPlanProgressPolicy.make(from: TurnPlanSnapshot(profileID: profileID, threadID: "thread-1", turnID: "turn-1", steps: []) ) == .unknown,
+            "empty plan has unknown progress"
+        )
+
+        let oneOfThree = TurnPlanProgressPolicy.make(from: snapshot)
+        let twoOfThree = TurnPlanProgressPolicy.make(from: TurnPlanSnapshot(
+            profileID: profileID,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            steps: [
+                TurnPlanStep(text: "A", status: .completed),
+                TurnPlanStep(text: "B", status: .completed),
+                TurnPlanStep(text: "C", status: .pending)
+            ]
+        ))
+        try expect(oneOfThree.percentage == 33 && twoOfThree.percentage == 67, "percentage rounds to nearest integer")
+
+        let multiple = TurnPlanProgressPolicy.make(from: TurnPlanSnapshot(
+            profileID: profileID,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            steps: [
+                TurnPlanStep(text: "A", status: .inProgress),
+                TurnPlanStep(text: "B", status: .inProgress)
+            ]
+        ))
+        try expect(multiple.hasMultipleInProgress && multiple.currentStepText == nil, "multiple in-progress steps are not guessed into one current step")
+
+        let revision = TurnPlanProgressPolicy.make(from: TurnPlanSnapshot(
+            profileID: profileID,
+            threadID: "thread-1",
+            turnID: "turn-1",
+            steps: [
+                TurnPlanStep(text: "A", status: .completed),
+                TurnPlanStep(text: "B", status: .completed),
+                TurnPlanStep(text: "C", status: .pending),
+                TurnPlanStep(text: "D", status: .pending),
+                TurnPlanStep(text: "E", status: .pending)
+            ]
+        ))
+        try expect(revision.percentage == 40, "replacement plan can lower the denominator-derived percentage")
+    }
+
+    private static func testTurnPlanRejectionAndTerminalSemantics() throws {
+        let knownEnvelope = TurnPlanCodec.decodeEnvelope(params: [
+            "turnId": "turn-1", "plan": [["step": "A", "status": "pending"]]
+        ])!
+        try expect(TurnPlanCodec.decodeSteps(from: knownEnvelope)?.count == 1, "known plan status is accepted")
+
+        let unknownStatus = TurnPlanCodec.decodeEnvelope(params: [
+            "turnId": "turn-1", "threadId": NSNull(), "plan": [["step": "A", "status": "futureStatus"]]
+        ])!
+        try expect(unknownStatus.optionalThreadID == nil, "null thread extension is ignored")
+        try expect(TurnPlanCodec.decodeSteps(from: unknownStatus) == nil, "unknown status rejects the entire plan payload")
+
+        let malformedThread = TurnPlanCodec.decodeEnvelope(params: [
+            "turnId": "turn-1", "threadId": 42, "items": [], "plan": [["step": "A", "status": "pending"]]
+        ])
+        try expect(malformedThread?.optionalThreadID == nil, "malformed thread extension does not invalidate the official envelope")
+        try expect(malformedThread.flatMap(TurnPlanCodec.decodeSteps(from:))?.count == 1, "unknown top-level fields are ignored")
+
+        let missingPlan = TurnPlanCodec.decodeEnvelope(params: ["turnId": "turn-1"])
+        try expect(missingPlan != nil && TurnPlanCodec.decodeSteps(from: missingPlan!) == nil, "missing plan remains stage-one identifiable")
+
+        let blank = TurnPlanSnapshot(
+            profileID: UUID(), threadID: "thread-1", turnID: "turn-1",
+            steps: [
+                TurnPlanStep(text: "分析", status: .completed),
+                TurnPlanStep(text: "   \n\t", status: .inProgress),
+                TurnPlanStep(text: "測試", status: .pending)
+            ]
+        )
+        let blankProgress = TurnPlanProgressPolicy.make(from: blank)
+        try expect(blankProgress.hasPlanAuthority && blankProgress.percentage == 33, "blank step preserves plan authority and counting")
+        try expect(TurnPlanCodec.normalizedStepText(blankProgress.currentStepText) == nil, "blank step hides only the current-step presentation")
+
+        let activeProgress = TurnPlanProgressPolicy.make(from: TurnPlanSnapshot(
+            profileID: UUID(), threadID: "thread-1", turnID: "turn-1",
+            steps: [TurnPlanStep(text: "A", status: .completed), TurnPlanStep(text: "B", status: .completed)]
+        ))
+        try expect(TurnPlanProgressPolicy.hudText(state: .active, progress: activeProgress) == "Codex · 2/2", "plan 100 percent remains active until terminal event")
+        try expect(TurnPlanProgressPolicy.hudText(state: .failed, progress: activeProgress) == nil, "failed terminal state clears active HUD progress")
+        try expect(TurnPlanProgressPolicy.hudText(state: .interrupted, progress: activeProgress) == nil, "interrupted terminal state clears active HUD progress")
+    }
+
+    private static func testTurnPlanAdmissionIdentityAndInvalidation() throws {
+        let profileID = UUID()
+        let otherProfileID = UUID()
+        let validEnvelope = TurnPlanCodec.decodeEnvelope(params: [
+            "turnId": "turn-1", "threadId": "thread-1",
+            "plan": [["step": "A", "status": "completed"]]
+        ])!
+        let validSteps = TurnPlanCodec.decodeSteps(from: validEnvelope)!
+
+        let replacement = TurnPlanAdmissionPolicy.decide(
+            sourceProfileID: profileID,
+            currentProfileID: profileID,
+            currentProfileIsManaged: true,
+            activeTurnState: .active,
+            activeThreadID: "thread-1",
+            activeTurnID: "turn-1",
+            envelope: validEnvelope,
+            steps: validSteps
+        )
+        try expect(
+            replacement == .replace(TurnPlanSnapshot(profileID: profileID, threadID: "thread-1", turnID: "turn-1", steps: validSteps)),
+            "matching identity replaces the complete current snapshot"
+        )
+
+        let malformedEnvelope = TurnPlanCodec.decodeEnvelope(params: [
+            "turnId": "turn-1", "threadId": "thread-1",
+            "plan": [["step": "A", "status": "futureStatus"]]
+        ])!
+        try expect(
+            TurnPlanAdmissionPolicy.decide(
+                sourceProfileID: profileID,
+                currentProfileID: profileID,
+                currentProfileIsManaged: true,
+                activeTurnState: .active,
+                activeThreadID: "thread-1",
+                activeTurnID: "turn-1",
+                envelope: malformedEnvelope,
+                steps: TurnPlanCodec.decodeSteps(from: malformedEnvelope)
+            ) == .clear,
+            "same-identity malformed replacement clears stale plan authority"
+        )
+
+        let emptyEnvelope = TurnPlanCodec.decodeEnvelope(params: [
+            "turnId": "turn-1", "threadId": "thread-1", "plan": []
+        ])!
+        try expect(
+            TurnPlanAdmissionPolicy.decide(
+                sourceProfileID: profileID,
+                currentProfileID: profileID,
+                currentProfileIsManaged: true,
+                activeTurnState: .active,
+                activeThreadID: "thread-1",
+                activeTurnID: "turn-1",
+                envelope: emptyEnvelope,
+                steps: TurnPlanCodec.decodeSteps(from: emptyEnvelope)
+            ) == .clear,
+            "same-identity empty replacement clears plan authority"
+        )
+
+        let mismatchedProfile = TurnPlanAdmissionPolicy.decide(
+            sourceProfileID: otherProfileID,
+            currentProfileID: profileID,
+            currentProfileIsManaged: true,
+            activeTurnState: .active,
+            activeThreadID: "thread-1",
+            activeTurnID: "turn-1",
+            envelope: validEnvelope,
+            steps: validSteps
+        )
+        try expect(mismatchedProfile == .ignore, "wrong profile preserves the legitimate current plan")
+
+        let mismatchedThreadEnvelope = TurnPlanCodec.decodeEnvelope(params: [
+            "turnId": "turn-1", "threadId": "other-thread", "plan": [["step": "A", "status": "pending"]]
+        ])!
+        try expect(
+            TurnPlanAdmissionPolicy.decide(
+                sourceProfileID: profileID,
+                currentProfileID: profileID,
+                currentProfileIsManaged: true,
+                activeTurnState: .active,
+                activeThreadID: "thread-1",
+                activeTurnID: "turn-1",
+                envelope: mismatchedThreadEnvelope,
+                steps: TurnPlanCodec.decodeSteps(from: mismatchedThreadEnvelope)
+            ) == .ignore,
+            "wrong thread preserves the legitimate current plan"
+        )
+
+        try expect(
+            TurnPlanAdmissionPolicy.decide(
+                sourceProfileID: profileID,
+                currentProfileID: profileID,
+                currentProfileIsManaged: true,
+                activeTurnState: .active,
+                activeThreadID: "thread-1",
+                activeTurnID: "other-turn",
+                envelope: validEnvelope,
+                steps: validSteps
+            ) == .ignore,
+            "wrong Turn preserves the legitimate current plan"
+        )
+
+        try expect(
+            TurnPlanAdmissionPolicy.decide(
+                sourceProfileID: profileID,
+                currentProfileID: profileID,
+                currentProfileIsManaged: true,
+                activeTurnState: .active,
+                activeThreadID: nil,
+                activeTurnID: "turn-1",
+                envelope: validEnvelope,
+                steps: validSteps
+            ) == .ignore,
+            "missing authoritative thread identity does not guess a plan owner"
+        )
+
+        try expect(
+            TurnPlanAdmissionPolicy.decide(
+                sourceProfileID: profileID,
+                currentProfileID: profileID,
+                currentProfileIsManaged: true,
+                activeTurnState: .completed,
+                activeThreadID: "thread-1",
+                activeTurnID: "turn-1",
+                envelope: validEnvelope,
+                steps: validSteps
+            ) == .ignore,
+            "late plan after terminal Turn is ignored"
+        )
+
+        try expect(
+            TurnPlanAdmissionPolicy.decide(
+                sourceProfileID: nil,
+                currentProfileID: nil,
+                currentProfileIsManaged: false,
+                activeTurnState: .active,
+                activeThreadID: "thread-1",
+                activeTurnID: "turn-1",
+                envelope: validEnvelope,
+                steps: validSteps
+            ) == .replace(TurnPlanSnapshot(profileID: nil, threadID: "thread-1", turnID: "turn-1", steps: validSteps)),
+            "default connection accepts a plan without a managed profile"
+        )
     }
 
     private static func testTurnNotificationContentPolicy() throws {

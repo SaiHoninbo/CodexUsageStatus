@@ -38,6 +38,9 @@ struct HUDPresentation: Equatable {
     let profileID: UUID?
     let accountEmail: String?
     let plan: String?
+    /// Compact current-Turn plan progress. This is intentionally separate
+    /// from the account subscription plan above.
+    let turnProgressText: String?
     // Identity sentinels keep profile/account transitions observable even
     // when the compact display has not yet accepted the replacement label.
     let identityEmail: String?

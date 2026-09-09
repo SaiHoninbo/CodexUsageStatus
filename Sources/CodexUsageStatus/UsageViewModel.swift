@@ -58,6 +58,9 @@ final class UsageViewModel: ObservableObject {
     @Published private(set) var activeTurn: TurnActivitySnapshot = .idle {
         didSet { refreshStatusItemPresentation() }
     }
+    @Published private(set) var activeTurnPlan: TurnPlanSnapshot? {
+        didSet { refreshStatusItemPresentation() }
+    }
     /// Rollout/session observation is the single user-visible Turn authority.
     /// These capabilities are factual limits of the metadata-only source, not
     /// user preferences and not a second polling subsystem.
@@ -84,6 +87,14 @@ final class UsageViewModel: ObservableObject {
     /// the canonical status presentation remains state, while this subject is
     /// consumed once by the AppDelegate animator.
     let rapidDrainEvents = PassthroughSubject<ObservedRapidDrainEvent, Never>()
+
+    var activeTurnPlanProgress: TurnPlanProgress {
+        TurnPlanProgressPolicy.make(from: activeTurnPlan)
+    }
+
+    var hudTurnProgressText: String? {
+        TurnPlanProgressPolicy.hudText(state: activeTurn.state, progress: activeTurnPlanProgress)
+    }
 
     let loginItemManager = LoginItemManager()
 
@@ -194,6 +205,7 @@ final class UsageViewModel: ObservableObject {
         floatingHUDEnabled = defaults.object(forKey: PreferenceKey.floatingHUDEnabled) as? Bool ?? true
         profileStore = AccountProfileStore(loadOnInit: false, asynchronousPersistence: true)
         accountProfiles = []
+        activeTurnPlan = nil
         profileStoreErrorMessage = profileStore.errorMessage
         quotaRefreshIntervalSeconds = Self.clampQuotaInterval(
             defaults.object(forKey: PreferenceKey.quotaRefreshInterval) as? Int ?? RefreshCadenceDefaults.quotaSeconds
@@ -315,7 +327,13 @@ final class UsageViewModel: ObservableObject {
             self.resetCreditOperationState = .idle
             self.activeTurn = .unknownSnapshot()
             self.activeTurnSourceKey = nil
+            self.activeTurnPlan = nil
             self.accountHealthState = .loading
+        }
+        client.onTurnPlanUpdated = { [weak self] envelope in
+            guard let self else { return }
+            guard self.defaultClientEnabled else { return }
+            self.handleTurnPlanUpdated(profileID: nil, envelope: envelope)
         }
         // App Server remains the quota/account transport, but its Turn events
         // are deliberately not projected into the user-visible Turn card.
@@ -531,6 +549,7 @@ final class UsageViewModel: ObservableObject {
         refreshLocalUsageObserverRoots()
         activeTurn = .unknownSnapshot()
         activeTurnSourceKey = nil
+        activeTurnPlan = nil
         selectedResetCreditID = nil
         resetCreditOperationState = .idle
         resetCreditMessage = "已切換到 \(profile.displayName)"
@@ -573,6 +592,7 @@ final class UsageViewModel: ObservableObject {
         refreshLocalUsageObserverRoots()
         activeTurn = .unknownSnapshot()
         activeTurnSourceKey = nil
+        activeTurnPlan = nil
         selectedResetCreditID = nil
         resetCreditOperationState = .idle
         resetCreditMessage = "已建立 \(profile.displayName)"
@@ -1059,7 +1079,13 @@ final class UsageViewModel: ObservableObject {
             self.selectedResetCreditID = nil
             self.activeTurn = .unknownSnapshot()
             self.activeTurnSourceKey = nil
+            self.activeTurnPlan = nil
             self.accountHealthState = .loading
+        }
+        worker.onTurnPlanUpdated = { [weak self] _, envelope in
+            guard let self else { return }
+            guard self.workerGenerations[id] == generation else { return }
+            self.handleTurnPlanUpdated(profileID: id, envelope: envelope)
         }
         // Managed workers retain App Server transport for quota/account data;
         // their Turn callbacks are not a second visible activity authority.
@@ -1275,6 +1301,7 @@ final class UsageViewModel: ObservableObject {
         switch event.kind {
         case .started:
             activeTurnSourceKey = sourceKey
+            activeTurnPlan = nil
             activeTurn = TurnActivitySnapshot(
                 state: .active,
                 threadID: event.threadID,
@@ -1326,6 +1353,7 @@ final class UsageViewModel: ObservableObject {
                 return
             }
             activeTurnSourceKey = sourceKey
+            activeTurnPlan = nil
             activeTurn = TurnActivitySnapshot(
                 state: state,
                 threadID: event.threadID,
@@ -1342,6 +1370,50 @@ final class UsageViewModel: ObservableObject {
             // Rollouts intentionally expose metadata only. Never pass the
             // opt-in content preference into this source's notification path.
             evaluateTurnNotification(activeTurn, contentEnabled: false)
+        }
+    }
+
+    /// Applies an App Server plan update to the current local Turn identity.
+    /// The App Server supplies plan authority, while the existing local
+    /// rollout/session observer supplies the visible Turn lifecycle. This
+    /// keeps one terminal authority and prevents plan updates from creating a
+    /// second activity timeline.
+    private func handleTurnPlanUpdated(profileID: UUID?, envelope: TurnPlanEnvelope) {
+        // Stage one establishes identity before touching step payloads. This
+        // prevents malformed plans from an unrelated profile/thread/Turn from
+        // affecting the current plan or consuming payload semantics.
+        guard TurnPlanAdmissionPolicy.matchesIdentity(
+            sourceProfileID: profileID,
+            currentProfileID: currentProfileID,
+            currentProfileIsManaged: currentProfile?.isManaged == true,
+            activeTurnState: activeTurn.state,
+            activeThreadID: activeTurn.threadID,
+            activeTurnID: activeTurn.turnID,
+            envelope: envelope
+        ) else { return }
+
+        let decision = TurnPlanAdmissionPolicy.decide(
+            sourceProfileID: profileID,
+            currentProfileID: currentProfileID,
+            currentProfileIsManaged: currentProfile?.isManaged == true,
+            activeTurnState: activeTurn.state,
+            activeThreadID: activeTurn.threadID,
+            activeTurnID: activeTurn.turnID,
+            envelope: envelope,
+            steps: TurnPlanCodec.decodeSteps(from: envelope)
+        )
+        switch decision {
+        case .ignore:
+            return
+        case .clear:
+            // Identity is already established, so a malformed replacement
+            // invalidates the previous plan rather than leaving stale progress
+            // presented as the provider's current plan.
+            if activeTurnPlan != nil { activeTurnPlan = nil }
+        case .replace(let snapshot):
+            // Identical full snapshots carry no new semantic information and
+            // should not churn the HUD/Popover projections.
+            if activeTurnPlan != snapshot { activeTurnPlan = snapshot }
         }
     }
 
@@ -1731,6 +1803,7 @@ final class UsageViewModel: ObservableObject {
             switchToProfile(selection.profile)
             activeTurn = .unknownSnapshot()
             activeTurnSourceKey = nil
+            activeTurnPlan = nil
             selectedResetCreditID = nil
             resetCreditMessage = "已切換到 \(selection.profile.displayName)"
             resetCreditOperationState = .idle
@@ -1803,6 +1876,7 @@ final class UsageViewModel: ObservableObject {
         )
         historySamples = historyStore.samples
         historyErrorMessage = historyStore.errorMessage
+        activeTurnPlan = nil
         tokenActivity = nil
         tokenActivityLastFetchedAt = nil
         hudTokenActivityFeedback = nil
