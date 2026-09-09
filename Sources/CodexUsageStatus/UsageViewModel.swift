@@ -1749,7 +1749,13 @@ final class UsageViewModel: ObservableObject {
                 // 60-second display cadence. This makes the Hero roll to zero
                 // at local midnight without adding another timer or poll.
                 self.refreshHUDTokenActivitySummary()
-                if self.activeTurn.state == .active, let started = self.activeTurn.startedAt {
+                // The display cadence is needed for the active Turn's
+                // long-running policy and elapsed-time presentation only.
+                // Terminal notifications are emitted by the terminal
+                // lifecycle event; re-evaluating a completed/failed Turn here
+                // would enqueue the same banner every minute.
+                guard TurnNotificationCadencePolicy.shouldEvaluateDisplayTimer(state: self.activeTurn.state) else { return }
+                if let started = self.activeTurn.startedAt {
                     self.activeTurn.elapsedSeconds = max(0, Int64(self.currentDate.timeIntervalSince(started)))
                     self.activeTurn.receivedAt = self.currentDate
                 }

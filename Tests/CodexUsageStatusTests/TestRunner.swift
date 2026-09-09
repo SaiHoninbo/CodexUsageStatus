@@ -98,6 +98,7 @@ struct CodexUsageStatusTests {
             ("turn plan rejection and terminal semantics", testTurnPlanRejectionAndTerminalSemantics),
             ("turn plan admission identity and invalidation", testTurnPlanAdmissionIdentityAndInvalidation),
             ("turn notification content policy", testTurnNotificationContentPolicy),
+            ("turn notification cadence policy", testTurnNotificationCadencePolicy),
             ("account profiles isolate email", testAccountProfilesIsolateEmail),
             ("account read disables refresh token", testAccountReadDisablesRefreshToken),
             ("unknown profile is marked", testUnknownProfileIsMarked),
@@ -2660,6 +2661,25 @@ struct CodexUsageStatusTests {
             contentEnabled: true
         )
         try expect(optedIn == "safe detail · diagnostic", "explicit content preference preserves opt-in details")
+    }
+
+    private static func testTurnNotificationCadencePolicy() throws {
+        try expect(
+            TurnNotificationCadencePolicy.shouldEvaluateDisplayTimer(state: .active),
+            "display timer evaluates active Turns for long-running policy"
+        )
+        try expect(
+            !TurnNotificationCadencePolicy.shouldEvaluateDisplayTimer(state: .completed),
+            "display timer does not replay completed notifications"
+        )
+        try expect(
+            !TurnNotificationCadencePolicy.shouldEvaluateDisplayTimer(state: .failed),
+            "display timer does not replay failed notifications"
+        )
+        try expect(
+            !TurnNotificationCadencePolicy.shouldEvaluateDisplayTimer(state: .interrupted),
+            "display timer does not replay interrupted notifications"
+        )
     }
 
     private static func testAccountProfilesIsolateEmail() throws {

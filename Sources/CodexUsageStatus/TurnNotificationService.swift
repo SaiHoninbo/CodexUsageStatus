@@ -15,6 +15,13 @@ final class TurnNotificationService: NSObject, UNUserNotificationCenterDelegate 
     private let center = UNUserNotificationCenter.current()
     private let defaults = UserDefaults.standard
     private let sentKey = "turn.notification.sentKeys"
+    /// `UNUserNotificationCenter.add` completes asynchronously.  Reserve a
+    /// terminal notification key before enqueueing so repeated evaluations of
+    /// the same Turn cannot race the completion callback and enqueue multiple
+    /// banners.  The reservation is process-local only; the existing
+    /// persisted `sentKeys` remains the cross-launch dedupe authority.
+    private var pendingKeys = Set<String>()
+    private let pendingKeysLock = NSLock()
 
     override init() {
         super.init()
@@ -33,7 +40,8 @@ final class TurnNotificationService: NSObject, UNUserNotificationCenterDelegate 
         case .interrupted: eventType = preferences.notifyOnInterrupted ? "interrupted" : nil
         default: eventType = nil
         }
-        if let eventType, let turnID = event.turnID, !hasSent(profileID: profileID, turnID: turnID, eventType: eventType) {
+        if let eventType, let turnID = event.turnID,
+           let reservation = reserveIfNeeded(profileID: profileID, turnID: turnID, eventType: eventType) {
             let content = UNMutableNotificationContent()
             content.title = TurnNotificationContentPolicy.title(state: event.state, programName: event.programName)
             content.body = TurnNotificationContentPolicy.body(
@@ -46,8 +54,11 @@ final class TurnNotificationService: NSObject, UNUserNotificationCenterDelegate 
             content.sound = preferences.soundEnabled ? .default : nil
             let request = UNNotificationRequest(identifier: "codex-turn-\(turnID)-\(eventType)", content: content, trigger: nil)
             center.add(request) { [weak self] error in
-                guard error == nil else { return }
-                self?.markSent(profileID: profileID, turnID: turnID, eventType: eventType)
+                guard let self else { return }
+                if error == nil {
+                    self.markSent(profileID: profileID, turnID: turnID, eventType: eventType)
+                }
+                self.releaseReservation(reservation)
             }
         }
 
@@ -55,14 +66,17 @@ final class TurnNotificationService: NSObject, UNUserNotificationCenterDelegate 
            let startedAt = event.startedAt,
            now.timeIntervalSince(startedAt) >= TimeInterval(preferences.longRunningThresholdMinutes * 60),
            let turnID = event.turnID,
-           !hasSent(profileID: profileID, turnID: turnID, eventType: "longRunning") {
+           let reservation = reserveIfNeeded(profileID: profileID, turnID: turnID, eventType: "longRunning") {
             let content = UNMutableNotificationContent()
             content.title = "Codex Turn 執行較久"
             content.body = "目前 turn 已執行 \(max(1, Int(now.timeIntervalSince(startedAt) / 60))) 分鐘。"
             content.sound = preferences.soundEnabled ? .default : nil
             center.add(UNNotificationRequest(identifier: "codex-turn-\(turnID)-long", content: content, trigger: nil)) { [weak self] error in
-                guard error == nil else { return }
-                self?.markSent(profileID: profileID, turnID: turnID, eventType: "longRunning")
+                guard let self else { return }
+                if error == nil {
+                    self.markSent(profileID: profileID, turnID: turnID, eventType: "longRunning")
+                }
+                self.releaseReservation(reservation)
             }
         }
     }
@@ -76,8 +90,25 @@ final class TurnNotificationService: NSObject, UNUserNotificationCenterDelegate 
         center.add(request)
     }
 
-    private func hasSent(profileID: UUID?, turnID: String, eventType: String) -> Bool {
-        sentKeys.contains(key(profileID: profileID, turnID: turnID, eventType: eventType))
+    /// Atomically checks the existing persisted dedupe key and reserves it for
+    /// this process.  The returned key is released when UserNotifications
+    /// accepts or rejects the request.  Keeping the reservation separate from
+    /// `sentKeys` avoids changing the existing persistence or delivery
+    /// semantics while closing the async enqueue race.
+    private func reserveIfNeeded(profileID: UUID?, turnID: String, eventType: String) -> String? {
+        let notificationKey = key(profileID: profileID, turnID: turnID, eventType: eventType)
+        pendingKeysLock.lock()
+        defer { pendingKeysLock.unlock() }
+        guard !sentKeys.contains(notificationKey), pendingKeys.insert(notificationKey).inserted else {
+            return nil
+        }
+        return notificationKey
+    }
+
+    private func releaseReservation(_ notificationKey: String) {
+        pendingKeysLock.lock()
+        pendingKeys.remove(notificationKey)
+        pendingKeysLock.unlock()
     }
 
     private func markSent(profileID: UUID?, turnID: String, eventType: String) {

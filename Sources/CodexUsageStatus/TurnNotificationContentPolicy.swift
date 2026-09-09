@@ -1,5 +1,14 @@
 import Foundation
 
+enum TurnNotificationCadencePolicy {
+    /// The display timer may re-evaluate only active Turns (for the existing
+    /// long-running notification policy). Terminal notifications are emitted
+    /// by the terminal event itself and must never be replayed by the timer.
+    static func shouldEvaluateDisplayTimer(state: TurnActivityState) -> Bool {
+        state == .active
+    }
+}
+
 /// Pure, metadata-only presentation policy for completed Turn notifications.
 ///
 /// This type deliberately has no UserNotifications dependency and never reads
