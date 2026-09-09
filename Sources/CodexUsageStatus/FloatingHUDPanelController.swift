@@ -97,6 +97,7 @@ private final class DraggableHUDPanel: NSPanel {
 final class FloatingHUDPanelController: NSObject {
     private let model: UsageViewModel
     var onShowDetails: (() -> Void)?
+    var onOpenSettingsForAlert: ((HUDAlertPresentation) -> Void)?
     var onOpenCodex: (() -> Void)?
     var onQuit: (() -> Void)?
     private var panel: NSPanel?
@@ -187,7 +188,8 @@ final class FloatingHUDPanelController: NSObject {
             openReleasePage: { [weak self] in self?.model.openUpdateReleasePage() },
             setHUDThemeAppearance: { [weak self] appearance in
                 self?.applyHUDAppearance(appearance)
-            }
+            },
+            openSettingsForAlert: { [weak self] alert in self?.onOpenSettingsForAlert?(alert) }
         )
         let hostingView = FirstClickHostingView(rootView: rootView)
         let initialAppearance = HUDThemePalette.forTheme(HUDThemePreference.loadTheme()).appearance

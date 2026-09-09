@@ -342,6 +342,33 @@ enum LocalTokenUsageLedgerPresentation {
     static let currentStreakLabel = "本機目前連續"
     static let longestStreakLabel = "本機最長連續"
 
+    /// Normalizes the HUD's five-field contract during asynchronous hydration.
+    /// A partial publication can never erase the secondary metrics; missing or
+    /// blank values fall back to the same truthful empty-state projection used
+    /// by the local ledger.
+    static func canonicalHUDMetrics(
+        _ metrics: [TokenActivityMetric]?,
+        now: Date,
+        calendar: Calendar = .current
+    ) -> [TokenActivityMetric] {
+        let fallback = self.metrics(snapshot: .empty, now: now, calendar: calendar)
+        guard let metrics, !metrics.isEmpty else { return fallback }
+        let labels = [
+            dailyObservedLabel,
+            dailyPeakLabel,
+            longestTurnLabel,
+            currentStreakLabel,
+            longestStreakLabel
+        ]
+        return labels.enumerated().map { index, label in
+            guard let metric = metrics.first(where: { $0.label == label }),
+                  !metric.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return fallback[index]
+            }
+            return metric
+        }
+    }
+
     /// Returns the observed local usage for the supplied local calendar day.
     /// The ledger's buckets are already installation-scoped and persisted;
     /// this helper only selects today's bucket for presentation.

@@ -41,6 +41,7 @@ struct CodexFloatingHUDView: View {
     /// Keeps the non-activating AppKit panel appearance in lockstep with the
     /// SwiftUI theme without recreating the panel or changing its geometry.
     let setHUDThemeAppearance: (HUDThemeAppearance) -> Void
+    let openSettingsForAlert: (HUDAlertPresentation) -> Void
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var isPasteHovered = false
     @State private var isPasteAndSubmitHovered = false
@@ -184,6 +185,7 @@ struct CodexFloatingHUDView: View {
                 updateState: model.updateState,
                 currentVersion: AppVersion.current
             ),
+            settingsAlert: HUDAlertPresentation.make(from: model.currentSettingsAlerts),
             dataAgeText: model.dataAgeText,
             connectionState: model.connectionState,
             isStale: model.isStale,
@@ -497,6 +499,13 @@ struct CodexFloatingHUDView: View {
                 .accessibilityValue(presentation.accountEmail ?? "未提供 Email")
             if let plan = presentation.plan {
                 HUDPlanBadge(plan: plan, height: metrics.headerHeight)
+            }
+            if let settingsAlert = presentation.settingsAlert {
+                HUDSettingsAlertBadge(
+                    presentation: settingsAlert,
+                    height: metrics.headerHeight,
+                    action: { openSettingsForAlert(settingsAlert) }
+                )
             }
             HUDUpdateBadge(
                 state: presentation.updateBadge,

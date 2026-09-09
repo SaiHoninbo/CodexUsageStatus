@@ -1415,6 +1415,25 @@ final class UsageViewModel: ObservableObject {
         return email
     }
 
+    /// One shared, value-semantic warning projection used by Overview,
+    /// Settings, and the floating HUD. The underlying services remain the
+    /// authorities for permission, update, account, and notification state;
+    /// this property only decides what needs user attention.
+    var currentSettingsAlerts: [SettingsAlertPresentation] {
+        SettingsAlertPresentation.make(
+            accessibilityPermissionState: accessibilityPermissionState,
+            notificationAuthorizationStatus: notificationAuthorizationStatus,
+            updateState: updateState,
+            connectionState: connectionState,
+            isStale: isStale,
+            dataAgeText: dataAgeText,
+            accountHealthErrorMessage: accountHealthErrorMessage,
+            profileStoreErrorMessage: profileStoreErrorMessage,
+            loginStates: loginStates,
+            historyErrorMessage: historyErrorMessage
+        )
+    }
+
     /// Returns only safe, presentation-ready account metadata. Raw email is
     /// never exposed outside the in-memory formatter and is never persisted.
     func accountProfileDisplay(for profile: AccountProfile) -> AccountProfileDisplay {

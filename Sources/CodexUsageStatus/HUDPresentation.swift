@@ -50,6 +50,7 @@ struct HUDPresentation: Equatable {
     let tokenActivityFeedback: TokenHeroUpdateFeedback?
     let tokenActivityIsStale: Bool
     let updateBadge: HUDUpdateBadgeState
+    let settingsAlert: HUDAlertPresentation?
     let dataAgeText: String
     let connectionState: ConnectionState
     let isStale: Bool
@@ -81,6 +82,75 @@ struct HUDPresentation: Equatable {
     /// in the value so toggling the accessibility setting invalidates the
     /// Equatable visual boundary immediately.
     let reduceMotion: Bool
+}
+
+/// Compact, HUD-safe projection of the shared Settings alert policy. Only
+/// alerts with a direct Settings remediation belong on the floating surface;
+/// account/history/data warnings remain in the Popover where they have room
+/// for their full explanation.
+struct HUDAlertPresentation: Equatable, Identifiable {
+    enum Severity: Equatable {
+        case error
+        case warning
+    }
+
+    enum Action: Equatable {
+        case accessibility
+        case notifications
+        case update
+    }
+
+    let id: String
+    let severity: Severity
+    let title: String
+    let compactMessage: String
+    let action: Action
+    let settingsSection: SettingsSection
+
+    static func make(from alerts: [SettingsAlertPresentation]) -> Self? {
+        for alert in alerts {
+            guard let action = alert.action else { continue }
+            switch action {
+            case .accessibility:
+                return Self(
+                    id: alert.id,
+                    severity: severity(for: alert.severity),
+                    title: "需要處理",
+                    compactMessage: "輔助功能未允許",
+                    action: .accessibility,
+                    settingsSection: .hud
+                )
+            case .notifications:
+                return Self(
+                    id: alert.id,
+                    severity: severity(for: alert.severity),
+                    title: "需要處理",
+                    compactMessage: "通知權限未完成",
+                    action: .notifications,
+                    settingsSection: .notifications
+                )
+            case .update:
+                return Self(
+                    id: alert.id,
+                    severity: severity(for: alert.severity),
+                    title: "需要處理",
+                    compactMessage: "更新檢查需要重試",
+                    action: .update,
+                    settingsSection: .update
+                )
+            default:
+                continue
+            }
+        }
+        return nil
+    }
+
+    private static func severity(for severity: SettingsAlertPresentation.Severity) -> Severity {
+        switch severity {
+        case .error: return .error
+        case .warning: return .warning
+        }
+    }
 }
 
 /// Credits and Reset Credits are independently optional. This policy is the

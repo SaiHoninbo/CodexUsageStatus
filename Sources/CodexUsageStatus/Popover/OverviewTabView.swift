@@ -5,6 +5,7 @@ import SwiftUI
 extension UsagePopoverView {
     var overviewTab: some View {
         VStack(alignment: .leading, spacing: 8) {
+            overviewActionableAlertSummary
             overviewUpdateCard
             quotaSummarySection
             overviewTurnActivity
@@ -27,6 +28,73 @@ extension UsagePopoverView {
             }
 
             quickActions
+        }
+    }
+
+    @ViewBuilder
+    private var overviewActionableAlertSummary: some View {
+        let alerts = model.currentSettingsAlerts
+        if let primary = alerts.first {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 6) {
+                    Image(systemName: primary.severity == .error ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(primary.severity == .error ? HUDColorPalette.error : HUDColorPalette.warning)
+                    Text("需要處理")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer(minLength: 0)
+                    if alerts.count > 1 {
+                        Text("另有 " + String(alerts.count - 1) + " 項")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(HUDColorPalette.secondaryText)
+                    }
+                }
+                Text(primary.title)
+                    .font(.caption.weight(.semibold))
+                Text(primary.message)
+                    .font(.caption2)
+                    .foregroundStyle(HUDColorPalette.secondaryText)
+                    .lineLimit(2)
+                HStack(spacing: 10) {
+                    Button(primary.actionTitle ?? "開啟設定") {
+                        handleOverviewAlert(primary)
+                    }
+                    .buttonStyle(PopoverImmediateButtonStyle())
+                    .foregroundStyle(HUDColorPalette.sevenDay)
+                    .font(.caption.weight(.semibold))
+                    if alerts.count > 1 {
+                        Text("設定頁可查看全部")
+                            .font(.caption2)
+                            .foregroundStyle(HUDColorPalette.tertiaryText)
+                    }
+                }
+            }
+            .padding(9)
+            .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(primary.severity == .error ? HUDColorPalette.error.opacity(0.45) : HUDColorPalette.warning.opacity(0.45), lineWidth: 0.8)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("需要處理")
+            .accessibilityValue(primary.title + "，" + primary.message)
+        }
+    }
+
+    private func handleOverviewAlert(_ alert: SettingsAlertPresentation) {
+        guard let action = alert.action else { return }
+        acknowledgeAction("已接受：" + alert.title, control: "overview.alert." + alert.id)
+        PopoverInteractionTrace.started("overview.alert." + alert.id)
+        switch action {
+        case .accounts:
+            selectionController.select(.accounts)
+        case .accessibility:
+            selectionController.selectSettings(section: .hud)
+        case .notifications:
+            selectionController.selectSettings(section: .notifications)
+        case .update:
+            selectionController.selectSettings(section: .update)
+        case .refresh:
+            model.refresh()
         }
     }
 

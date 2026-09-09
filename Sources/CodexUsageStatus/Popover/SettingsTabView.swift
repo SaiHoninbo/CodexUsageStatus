@@ -69,18 +69,7 @@ extension UsagePopoverView {
     }
 
     var settingsAlerts: [SettingsAlertPresentation] {
-        SettingsAlertPresentation.make(
-            accessibilityPermissionState: model.accessibilityPermissionState,
-            notificationAuthorizationStatus: model.notificationAuthorizationStatus,
-            updateState: model.updateState,
-            connectionState: model.connectionState,
-            isStale: model.isStale,
-            dataAgeText: model.dataAgeText,
-            accountHealthErrorMessage: model.accountHealthErrorMessage,
-            profileStoreErrorMessage: model.profileStoreErrorMessage,
-            loginStates: model.loginStates,
-            historyErrorMessage: model.historyErrorMessage
-        )
+        model.currentSettingsAlerts
     }
 
     private func settingsAlertRow(_ alert: SettingsAlertPresentation) -> some View {
@@ -118,14 +107,17 @@ extension UsagePopoverView {
         case .accounts:
             selectionController.select(.accounts)
         case .accessibility:
+            isHUDExpanded = true
             model.openAccessibilitySettings()
         case .notifications:
+            isNotificationsExpanded = true
             if model.notificationAuthorizationStatus == .notDetermined {
                 model.requestNotificationPermission()
             } else {
                 openNotificationSettings()
             }
         case .update:
+            isUpdateExpanded = true
             model.checkForUpdates()
         case .refresh:
             model.refresh()

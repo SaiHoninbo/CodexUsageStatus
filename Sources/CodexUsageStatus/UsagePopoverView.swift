@@ -59,6 +59,9 @@ struct UsagePopoverView: View {
             measuredContentHeight = height
             onContentHeightChange?(height)
         }
+        .onChange(of: selectionController.requestGeneration) { _, _ in
+            applyPendingSettingsSection()
+        }
         .alert("清除本機歷史？", isPresented: $showClearHistoryConfirmation) {
             Button("清除", role: .destructive) { model.clearHistory() }
             Button("取消", role: .cancel) {}
@@ -207,6 +210,22 @@ struct UsagePopoverView: View {
             withAnimation(.easeOut(duration: 0.12)) {
                 actionAcknowledgement = nil
             }
+        }
+    }
+
+    private func applyPendingSettingsSection() {
+        guard let section = selectionController.consumePendingSettingsSection() else { return }
+        switch section {
+        case .notifications:
+            isNotificationsExpanded = true
+        case .hud:
+            isHUDExpanded = true
+        case .sync:
+            isSyncExpanded = true
+        case .update:
+            isUpdateExpanded = true
+        case .metadata:
+            isMetadataExpanded = true
         }
     }
 

@@ -77,6 +77,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         floatingHUD = FloatingHUDPanelController(model: model)
         floatingHUD.onShowDetails = { [weak self] in self?.showPopover(tab: .overview) }
+        floatingHUD.onOpenSettingsForAlert = { [weak self] alert in
+            self?.showSettings(for: alert.settingsSection)
+        }
         floatingHUD.onOpenCodex = { [weak self] in self?.openCodex() }
         floatingHUD.onQuit = { NSApp.terminate(nil) }
         floatingHUD.start()
@@ -144,6 +147,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             bootstrapModel()
         }
         showPopover(tab: ProductSettingsRoute.targetTab)
+    }
+
+    private func showSettings(for section: SettingsSection) {
+        if model == nil || popover == nil {
+            bootstrapModel()
+        }
+        popoverSelectionController.selectSettings(section: section)
+        showPopover(tab: .settings)
     }
 
     private func showPopover(tab: UsagePopoverTab = .overview, toggle: Bool = false, sender: Any? = nil) {

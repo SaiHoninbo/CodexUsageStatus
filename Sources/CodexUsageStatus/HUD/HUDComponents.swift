@@ -270,10 +270,7 @@ struct HUDTokenActivitySummaryView: View, Equatable {
     @Environment(\.hudThemePalette) private var palette
 
     private var metrics: [TokenActivityMetric] {
-        summaryMetrics ?? LocalTokenUsageLedgerPresentation.metrics(
-            snapshot: .empty,
-            now: Date()
-        )
+        LocalTokenUsageLedgerPresentation.canonicalHUDMetrics(summaryMetrics, now: Date())
     }
 
     static func == (lhs: HUDTokenActivitySummaryView, rhs: HUDTokenActivitySummaryView) -> Bool {
@@ -287,18 +284,25 @@ struct HUDTokenActivitySummaryView: View, Equatable {
     }
 
     var body: some View {
-        HStack(spacing: max(6, 8 * scaleFactor)) {
-            lifetimeHero(metrics.first ?? TokenActivityMetric(
-                label: LocalTokenUsageLedgerPresentation.dailyObservedLabel,
-                value: "—"
-            ))
+        let gap = max(6, 8 * scaleFactor)
+        let dividerWidth = max(0.6, 0.8 * scaleFactor)
+        let horizontalPadding = max(7, 9 * scaleFactor)
+        let availableWidth = max(0, width - (horizontalPadding * 2) - (gap * 2) - dividerWidth)
+        HStack(spacing: gap) {
+            lifetimeHero(
+                metrics.first ?? TokenActivityMetric(
+                    label: LocalTokenUsageLedgerPresentation.dailyObservedLabel,
+                    value: "—"
+                ),
+                columnWidth: availableWidth * 0.52
+            )
             Rectangle()
                 .fill(palette.divider)
-                .frame(width: max(0.6, 0.8 * scaleFactor))
+                .frame(width: dividerWidth)
                 .padding(.vertical, max(5, 7 * scaleFactor))
-            secondaryGrid(Array(metrics.dropFirst().prefix(4)))
+            secondaryGrid(Array(metrics.dropFirst().prefix(4)), width: availableWidth * 0.48)
         }
-        .padding(.horizontal, max(7, 9 * scaleFactor))
+        .padding(.horizontal, horizontalPadding)
         .frame(width: width, height: height)
         .background(palette.tokenHeroSurface, in: RoundedRectangle(cornerRadius: max(7, height * 0.18), style: .continuous))
         .overlay {
@@ -312,11 +316,8 @@ struct HUDTokenActivitySummaryView: View, Equatable {
         .help(isStale ? "本機今日觀測 Token；次要帳號歷史資料較舊" : "本機今日觀測 Token 與帳號歷史摘要")
     }
 
-    private func lifetimeHero(_ metric: TokenActivityMetric) -> some View {
+    private func lifetimeHero(_ metric: TokenActivityMetric, columnWidth: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: max(2, 3 * scaleFactor)) {
-            Label(metric.label, systemImage: "cylinder.split.1x2.fill")
-                .font(.system(size: max(8, 11 * scaleFactor), weight: .semibold, design: .rounded))
-                .foregroundStyle(palette.tokenHeroLabel)
             if let feedback {
                 HUDTokenOdometerView(
                     feedback: feedback,
@@ -330,10 +331,10 @@ struct HUDTokenActivitySummaryView: View, Equatable {
                 )
             }
         }
-        .frame(width: width * 0.56, alignment: .leading)
+        .frame(width: columnWidth, alignment: .leading)
     }
 
-    private func secondaryGrid(_ secondaryMetrics: [TokenActivityMetric]) -> some View {
+    private func secondaryGrid(_ secondaryMetrics: [TokenActivityMetric], width: CGFloat) -> some View {
         VStack(spacing: max(2, 3 * scaleFactor)) {
             ForEach(0..<2, id: \.self) { row in
                 HStack(spacing: max(3, 5 * scaleFactor)) {
@@ -348,19 +349,19 @@ struct HUDTokenActivitySummaryView: View, Equatable {
                 }
             }
         }
-        .frame(maxWidth: .infinity)
+        .frame(width: width, alignment: .leading)
     }
 
     private func secondaryMetricCell(_ metric: TokenActivityMetric) -> some View {
         VStack(alignment: .leading, spacing: max(0.5, 1 * scaleFactor)) {
             Text(metric.label)
-                .font(.system(size: max(8, 10 * scaleFactor), weight: .semibold, design: .rounded))
+                .font(.system(size: max(9, 11 * scaleFactor), weight: .semibold, design: .rounded))
                 .foregroundStyle(palette.tokenHeroSecondaryText)
                 .lineLimit(1)
                 .minimumScaleFactor(0.62)
                 .allowsTightening(true)
             Text(metric.value)
-                .font(.system(size: max(9, 12 * scaleFactor), weight: .bold, design: .rounded))
+                .font(.system(size: max(10, 13 * scaleFactor), weight: .bold, design: .rounded))
                 .foregroundStyle(palette.tokenHeroSecondaryValue)
                 .monospacedDigit()
                 .lineLimit(1)
@@ -384,9 +385,9 @@ struct HUDTokenStaticOdometerView: View {
     @Environment(\.hudThemePalette) private var palette
 
     private var characters: [Character] { Array(value) }
-    private var fontSize: CGFloat { max(11, 17 * scaleFactor) }
-    private var slotHeight: CGFloat { max(18, 24 * scaleFactor) }
-    private var slotWidth: CGFloat { max(11, 15 * scaleFactor) }
+    private var fontSize: CGFloat { max(12, 19 * scaleFactor) }
+    private var slotHeight: CGFloat { max(19, 26 * scaleFactor) }
+    private var slotWidth: CGFloat { max(12, 16 * scaleFactor) }
 
     var body: some View {
         HStack(spacing: max(0.5, 1 * scaleFactor)) {
@@ -476,17 +477,17 @@ struct HUDTokenOdometerDigit: View {
     @State private var animatedStep = 0
 
     private var fontSize: CGFloat {
-        max(11, 17 * scaleFactor)
+        max(12, 19 * scaleFactor)
     }
 
     // A fixed viewport prevents the moving strip from bleeding into the
     // adjacent metric row while keeping its final baseline aligned with the
     // static digits in this compact summary.
     private var slotHeight: CGFloat {
-        max(18, 24 * scaleFactor)
+        max(19, 26 * scaleFactor)
     }
 
-    private var slotWidth: CGFloat { max(11, 15 * scaleFactor) }
+    private var slotWidth: CGFloat { max(12, 16 * scaleFactor) }
     private var separatorWidth: CGFloat { max(3, 5 * scaleFactor) }
 
     private var characterText: some View {
@@ -745,6 +746,43 @@ struct HUDImmediateButtonStyle: ButtonStyle {
             }
             .scaleEffect(configuration.isPressed ? 0.985 : 1)
             .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+    }
+}
+
+/// Compact actionable warning that stays inside the existing header geometry.
+/// It routes to Settings on mouse-up while exposing immediate pressed
+/// feedback through the same button style as the other HUD controls.
+struct HUDSettingsAlertBadge: View {
+    let presentation: HUDAlertPresentation
+    let height: CGFloat
+    let action: () -> Void
+    @Environment(\.hudThemePalette) private var palette
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: max(2, height * 0.10)) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: max(8, height * 0.40), weight: .bold))
+                Text("需要處理")
+                    .font(.system(size: max(8, height * 0.40), weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
+                    .allowsTightening(true)
+            }
+            .foregroundStyle(palette.warning)
+            .padding(.horizontal, max(4, height * 0.18))
+            .frame(minHeight: height, maxHeight: height)
+            .background(palette.warning.opacity(0.13), in: Capsule())
+            .overlay { Capsule().stroke(palette.warning.opacity(0.42), lineWidth: max(0.6, height * 0.03)) }
+        }
+        .buttonStyle(HUDImmediateButtonStyle(
+            cornerRadius: height * 0.5,
+            pressedOverlay: palette.warning,
+            pressedOpacity: 0.22
+        ))
+        .help(presentation.compactMessage)
+        .accessibilityLabel("需要處理，" + presentation.compactMessage + "，點擊以開啟設定")
+        .accessibilityHint("開啟對應的設定區域")
     }
 }
 

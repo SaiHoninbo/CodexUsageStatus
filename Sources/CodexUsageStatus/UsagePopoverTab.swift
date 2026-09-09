@@ -30,6 +30,17 @@ enum UsagePopoverTab: String, CaseIterable, Identifiable {
     }
 }
 
+/// View-local destinations used when an actionable alert opens Settings. The
+/// selection is intentionally transient; it is a routing hint, not a user
+/// preference or persisted product state.
+enum SettingsSection: String, Equatable {
+    case notifications
+    case hud
+    case sync
+    case update
+    case metadata
+}
+
 /// The application Settings command has one product destination: the
 /// Settings tab inside the existing status-item popover. Keeping this route
 /// value-semantic makes command wiring testable without creating AppKit
@@ -47,9 +58,20 @@ enum ProductSettingsRoute {
 final class PopoverSelectionController: ObservableObject {
     @Published var selectedTab: UsagePopoverTab = .overview
     @Published private(set) var requestGeneration = 0
+    @Published private(set) var pendingSettingsSection: SettingsSection?
 
     func select(_ tab: UsagePopoverTab) {
         selectedTab = tab
         requestGeneration &+= 1
+    }
+
+    func selectSettings(section: SettingsSection) {
+        pendingSettingsSection = section
+        select(.settings)
+    }
+
+    func consumePendingSettingsSection() -> SettingsSection? {
+        defer { pendingSettingsSection = nil }
+        return pendingSettingsSection
     }
 }

@@ -107,6 +107,7 @@ struct CodexUsageStatusTests {
             ("HUD context menu policy", testHUDContextMenuPolicy),
             ("usage popover tabs and app version", testUsagePopoverTabsAndAppVersion),
             ("settings alert presentation", testSettingsAlertPresentation),
+            ("HUD alert projection", testHUDAlertProjection),
             ("first click event delivery", testFirstClickEventDelivery),
             ("HUD paste acknowledgement policy", testHUDPasteAcknowledgementPolicy),
             ("popover presentation appearance policy", testPopoverPresentationAppearancePolicy),
@@ -1575,6 +1576,14 @@ struct CodexUsageStatusTests {
             LocalTokenUsageLedgerPresentation.metrics(snapshot: reloaded.snapshot, now: day1, calendar: calendar) == metrics,
             "account scope cannot alter machine metrics"
         )
+        let partialMetrics = Array(metrics.prefix(1))
+        let repairedMetrics = LocalTokenUsageLedgerPresentation.canonicalHUDMetrics(
+            partialMetrics,
+            now: day1,
+            calendar: calendar
+        )
+        try expect(repairedMetrics.count == 5, "HUD partial publication is repaired to the five-field contract")
+        try expect(repairedMetrics.dropFirst().allSatisfy { $0.value != "" }, "HUD missing secondary values never render as blank text")
 
         try expect(profileStore.deleteProfile(id: profileB.id), "profile B can be deleted")
         let afterProfileDeletion = LocalTokenUsageLedgerStore(fileURL: fileURL)
@@ -2002,6 +2011,7 @@ struct CodexUsageStatusTests {
                 tokenActivityFeedback: tokenFeedback,
                 tokenActivityIsStale: false,
                 updateBadge: .version("2.4.65"),
+                settingsAlert: nil,
                 dataAgeText: "剛剛更新",
                 connectionState: .connected,
                 isStale: false,
@@ -2877,6 +2887,42 @@ struct CodexUsageStatusTests {
             historyErrorMessage: nil
         )
         try expect(quiet.isEmpty, "healthy settings do not show a warning summary")
+    }
+
+    private static func testHUDAlertProjection() throws {
+        let accessibility = SettingsAlertPresentation(
+            id: "accessibility",
+            severity: .warning,
+            title: "輔助功能尚未允許",
+            message: "HUD 的剪貼簿操作目前不可用。",
+            actionTitle: "開啟設定",
+            action: .accessibility
+        )
+        let update = SettingsAlertPresentation.updateFailure(message: "更新檢查失敗")
+        let projection = HUDAlertPresentation.make(from: [accessibility, update])
+        try expect(projection?.id == "accessibility", "HUD chooses the first actionable settings warning")
+        try expect(projection?.action == .accessibility && projection?.settingsSection == .hud, "accessibility HUD warning routes to HUD settings")
+        try expect(projection?.compactMessage == "輔助功能未允許", "HUD warning uses compact actionable copy")
+
+        let accountOnly = SettingsAlertPresentation(
+            id: "connection",
+            severity: .error,
+            title: "目前帳號無法連線",
+            message: "離線",
+            actionTitle: "重新整理",
+            action: .refresh
+        )
+        try expect(HUDAlertPresentation.make(from: [accountOnly]) == nil, "non-settings remediation stays out of the HUD")
+
+        let notifications = SettingsAlertPresentation(
+            id: "notifications-denied",
+            severity: .warning,
+            title: "通知權限已停用",
+            message: "提醒不會顯示",
+            actionTitle: "開啟系統設定",
+            action: .notifications
+        )
+        try expect(HUDAlertPresentation.make(from: [notifications])?.settingsSection == .notifications, "notification HUD warning routes to Notifications settings")
     }
 
     private static func testFirstClickEventDelivery() throws {
