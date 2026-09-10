@@ -14,11 +14,12 @@ GitHub Releases latest
   → rollback on replacement failure
 ```
 
-The Mac App Store, App Store Connect, TestFlight, Mac App Distribution
-certificates, App Store receipts, and App Store update mechanisms are not part
-of this product. A signing or notarization issue must not be “fixed” by moving
-the distribution channel to the App Store; changing this contract requires an
-explicit Web GPT PM decision.
+GitHub Releases is the sole canonical distribution and update channel, and
+`CodexUsageStatus.app.zip` is the canonical release artifact. Any change to
+this distribution contract requires an explicit Web GPT PM product decision.
+Missing release credentials are reported as an external blocker and stop the
+release path. Credential setup must not be initiated unless explicitly
+authorized.
 
 ## Signing classes
 

@@ -61,12 +61,11 @@ account identifiers and local paths before submitting.
 ## Maintainer release boundary
 
 The app uses the official GitHub Releases API as its update-information
-authority. CodexUsageStatus performs a read-only version check, validates the
-semantic version and official HTTPS Release URL, and opens that Release page
-for the user to review and download manually. It does not use the Mac App
-Store, Sparkle appcast, or an app-owned download/replacement path. The app
-leaves the installed bundle untouched during every check; the GitHub Release
-ZIP is the distribution artifact and manual update authority.
+authority. CodexUsageStatus checks the latest official release, accepts only
+the fixed `CodexUsageStatus.app.zip` asset, validates the bundle and signature,
+backs up the installed app, performs local replacement, relaunches the new
+version, and rolls back if replacement fails. The GitHub Release ZIP is the
+canonical distribution artifact and update authority.
 
 The `candidate` mode is disposable runtime evidence under `/private/tmp`; it is
 ad-hoc signed and is never a release artifact. The default local `package` mode
