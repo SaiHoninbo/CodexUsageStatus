@@ -2,32 +2,14 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 [--notarize] <CodexUsageStatus.app.zip> [expected-version]" >&2
+  echo "usage: $0 <CodexUsageStatus.app.zip> [expected-version]" >&2
   exit 2
 }
-
-MODE="validate"
-if [[ "${1:-}" == "--notarize" ]]; then
-  MODE="notarize"
-  shift
-fi
 
 ZIP_PATH="${1:-}"
 EXPECTED_VERSION="${2:-}"
 [[ -n "$ZIP_PATH" ]] || usage
 [[ -f "$ZIP_PATH" ]] || { echo "release artifact does not exist: $ZIP_PATH" >&2; exit 3; }
-
-# Notarization credentials are deliberately supplied by the caller through an
-# existing notarytool keychain profile. No credential is read from or written
-# to the repository.
-if [[ "$MODE" == "notarize" ]]; then
-  NOTARY_PROFILE="${NOTARYTOOL_KEYCHAIN_PROFILE:-}"
-  if [[ -z "$NOTARY_PROFILE" ]]; then
-    echo "notarization requires NOTARYTOOL_KEYCHAIN_PROFILE" >&2
-    exit 3
-  fi
-  command -v xcrun >/dev/null 2>&1 || { echo "xcrun is required for notarization" >&2; exit 3; }
-fi
 
 WORK_DIR="$(mktemp -d /private/tmp/codex-release-artifact.XXXXXX)"
 trap 'rm -rf "$WORK_DIR"' EXIT
@@ -68,32 +50,9 @@ fi
 
 codesign --verify --deep --strict "$APP_BUNDLE" >/dev/null
 SIGNING_DETAILS="$(codesign -dvvv "$APP_BUNDLE" 2>&1)"
-if ! printf '%s\n' "$SIGNING_DETAILS" | grep -Fq 'Authority=Developer ID Application:'; then
-  echo "release artifact is not signed by Developer ID Application" >&2
-  exit 3
-fi
-TEAM_IDENTIFIER="$(printf '%s\n' "$SIGNING_DETAILS" | sed -n 's/^TeamIdentifier=//p' | head -1)"
-if [[ -z "$TEAM_IDENTIFIER" || "$TEAM_IDENTIFIER" == "not set" ]]; then
-  echo "release artifact has no TeamIdentifier" >&2
+if ! printf '%s\n' "$SIGNING_DETAILS" | grep -Fq 'Signature=adhoc'; then
+  echo "release artifact must use an ad-hoc code signature" >&2
   exit 3
 fi
 
-if [[ "$MODE" == "notarize" ]]; then
-  NOTARY_UPLOAD_ZIP="$WORK_DIR/notary-upload.zip"
-  COPYFILE_DISABLE=1 ditto --norsrc -c -k --keepParent "$APP_BUNDLE" "$NOTARY_UPLOAD_ZIP"
-  xcrun notarytool submit "$NOTARY_UPLOAD_ZIP" --wait --keychain-profile "$NOTARY_PROFILE"
-  xcrun stapler staple "$APP_BUNDLE"
-fi
-
-# Validation mode is intentionally strict: a ZIP is publishable only after a
-# stapled ticket and Gatekeeper acceptance are both present.
-xcrun stapler validate "$APP_BUNDLE" >/dev/null
-spctl -a -vv --type execute "$APP_BUNDLE" >/dev/null
-
-if [[ "$MODE" == "notarize" ]]; then
-  TEMP_ZIP="$WORK_DIR/CodexUsageStatus.app.zip"
-  COPYFILE_DISABLE=1 ditto --norsrc -c -k --keepParent "$APP_BUNDLE" "$TEMP_ZIP"
-  mv "$TEMP_ZIP" "$ZIP_PATH"
-fi
-
-echo "Validated public release artifact: $ZIP_PATH (version $VERSION, team $TEAM_IDENTIFIER)"
+echo "Validated GitHub ad-hoc release artifact: $ZIP_PATH (version $VERSION)"

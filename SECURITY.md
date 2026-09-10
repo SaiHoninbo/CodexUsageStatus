@@ -69,15 +69,10 @@ canonical distribution artifact and update authority.
 
 The `candidate` mode is disposable runtime evidence under `/private/tmp`; it is
 ad-hoc signed and is never a release artifact. The default local `package` mode
-creates the repository's canonical `outputs/CodexUsageStatus.app.zip`, but its
-ad-hoc signature is only suitable for local packaging and testing. Before public
-distribution, maintainers must use the existing release-signing path with
-`CODEX_RELEASE_MODE=1` and an explicit `CODEX_RELEASE_SIGNING_IDENTITY`; that
-mode resolves and validates a `Developer ID Application` identity and must not
-silently fall back to ad-hoc signing. Apple Development is local-testing only.
-Publishing the resulting ZIP to GitHub Releases is a separate explicit action.
-Formal release assets must be inspected before distribution and must not include
-source archives, tests, credentials, token activity, history, or AppleDouble
-files. Notarization/stapling remains an external public-release gate when the
-required Apple credentials and service are available; it does not change the
-GitHub-only distribution channel.
+creates the repository's canonical `outputs/CodexUsageStatus.app.zip` with an
+ad-hoc signature. The GitHub repository and fixed asset validation are the
+distribution trust boundary; ad-hoc signing provides bundle integrity, not an
+Apple publisher identity claim. Publishing the resulting ZIP to GitHub Releases
+is a separate explicit action. Release assets must be inspected before
+distribution and must not include source archives, tests, credentials, token
+activity, history, or AppleDouble files.

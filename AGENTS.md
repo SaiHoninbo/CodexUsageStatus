@@ -15,23 +15,16 @@ GitHub Releases latest
 ```
 
 GitHub Releases is the sole canonical distribution and update channel, and
-`CodexUsageStatus.app.zip` is the canonical release artifact. Any change to
-this distribution contract requires an explicit Web GPT PM product decision.
-Missing release credentials are reported as an external blocker and stop the
-release path. Credential setup must not be initiated unless explicitly
-authorized.
+`CodexUsageStatus.app.zip` is the canonical release artifact.
+The canonical public artifact uses ad-hoc code signing. No external release
+credential is required. Any change to this distribution contract
+requires an explicit Web GPT PM product decision.
 
 ## Signing classes
 
-- `candidate` and default local `package` are local-only and may be ad-hoc.
-- Apple Development is allowed for local testing only.
-- Public GitHub Release assets must use `Developer ID Application` signing.
-- Public release assets must not be ad-hoc or Apple Development signed.
-- Notarization/stapling is required for a canonical public release when the
-  external Apple credentials and service are available; lack of those
-  credentials is an external release gate, not a reason to change channels.
-
-`CODEX_RELEASE_MODE=1` is the formal package guard. It requires an explicit
-keychain identity and rejects every identity that does not resolve to a
-`Developer ID Application` certificate. Candidate/local package behavior must
-remain available without that certificate.
+- `candidate`, local `package`, and public GitHub Release assets use ad-hoc
+  code signing.
+- `codesign --verify --deep --strict` remains the release artifact integrity
+  check.
+- GitHub account/repository ownership is the distribution trust boundary;
+  ad-hoc signing does not claim Apple publisher identity or platform approval.

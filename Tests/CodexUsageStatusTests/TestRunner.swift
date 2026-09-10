@@ -109,7 +109,7 @@ struct CodexUsageStatusTests {
             ("update version comparison", testUpdateVersionComparison),
             ("update state presentation", testUpdateStatePresentation),
             ("update authority and packaging policy", testUpdateAuthorityAndPackagingPolicy),
-            ("release signing identity guard", testReleaseSigningIdentityGuard),
+            ("ad-hoc release package policy", testAdHocReleasePackagePolicy),
             ("release artifact validation", testReleaseArtifactValidation),
             ("accessibility permission policy", testAccessibilityPermissionPolicy),
             ("HUD context menu policy", testHUDContextMenuPolicy),
@@ -3685,17 +3685,14 @@ struct CodexUsageStatusTests {
         try expect(AppUpdateReleasePolicy.assetURL(for: unsafe) == nil, "unsafe release tags cannot form an asset path")
     }
 
-    private static func testReleaseSigningIdentityGuard() throws {
-        let scriptURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent("script/validate_release_signing_identity.sh")
-        try expect(FileManager.default.isExecutableFile(atPath: scriptURL.path), "release identity guard is executable")
+    private static func testAdHocReleasePackagePolicy() throws {
+        let packageScript = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("script/build_and_run.sh")
+        try expect(FileManager.default.isExecutableFile(atPath: packageScript.path), "package script is executable")
 
-        let developmentIdentity = "Apple Development: quare_lin@hotmail.com (769G67L772)"
-        let developmentStatus = try runToolStatus("/bin/bash", [scriptURL.path, developmentIdentity])
-        try expect(developmentStatus != 0, "Apple Development is rejected for public release mode")
-
-        let adhocStatus = try runToolStatus("/bin/bash", [scriptURL.path, "-"])
-        try expect(adhocStatus != 0, "ad-hoc identity is rejected for public release mode")
+        let validatorScript = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("script/validate_release_artifact.sh")
+        try expect(FileManager.default.isExecutableFile(atPath: validatorScript.path), "release artifact validator is executable")
     }
 
     private static func testReleaseArtifactValidation() throws {
@@ -3705,14 +3702,11 @@ struct CodexUsageStatusTests {
 
         let artifactURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("outputs/CodexUsageStatus.app.zip")
-        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, "2.4.83"])
-        try expect(adhocStatus != 0, "ad-hoc artifact is rejected as a publishable release")
+        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, "2.4.84"])
+        try expect(adhocStatus == 0, "ad-hoc artifact is accepted as the canonical GitHub release")
 
         let malformedStatus = try runToolStatus("/bin/bash", [validatorURL.path, "/dev/null"])
         try expect(malformedStatus != 0, "malformed artifact is rejected")
-
-        let missingCredentialStatus = try runToolStatus("/bin/bash", [validatorURL.path, "--notarize", artifactURL.path, "2.4.83"])
-        try expect(missingCredentialStatus != 0, "notarization fails closed without external credentials")
     }
 
     private static func testAccessibilityPermissionPolicy() throws {

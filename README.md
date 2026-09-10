@@ -6,7 +6,7 @@ Codex Usage Status is a macOS menu-bar HUD for monitoring the quota reported by 
 
 ## Download
 
-Download the latest signed application from **GitHub Releases**:
+Download the latest ad-hoc-signed application from **GitHub Releases**:
 
 <https://github.com/SaiHoninbo/CodexUsageStatus/releases/latest>
 
@@ -31,7 +31,11 @@ Do not download the repository source archive for installation. The source archi
 5. If macOS blocks the app, open **System Settings → Privacy & Security**, scroll to the security message, and choose **Open Anyway**.
 6. Launch Codex Usage Status. It appears as a menu-bar item and can show the floating HUD beside Codex.
 
-Public release artifacts use the canonical GitHub Release signing and notarization path; local `package` builds remain ad-hoc unless the explicit release-signing mode is used. Keeping the app in `/Applications` also gives the login-item registration a stable path.
+Public release artifacts use the canonical GitHub Release path with an ad-hoc
+code signature. The GitHub repository and fixed asset validation provide the
+distribution trust boundary; no external release credential is needed.
+Keeping the app in `/Applications` also gives the login-item registration a
+stable path.
 
 ## Permissions
 
@@ -119,24 +123,15 @@ Maintainers should publish a GitHub Release with:
 - The signed app bundle inside the ZIP
 - No `._*`, `__MACOSX`, source, test, auth, token, or history files
 
-Record the checksum and formal signing identity for each published artifact in the release notes or maintainer evidence. A commit or ZIP pushed to `main` alone does not create an in-app release update.
+Record the checksum and ad-hoc signing mode for each published artifact in the release notes or maintainer evidence. A commit or ZIP pushed to `main` alone does not create an in-app release update.
 
 Before uploading the ZIP, validate the exact publishable artifact. The validator
-fails closed unless the archive contains only the expected app, uses a
-`Developer ID Application` signature with a Team ID, has a stapled notarization
-ticket, and passes Gatekeeper:
+fails closed unless the archive contains only the expected app, uses an ad-hoc
+code signature, has the expected bundle identifier and semantic version, and
+passes strict bundle verification:
 
 ```bash
-./script/validate_release_artifact.sh outputs/CodexUsageStatus.app.zip 2.4.83
-```
-
-When Apple credentials are available, the same bounded path can submit, staple,
-repack, and validate the artifact. Supply only the name of an existing
-`notarytool` keychain profile; never commit credentials:
-
-```bash
-NOTARYTOOL_KEYCHAIN_PROFILE="release-profile" \
-  ./script/validate_release_artifact.sh --notarize outputs/CodexUsageStatus.app.zip 2.4.83
+./script/validate_release_artifact.sh outputs/CodexUsageStatus.app.zip 2.4.84
 ```
 
 The ZIP must pass this validator before it is uploaded to a GitHub Release.
@@ -170,15 +165,9 @@ The packaging script creates an ad-hoc signed app, validates the bundle, and wri
 outputs/CodexUsageStatus.app.zip
 ```
 
-The default `package` mode is a local packaging convenience and its ad-hoc
-signature is not a formal public release. For a public release, maintainers
-must use the existing release-signing path by setting
-`CODEX_RELEASE_MODE=1` together with an explicit
-`CODEX_RELEASE_SIGNING_IDENTITY`. That identity must resolve to a
-`Developer ID Application` certificate; invalid identities and ad-hoc signing
-are rejected in that mode. Publishing the resulting ZIP to a GitHub Release is
-a separate explicit maintainer action. GitHub Releases is the only distribution
-channel.
+The `package` mode creates the canonical ad-hoc signed artifact used for a
+GitHub Release. Publishing the resulting ZIP to a GitHub Release is a separate
+explicit maintainer action. GitHub Releases is the only distribution channel.
 
 For disposable runtime or UI evidence, use the `candidate` mode instead:
 

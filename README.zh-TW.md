@@ -6,7 +6,7 @@ Codex Usage Status 是 macOS 選單列用量 HUD，用來監控本機 Codex App 
 
 ## 下載
 
-請從 GitHub Releases 下載最新的已簽章 App：
+請從 GitHub Releases 下載最新的 ad-hoc 簽章 App：
 
 <https://github.com/SaiHoninbo/CodexUsageStatus/releases/latest>
 
@@ -35,7 +35,8 @@ Codex Usage Status 是 macOS 選單列用量 HUD，用來監控本機 Codex App 
 5. 如果 macOS 阻擋啟動，開啟「系統設定 → 隱私權與安全性」，在安全性提示中選擇「仍要打開」。
 6. 啟動 Codex Usage Status；它會出現在選單列，也可以在 Codex 旁顯示浮動 HUD。
 
-正式發布 artifact 使用 GitHub Release 的正式簽章與公證流程；除非使用明確的 release signing mode，否則本機 `package` 建置仍使用 ad-hoc signing。建議固定放在 `/Applications`，讓登入啟動註冊使用穩定的 App 路徑。
+正式發布 artifact 使用 GitHub Release 的 ad-hoc 簽章流程，不需要外部發佈憑證。
+建議固定放在 `/Applications`，讓登入啟動註冊使用穩定的 App 路徑。
 
 ## 權限
 
@@ -118,22 +119,14 @@ App 啟動時以及執行期間會定期檢查 GitHub 的 `latest release`。發
 - ZIP 內包含已簽章的 App bundle
 - 不包含 `._*`、`__MACOSX`、source、tests、auth、token 或 history 檔案
 
-每個正式 artifact 的 checksum 與正式簽章 identity 應記錄在 Release notes 或維護 evidence。只把 ZIP 提交到 `main` 並不會自動建立 App 內的 Release 更新。
+每個正式 artifact 的 checksum 與 ad-hoc signing mode 應記錄在 Release notes 或維護 evidence。只把 ZIP 提交到 `main` 並不會自動建立 App 內的 Release 更新。
 
 上傳 ZIP 前，必須驗證最後要發布的那一份 artifact。驗證器會 fail closed，
-只有在 archive 只包含預期 App、使用 `Developer ID Application` 簽章且有
-Team ID、已裝訂 notarization ticket，並通過 Gatekeeper 時才允許通過：
+只有在 archive 只包含預期 App、使用 ad-hoc code signature、bundle identifier
+與 semantic version 正確，並通過 strict bundle verification 時才允許通過：
 
 ```bash
-./script/validate_release_artifact.sh outputs/CodexUsageStatus.app.zip 2.4.83
-```
-
-取得 Apple 憑證後，可使用同一條有限流程提交公證、staple、重新打包並驗證。
-只提供既有 `notarytool` keychain profile 名稱，不要把 credential 寫入 Repo：
-
-```bash
-NOTARYTOOL_KEYCHAIN_PROFILE="release-profile" \
-  ./script/validate_release_artifact.sh --notarize outputs/CodexUsageStatus.app.zip 2.4.83
+./script/validate_release_artifact.sh outputs/CodexUsageStatus.app.zip 2.4.84
 ```
 
 ZIP 必須先通過這個 validator，才能上傳 GitHub Release。
@@ -166,13 +159,9 @@ canonical artifact 寫入：
 outputs/CodexUsageStatus.app.zip
 ```
 
-預設的 `package` mode 是本機打包便利流程，使用的 ad-hoc signature
-不代表正式公開 Release。正式公開 Release 必須使用既有的 release signing
-流程，設定 `CODEX_RELEASE_MODE=1` 與明確的
-`CODEX_RELEASE_SIGNING_IDENTITY`。該身分必須解析為
-`Developer ID Application` 憑證；無效身分與 ad-hoc signing 在這個 mode 都會被拒絕。將產出的 ZIP 發布到
-GitHub Release，仍是維護者另外明確執行的動作。GitHub Releases 是唯一發布
-通道。
+`package` mode 會建立可直接提供 GitHub Release 使用的 canonical ad-hoc
+signed artifact。將產出的 ZIP 發布到 GitHub Release，仍是維護者另外明確
+執行的動作。GitHub Releases 是唯一發布通道。
 
 若要產生一次性的 runtime 或 UI 驗證版本，請使用 `candidate` mode：
 
