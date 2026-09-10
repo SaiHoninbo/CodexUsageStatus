@@ -144,6 +144,7 @@ final class UsageViewModel: ObservableObject {
     private let tokenReelAudioPlayer = TokenReelAudioFeedbackPlayer()
     private var rapidDrainDetector = RapidDrainDetector()
     private var updateCheckTimer: Timer?
+    private var lastAutomaticUpdateCheckAt: Date?
     private var pendingUnidentifiedProfileBoundary = false
     private var defaultClientEnabled = true
     private let maxConcurrentWorkers = ManagedWorkerAdmissionPolicy.maxActiveAppServers
@@ -437,7 +438,7 @@ final class UsageViewModel: ObservableObject {
             self.finishStartupAfterLocalStores()
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             guard !Task.isCancelled, !self.isStopping else { return }
-            self.checkForUpdates()
+            self.checkForUpdatesIfNeeded()
         }
     }
 
@@ -527,6 +528,11 @@ final class UsageViewModel: ObservableObject {
     }
 
     func checkForUpdates() {
+        // Manual checks are explicit user actions and therefore bypass the
+        // automatic cadence. Recording the attempt also prevents an immediate
+        // foreground/popover lifecycle callback from starting a duplicate
+        // request while the manual request is still settling.
+        lastAutomaticUpdateCheckAt = Date()
         updateService.check { [weak self] state in
             guard let self else { return }
             self.updateState = state
@@ -538,6 +544,20 @@ final class UsageViewModel: ObservableObject {
         // entry point (startup, HUD, context menu, and details panel) in sync
         // even when a previous request is being invalidated and restarted.
         updateState = updateService.state
+    }
+
+    /// Starts a foreground/lifecycle update check only when the existing
+    /// result is no longer fresh. This restores automatic release discovery
+    /// for an app that remains open while GitHub publishes a new version,
+    /// without adding another timer or updater subsystem.
+    func checkForUpdatesIfNeeded(now: Date = Date()) {
+        guard AppUpdateCheckPolicy.shouldStartAutomaticCheck(
+            now: now,
+            lastCheckAt: lastAutomaticUpdateCheckAt,
+            isBusy: updateService.state.isBusy
+        ) else { return }
+        lastAutomaticUpdateCheckAt = now
+        checkForUpdates()
     }
 
     func openUpdateReleasePage() {
@@ -1943,9 +1963,9 @@ final class UsageViewModel: ObservableObject {
 
     private func startUpdateCheckTimer() {
         updateCheckTimer?.invalidate()
-        updateCheckTimer = Timer.scheduledTimer(withTimeInterval: 6 * 60 * 60, repeats: true) { [weak self] _ in
+        updateCheckTimer = Timer.scheduledTimer(withTimeInterval: AppUpdateCheckPolicy.automaticInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.checkForUpdates()
+                self?.checkForUpdatesIfNeeded()
             }
         }
     }

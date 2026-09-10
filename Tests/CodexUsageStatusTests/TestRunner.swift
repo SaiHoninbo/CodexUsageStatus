@@ -110,6 +110,7 @@ struct CodexUsageStatusTests {
             ("managed profile has isolated CODEX_HOME", testManagedProfileHasIsolatedCodexHome),
             ("managed profile imports auth atomically", testManagedProfileImportsAuth),
             ("update version comparison", testUpdateVersionComparison),
+            ("automatic update check policy", testAutomaticUpdateCheckPolicy),
             ("update state presentation", testUpdateStatePresentation),
             ("update authority and packaging policy", testUpdateAuthorityAndPackagingPolicy),
             ("ad-hoc release package policy", testAdHocReleasePackagePolicy),
@@ -3652,6 +3653,32 @@ struct CodexUsageStatusTests {
         try expect(sharedUpdateAlert.message == "網路錯誤", "shared update failure preserves the updater's factual message")
         try expect(sharedUpdateAlert.severity == .warning && sharedUpdateAlert.action == .update, "shared update failure preserves severity and remediation")
 
+        let availableRelease = AppUpdateRelease(
+            version: "2.5.0",
+            tagName: "v2.5.0",
+            name: "Codex Usage Status 2.5.0",
+            releaseURL: URL(string: "https://github.com/SaiHoninbo/CodexUsageStatus/releases/tag/v2.5.0")!,
+            notes: "",
+            publishedAt: nil
+        )
+        let updateAlert = SettingsAlertPresentation.updateAvailable(version: availableRelease.version)
+        try expect(updateAlert.id == "update-available", "available release gets a stable actionable alert identity")
+        try expect(updateAlert.message.contains(availableRelease.version), "available release alert names the release version")
+        try expect(updateAlert.action == .update, "available release alert routes to the update disclosure")
+        let availableAlerts = SettingsAlertPresentation.make(
+            accessibilityPermissionState: .trusted,
+            notificationAuthorizationStatus: .authorized,
+            updateState: .available(availableRelease),
+            connectionState: .connected,
+            isStale: false,
+            dataAgeText: "剛剛更新",
+            accountHealthErrorMessage: nil,
+            profileStoreErrorMessage: nil,
+            loginStates: [:],
+            historyErrorMessage: nil
+        )
+        try expect(availableAlerts.map(\.id) == ["update-available"], "available release is surfaced in the settings action summary")
+
         let quiet = SettingsAlertPresentation.make(
             accessibilityPermissionState: .trusted,
             notificationAuthorizationStatus: .authorized,
@@ -3681,6 +3708,10 @@ struct CodexUsageStatusTests {
         try expect(projection?.id == "accessibility", "HUD chooses the first actionable settings warning")
         try expect(projection?.action == .accessibility && projection?.settingsSection == .hud, "accessibility HUD warning routes to HUD settings")
         try expect(projection?.compactMessage == "輔助功能未允許", "HUD warning uses compact actionable copy")
+
+        let availableUpdate = SettingsAlertPresentation.updateAvailable(version: "2.5.0")
+        let updateProjection = HUDAlertPresentation.make(from: [availableUpdate])
+        try expect(updateProjection?.compactMessage == "有新版本可用", "HUD distinguishes an available release from a failed check")
 
         let accountOnly = SettingsAlertPresentation(
             id: "connection",
@@ -3950,6 +3981,34 @@ struct CodexUsageStatusTests {
         try expect(!HUDUpdateBadgeState.checking.isActionable, "checking badge is disabled")
     }
 
+    private static func testAutomaticUpdateCheckPolicy() throws {
+        let now = Date(timeIntervalSince1970: 10_000)
+        try expect(
+            AppUpdateCheckPolicy.shouldStartAutomaticCheck(now: now, lastCheckAt: nil, isBusy: false),
+            "automatic update check runs when no previous check exists"
+        )
+        try expect(
+            !AppUpdateCheckPolicy.shouldStartAutomaticCheck(now: now, lastCheckAt: now, isBusy: false),
+            "automatic update check is throttled during the freshness window"
+        )
+        try expect(
+            AppUpdateCheckPolicy.shouldStartAutomaticCheck(
+                now: now.addingTimeInterval(AppUpdateCheckPolicy.automaticInterval),
+                lastCheckAt: now,
+                isBusy: false
+            ),
+            "automatic update check resumes after the freshness window"
+        )
+        try expect(
+            !AppUpdateCheckPolicy.shouldStartAutomaticCheck(
+                now: now.addingTimeInterval(AppUpdateCheckPolicy.automaticInterval * 2),
+                lastCheckAt: now,
+                isBusy: true
+            ),
+            "automatic update check does not interrupt an in-flight operation"
+        )
+    }
+
     private static func testUpdateStatePresentation() throws {
         let release = AppUpdateRelease(
             version: "2.5.0",
@@ -4038,7 +4097,7 @@ struct CodexUsageStatusTests {
 
         let artifactURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("outputs/CodexUsageStatus.app.zip")
-        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, "2.4.87"])
+        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, "2.4.88"])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted as the canonical GitHub release")
 
         let malformedStatus = try runToolStatus("/bin/bash", [validatorURL.path, "/dev/null"])

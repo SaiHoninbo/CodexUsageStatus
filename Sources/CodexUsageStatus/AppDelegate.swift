@@ -125,6 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidBecomeActive(_ notification: Notification) {
         model?.refresh()
+        model?.checkForUpdatesIfNeeded()
     }
 
     @objc private func togglePopover(_ sender: Any?) {
@@ -174,6 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             PopoverPresentationPolicy.apply(to: popover)
             installOutsideClickMonitor()
             model.refresh()
+            model.checkForUpdatesIfNeeded()
         }
     }
 

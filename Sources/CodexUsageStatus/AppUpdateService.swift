@@ -138,6 +138,23 @@ enum AppUpdatePresentationPolicy {
     static let releaseButtonTitle = "查看 Release"
 }
 
+/// Keeps automatic GitHub checks responsive to a newly published release
+/// without turning every HUD/popover interaction into a network request.
+/// Manual checks continue to bypass this gate.
+enum AppUpdateCheckPolicy {
+    static let automaticInterval: TimeInterval = 15 * 60
+
+    static func shouldStartAutomaticCheck(
+        now: Date,
+        lastCheckAt: Date?,
+        isBusy: Bool
+    ) -> Bool {
+        guard !isBusy else { return false }
+        guard let lastCheckAt else { return true }
+        return now.timeIntervalSince(lastCheckAt) >= automaticInterval
+    }
+}
+
 @MainActor
 final class AppUpdateService: NSObject {
     private struct ReleaseResponse: Decodable {

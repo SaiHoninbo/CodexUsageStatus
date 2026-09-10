@@ -64,6 +64,7 @@ struct CodexFloatingHUDView: View {
     @State private var decreaseAmount: Int?
     @State private var decreaseAnimationID = 0
     @State private var updateCheckRequested = false
+    @State private var lastPresentedUpdateVersion: String?
     @State private var updateFeedback: UpdateFeedback?
     @AppStorage(HUDThemePreference.themeKey) private var storedHUDTheme = HUDTheme.neonPurple.rawValue
     @AppStorage(HUDThemePreference.rotationEnabledKey) private var hudThemeRotationEnabled = false
@@ -131,18 +132,10 @@ struct CodexFloatingHUDView: View {
         .onAppear {
             setHUDThemeAppearance(selectedHUDPalette.appearance)
             evaluateThemeRotationIfDue()
-            // The HUD is the user's always-available update surface. Perform
-            // one bounded foreground check when it first appears so a Release
-            // published while the app was already running is not hidden until
-            // the six-hour cadence. Existing AppUpdateNotificationService
-            // dedupe and permission semantics remain unchanged.
-            checkForUpdates()
             // If the model completed its check before this view appeared,
             // replay the existing in-app presentation once instead of relying
             // solely on `onChange` delivery.
-            if case .available = model.updateState {
-                presentUpdateFeedback(for: model.updateState)
-            }
+            presentUpdateFeedback(for: model.updateState)
         }
         .onChange(of: storedHUDTheme) { _, rawValue in
             let theme = HUDTheme(rawValue: rawValue) ?? .neonPurple
@@ -244,10 +237,9 @@ struct CodexFloatingHUDView: View {
     }
 
     private func presentUpdateFeedback(for state: AppUpdateState) {
-        guard updateCheckRequested else { return }
-
         switch state {
         case .upToDate:
+            guard updateCheckRequested else { return }
             updateCheckRequested = false
             updateFeedback = UpdateFeedback(
                 kind: .upToDate,
@@ -256,7 +248,12 @@ struct CodexFloatingHUDView: View {
                 release: nil
             )
         case .available(let release):
+            // Automatic checks restore the release prompt without replaying
+            // it on every periodic check. An explicit manual check may show
+            // the same release again when the user asks for it.
+            guard updateCheckRequested || lastPresentedUpdateVersion != release.version else { return }
             updateCheckRequested = false
+            lastPresentedUpdateVersion = release.version
             updateFeedback = UpdateFeedback(
                 kind: .available,
                 title: "有新版本可用",
@@ -264,6 +261,7 @@ struct CodexFloatingHUDView: View {
                 release: release
             )
         case .error(let message):
+            guard updateCheckRequested else { return }
             updateCheckRequested = false
             updateFeedback = UpdateFeedback(
                 kind: .error,
@@ -300,7 +298,10 @@ struct CodexFloatingHUDView: View {
                     .controlSize(.small)
             case .available:
                 Button(AppUpdatePresentationPolicy.installButtonTitle) {
-                    if let release = feedback.release { installUpdate(release) }
+                    if let release = feedback.release {
+                        updateFeedback = nil
+                        installUpdate(release)
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)

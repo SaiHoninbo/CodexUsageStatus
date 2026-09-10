@@ -137,7 +137,7 @@ struct HUDAlertPresentation: Equatable, Identifiable {
                     id: alert.id,
                     severity: severity(for: alert.severity),
                     title: "需要處理",
-                    compactMessage: "更新檢查需要重試",
+                    compactMessage: alert.id == "update-available" ? "有新版本可用" : "更新檢查需要重試",
                     action: .update,
                     settingsSection: .update
                 )

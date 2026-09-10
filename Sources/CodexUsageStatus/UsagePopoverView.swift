@@ -29,6 +29,7 @@ struct UsagePopoverView: View {
     @State var isSyncExpanded = false
     @State var isUpdateExpanded = false
     @State var isMetadataExpanded = false
+    @State private var autoExpandedUpdateVersion: String?
     @State var actionAcknowledgement: String?
     @State var actionAcknowledgementToken = UUID()
 
@@ -69,6 +70,12 @@ struct UsagePopoverView: View {
         }
         .onChange(of: selectionController.requestGeneration) { _, _ in
             applyPendingSettingsSection()
+        }
+        .onAppear {
+            syncUpdateDisclosure(with: model.updateState)
+        }
+        .onChange(of: model.updateState) { _, newState in
+            syncUpdateDisclosure(with: newState)
         }
         .alert("清除本機歷史？", isPresented: $showClearHistoryConfirmation) {
             Button("清除", role: .destructive) { model.clearHistory() }
@@ -238,6 +245,15 @@ struct UsagePopoverView: View {
             isUpdateExpanded = true
         case .metadata:
             isMetadataExpanded = true
+        }
+    }
+
+    private func syncUpdateDisclosure(with state: AppUpdateState) {
+        guard case .available(let release) = state,
+              autoExpandedUpdateVersion != release.version else { return }
+        autoExpandedUpdateVersion = release.version
+        if !isUpdateExpanded {
+            isUpdateExpanded = true
         }
     }
 

@@ -118,7 +118,9 @@ extension UsagePopoverView {
             }
         case .update:
             isUpdateExpanded = true
-            model.checkForUpdates()
+            if case .error = model.updateState {
+                model.checkForUpdates()
+            }
         case .refresh:
             model.refresh()
         }

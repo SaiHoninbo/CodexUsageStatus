@@ -38,6 +38,17 @@ struct SettingsAlertPresentation: Identifiable, Equatable {
         )
     }
 
+    static func updateAvailable(version: String) -> Self {
+        Self(
+            id: "update-available",
+            severity: .warning,
+            title: "有新版本可用",
+            message: "Codex Usage Status \(version) 可下載並覆蓋。",
+            actionTitle: "查看更新",
+            action: .update
+        )
+    }
+
     static func make(
         accessibilityPermissionState: AccessibilityPermissionState,
         notificationAuthorizationStatus: UNAuthorizationStatus,
@@ -129,6 +140,8 @@ struct SettingsAlertPresentation: Identifiable, Equatable {
 
         if case .error(let message) = updateState {
             alerts.append(updateFailure(message: message))
+        } else if case .available(let release) = updateState {
+            alerts.append(updateAvailable(version: release.version))
         }
 
         if connectionState == .connected, isStale {
