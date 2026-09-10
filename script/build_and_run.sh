@@ -116,9 +116,9 @@ cat > "$INFO_PLIST" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>2.4.85</string>
+  <string>2.4.86</string>
   <key>CFBundleVersion</key>
-  <string>105</string>
+  <string>106</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
   <key>LSUIElement</key>

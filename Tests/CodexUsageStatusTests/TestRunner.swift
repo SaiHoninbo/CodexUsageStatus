@@ -71,6 +71,7 @@ struct CodexUsageStatusTests {
             ("token activity null fields", testTokenActivityNullFields),
             ("token activity presentation", testTokenActivityPresentation),
             ("local Codex usage artifact parser", testLocalCodexUsageArtifactParser),
+            ("Repo Chat identity reconciliation", testRepoChatIdentityReconciliation),
             ("desktop activity authority", testDesktopActivityAuthority),
             ("local token usage ledger", testLocalTokenUsageLedger),
             ("daily Token Hero presentation", testDailyTokenHeroPresentation),
@@ -1301,6 +1302,89 @@ struct CodexUsageStatusTests {
         try expect(CodexLocalTurnObservationCapabilities.current.interrupted, "rollout interruption evidence is available")
     }
 
+    private static func testRepoChatIdentityReconciliation() throws {
+        let repoA = try unwrap(
+            CodexLocalUsageArtifactParser.parseSessionIdentity(Data(#"{"type":"session_meta","payload":{"id":"thread-a","cwd":"/tmp/PlanLoop-a","git":{"repository_url":"https://github.com/example/PlanLoop.git"}}}"#.utf8)),
+            "Repo A session identity"
+        )
+        let repoAEquivalent = try unwrap(
+            CodexLocalUsageArtifactParser.parseSessionIdentity(Data(#"{"type":"session_meta","payload":{"id":"thread-a","cwd":"/tmp/PlanLoop-b","git":{"repository_url":"git@github.com:example/PlanLoop.git"}}}"#.utf8)),
+            "equivalent remote session identity"
+        )
+        let repoB = try unwrap(
+            CodexLocalUsageArtifactParser.parseSessionIdentity(Data(#"{"type":"session_meta","payload":{"id":"thread-b","cwd":"/tmp/PlanLoop-b","git":{"repository_url":"https://github.com/other/PlanLoop.git"}}}"#.utf8)),
+            "Repo B session identity"
+        )
+
+        let proven = CodexLocalExecutionIdentityReconciliation.resolve(
+            sessionIdentities: [repoA],
+            eventThreadID: "thread-a"
+        )
+        try expect(proven.status == .proven && proven.sessionIdentity == repoA, "Repo A and Chat A share a proven identity")
+
+        let wrongThread = CodexLocalExecutionIdentityReconciliation.resolve(
+            sessionIdentities: [repoA],
+            eventThreadID: "thread-b"
+        )
+        try expect(wrongThread.status == .ambiguous && wrongThread.sessionIdentity == nil, "Repo A cannot be paired with Chat B")
+
+        let conflictingSessions = CodexLocalExecutionIdentityReconciliation.resolve(
+            sessionIdentities: [repoA, repoB],
+            eventThreadID: "thread-a"
+        )
+        try expect(conflictingSessions.status == .ambiguous && conflictingSessions.sessionIdentity == nil, "conflicting rollout session identities fail closed")
+
+        let missingSession = CodexLocalExecutionIdentityReconciliation.resolve(
+            sessionIdentities: [],
+            eventThreadID: "thread-a"
+        )
+        try expect(missingSession.status == .notProven, "missing session metadata remains not proven")
+        try expect(!wrongThread.acceptsActivity(kind: .completed), "unproven terminal activity cannot overwrite another Chat")
+        try expect(wrongThread.acceptsActivity(kind: .started), "unproven starts remain visible as unnamed observations")
+        try expect(repoA.repositoryIdentityDigest == repoAEquivalent.repositoryIdentityDigest, "same remote across two worktrees keeps one canonical remote identity")
+        try expect(repoA.repositoryIdentityDigest != repoB.repositoryIdentityDigest, "same display name from another remote remains distinct")
+
+        let lifecycleWithMatchingThread = Data(#"{"type":"event_msg","payload":{"type":"task_started","thread_id":"thread-a","turn_id":"turn-a","started_at":2000}}"#.utf8)
+        try expect(
+            CodexLocalUsageArtifactParser.parseTurnActivity(lifecycleWithMatchingThread, threadID: "thread-a") != nil,
+            "lifecycle event with matching thread identity is accepted"
+        )
+        let lifecycleWithWrongThread = Data(#"{"type":"event_msg","payload":{"type":"task_started","thread_id":"thread-b","turn_id":"turn-a","started_at":2000}}"#.utf8)
+        try expect(
+            CodexLocalUsageArtifactParser.parseTurnActivity(lifecycleWithWrongThread, threadID: "thread-a") == nil,
+            "lifecycle event with mismatched thread identity is rejected"
+        )
+
+        let sessionIndexRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-repo-chat-index-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: sessionIndexRoot) }
+        try FileManager.default.createDirectory(at: sessionIndexRoot, withIntermediateDirectories: true)
+        let sessionIndex = #"""
+        {"id":"thread-a","thread_name":"Chat A"}
+        {"id":"thread-b","thread_name":"Chat B"}
+        """#
+        try Data(sessionIndex.utf8).write(to: sessionIndexRoot.appendingPathComponent("session_index.jsonl"), options: .atomic)
+        try expect(CodexLocalSessionIndex.threadName(for: "thread-a", in: sessionIndexRoot) == "Chat A", "Chat A is resolved only by thread A")
+        try expect(CodexLocalSessionIndex.threadName(for: "thread-b", in: sessionIndexRoot) == "Chat B", "Chat B is resolved only by thread B")
+        try expect(CodexLocalSessionIndex.threadName(for: "thread-missing", in: sessionIndexRoot) == nil, "missing Chat title is not borrowed from another thread")
+
+        let keyA = CodexExecutionKey(
+            profileID: nil,
+            normalizedPhysicalRootPath: "/tmp/worktree-a",
+            threadID: "thread-a",
+            turnID: "turn-a",
+            repositoryIdentityDigest: repoA.repositoryIdentityDigest
+        )
+        let keyB = CodexExecutionKey(
+            profileID: nil,
+            normalizedPhysicalRootPath: "/tmp/worktree-b",
+            threadID: "thread-a",
+            turnID: "turn-a",
+            repositoryIdentityDigest: repoA.repositoryIdentityDigest
+        )
+        try expect(keyA != keyB, "simultaneous worktrees remain separate execution identities")
+    }
+
     private static func testDesktopActivityAuthority() throws {
         let defaultHome = URL(fileURLWithPath: "/tmp/codex-default-home")
         let managedHomeA = URL(fileURLWithPath: "/tmp/codex-managed-a")
@@ -1670,10 +1754,25 @@ struct CodexUsageStatusTests {
 
         let exactNine = LocalTokenUsageLedgerPresentation.heroTokenCount(999_999_999)
         let exactBillion = LocalTokenUsageLedgerPresentation.heroTokenCount(1_000_000_000)
-        let boundedOverflow = LocalTokenUsageLedgerPresentation.heroTokenCount(1_000_000_001)
+        let tenDigitValue = LocalTokenUsageLedgerPresentation.heroTokenCount(1_491_404_758)
+        let exactTenDigitLimit = LocalTokenUsageLedgerPresentation.heroTokenCount(9_999_999_999)
+        let boundedOverflow = LocalTokenUsageLedgerPresentation.heroTokenCount(10_000_000_000)
         try expect(exactNine == "999,999,999", "nine-digit Hero remains exact")
         try expect(exactBillion == "1,000,000,000", "one-billion Hero remains exact")
-        try expect(boundedOverflow == "10億+", "Hero overflow is bounded and truthful")
+        try expect(tenDigitValue == "1,491,404,758", "ten-digit Hero remains fully numeric")
+        try expect(exactTenDigitLimit == "9,999,999,999", "ten-digit Hero limit remains exact")
+        try expect(boundedOverflow == "9,999,999,999+", "values beyond ten digits stay bounded and truthful")
+
+        let crossBillionSlots = TokenOdometerPresentation.slots(
+            previous: 999_999_999,
+            current: 1_000_000_001
+        )
+        let crossBillionValue = crossBillionSlots
+            .map { String($0.currentCharacter) }
+            .joined()
+            .replacingOccurrences(of: " ", with: "")
+        try expect(crossBillionValue == "1,000,000,001", "crossing one billion keeps a numeric ten-digit reel value")
+        try expect(crossBillionSlots.contains(where: { $0.isChangedDigit }), "crossing one billion keeps changed numeric slots for animation")
     }
 
     private static func testTokenActivityUpdateFeedback() throws {
@@ -2738,6 +2837,20 @@ struct CodexUsageStatusTests {
         try expect(samples.first?.durationSeconds == 120, "scan reads terminal duration only")
         try expect(samples.first?.repositoryDisplayName == "Repo", "scan keeps safe repository display name")
         try expect(samples.first?.threadID == "thread-scan", "scan keeps thread identity")
+
+        let mismatchedRollout = rolloutDirectory.appendingPathComponent("rollout-mismatched.jsonl")
+        let mismatchedContent = [
+            #"{"type":"session_meta","payload":{"id":"thread-head","cwd":"/tmp/Repo","git":{"repository_url":"https://github.com/example/Repo.git"}}}"#,
+            #"{"type":"session_meta","payload":{"id":"thread-other","cwd":"/tmp/Other","git":{"repository_url":"https://github.com/example/Other.git"}}}"#,
+            #"{"timestamp":"1970-01-01T00:16:40.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-mismatch","started_at":1000}}"#,
+            #"{"timestamp":"1970-01-01T00:18:40.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-mismatch","started_at":1000,"completed_at":1120,"duration_ms":120000}}"#
+        ].joined(separator: "\n") + "\n"
+        try Data(mismatchedContent.utf8).write(to: mismatchedRollout)
+        let samplesAfterMismatch = CodexExecutionDurationHistoryScanner.scan(
+            roots: [CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: base)],
+            maxSamples: 10
+        )
+        try expect(samplesAfterMismatch.count == 1, "mismatched rollout identity cannot add a duration sample")
     }
 
     private static func testTurnNotificationContentPolicy() throws {
@@ -3836,7 +3949,7 @@ struct CodexUsageStatusTests {
 
         let artifactURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("outputs/CodexUsageStatus.app.zip")
-        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, "2.4.85"])
+        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, "2.4.86"])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted as the canonical GitHub release")
 
         let malformedStatus = try runToolStatus("/bin/bash", [validatorURL.path, "/dev/null"])

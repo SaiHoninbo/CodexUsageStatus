@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// The subset of a Codex Desktop `token_usage_record` that is safe and useful
 /// to feed into the existing machine-local ledger. The rollout/session file is
@@ -67,8 +68,79 @@ struct CodexLocalSessionIdentity: Equatable, Sendable {
     let repositoryDisplayName: String?
     let workspaceDisplayName: String?
     let kind: CodexLocalSessionIdentityKind
+    /// One-way identity for the canonical repository remote. This lets
+    /// callers distinguish same-named repositories without retaining a raw
+    /// remote URL in the projection model.
+    let repositoryIdentityDigest: String?
+
+    init(
+        threadID: String,
+        repositoryDisplayName: String?,
+        workspaceDisplayName: String?,
+        kind: CodexLocalSessionIdentityKind,
+        repositoryIdentityDigest: String? = nil
+    ) {
+        self.threadID = threadID
+        self.repositoryDisplayName = repositoryDisplayName
+        self.workspaceDisplayName = workspaceDisplayName
+        self.kind = kind
+        self.repositoryIdentityDigest = repositoryIdentityDigest
+    }
 
     var displayName: String? { repositoryDisplayName ?? workspaceDisplayName }
+}
+
+enum CodexLocalExecutionIdentityResolution: String, Equatable, Sendable {
+    case proven
+    case ambiguous
+    case notProven
+}
+
+/// Pure Repo ↔ Chat identity reconciliation. A session index name is only
+/// usable after the rollout session identity and event thread are proven to
+/// refer to the same thread.
+struct CodexLocalExecutionIdentityReconciliation: Equatable, Sendable {
+    let status: CodexLocalExecutionIdentityResolution
+    let sessionIdentity: CodexLocalSessionIdentity?
+
+    var isProven: Bool { status == .proven && sessionIdentity != nil }
+
+    /// Unproven starts/tokens can remain visible as explicitly unnamed local
+    /// observations. An unproven terminal event is never admitted because it
+    /// could remove a different Chat's active execution.
+    func acceptsActivity(kind: CodexLocalTurnActivityEventKind) -> Bool {
+        isProven || kind == .started || kind == .tokenUpdated
+    }
+
+    static func resolve(
+        sessionIdentities: [CodexLocalSessionIdentity],
+        eventThreadID: String?
+    ) -> CodexLocalExecutionIdentityReconciliation {
+        guard let first = sessionIdentities.first else {
+            return .init(status: .notProven, sessionIdentity: nil)
+        }
+        guard sessionIdentities.dropFirst().allSatisfy({ $0 == first }) else {
+            return .init(status: .ambiguous, sessionIdentity: nil)
+        }
+        guard let eventThreadID, !eventThreadID.isEmpty, eventThreadID == first.threadID else {
+            return .init(status: .ambiguous, sessionIdentity: nil)
+        }
+        return .init(status: .proven, sessionIdentity: first)
+    }
+
+    static func resolve(
+        sessionIdentity: CodexLocalSessionIdentity?,
+        eventThreadID: String?,
+        sourceIsAmbiguous: Bool = false
+    ) -> CodexLocalExecutionIdentityReconciliation {
+        guard !sourceIsAmbiguous else {
+            return .init(status: .ambiguous, sessionIdentity: nil)
+        }
+        guard let sessionIdentity else {
+            return .init(status: .notProven, sessionIdentity: nil)
+        }
+        return resolve(sessionIdentities: [sessionIdentity], eventThreadID: eventThreadID)
+    }
 }
 
 struct CodexLocalTurnObservationCapabilities: Equatable, Sendable {
@@ -122,6 +194,7 @@ enum CodexLocalUsageArtifactParser {
 
     private struct LifecyclePayload: Decodable {
         let type: String?
+        let threadID: String?
         let turnID: String?
         let startedAt: Double?
         let completedAt: Double?
@@ -131,6 +204,7 @@ enum CodexLocalUsageArtifactParser {
 
         enum CodingKeys: String, CodingKey {
             case type
+            case threadID = "thread_id"
             case turnID = "turn_id"
             case startedAt = "started_at"
             case completedAt = "completed_at"
@@ -222,12 +296,14 @@ enum CodexLocalUsageArtifactParser {
 
         let workspace = Self.safeWorkspaceName(from: payload.cwd)
         let repository = Self.safeRepositoryName(from: payload.git?.repositoryURL)
+        let repositoryIdentityDigest = Self.repositoryIdentityDigest(from: payload.git?.repositoryURL)
         let kind: CodexLocalSessionIdentityKind = repository != nil ? .repository : (workspace != nil ? .workspace : .unknown)
         return CodexLocalSessionIdentity(
             threadID: id,
             repositoryDisplayName: repository,
             workspaceDisplayName: workspace,
-            kind: kind
+            kind: kind,
+            repositoryIdentityDigest: repositoryIdentityDigest
         )
     }
 
@@ -249,6 +325,29 @@ enum CodexLocalUsageArtifactParser {
         let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty, normalized != ".", !normalized.contains("\\") else { return nil }
         return normalized
+    }
+
+    private static func repositoryIdentityDigest(from raw: String?) -> String? {
+        guard let raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let range = value.range(of: "#") { value.removeSubrange(range.lowerBound..<value.endIndex) }
+        if let range = value.range(of: "?") { value.removeSubrange(range.lowerBound..<value.endIndex) }
+
+        // Normalize HTTPS and SCP-style Git remotes to a stable host/path
+        // identity. Credentials and query/fragment data never participate.
+        if value.hasPrefix("git@"), let separator = value.firstIndex(of: ":") {
+            let hostStart = value.index(value.startIndex, offsetBy: 4)
+            let host = String(value[hostStart..<separator]).lowercased()
+            value = host + "/" + value[value.index(after: separator)...]
+        } else if let components = URLComponents(string: value),
+                  let host = components.host {
+            value = host.lowercased() + components.path
+        }
+        value = value.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+        if value.hasSuffix(".git") { value.removeLast(4) }
+        guard !value.isEmpty else { return nil }
+        let digest = SHA256.hash(data: Data(value.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     static func parseTurnCompletion(_ data: Data, threadID: String?) -> CodexLocalTurnCompletionRecord? {
@@ -274,6 +373,14 @@ enum CodexLocalUsageArtifactParser {
               let payload = envelope.payload,
               let turnID = payload.turnID,
               !turnID.isEmpty else { return nil }
+
+        // Newer lifecycle records may carry their own thread_id. When
+        // present it must agree with the rollout/session cursor; disagreement
+        // is an identity contradiction and is rejected fail-closed.
+        if let payloadThreadID = payload.threadID,
+           payloadThreadID.isEmpty || payloadThreadID != threadID {
+            return nil
+        }
 
         let started = payload.startedAt.flatMap { $0.isFinite ? Date(timeIntervalSince1970: $0) : nil }
         let completed = payload.completedAt.flatMap { $0.isFinite ? Date(timeIntervalSince1970: $0) : nil }
@@ -648,6 +755,12 @@ final class CodexLocalUsageObserver {
 
                     let path = fileURL.path
                     let headIdentity = Self.sessionIdentity(for: fileURL)
+                    // A rollout is bound to its first session_meta identity.
+                    // Any later identity change makes the entire file
+                    // ambiguous; subsequent events may still be observed for
+                    // liveness, but can never receive Repo/Chat provenance.
+                    var canonicalIdentity = headIdentity
+                    var identityIsAmbiguous = false
                     var cursor = updatedCursors[path]
                     let size = UInt64(fileSize)
                     if cursor == nil {
@@ -694,9 +807,24 @@ final class CodexLocalUsageObserver {
                             if let sessionThreadID = CodexLocalUsageArtifactParser.parseSessionThreadID(lineData) {
                                 threadID = sessionThreadID
                                 cursor?.threadID = sessionThreadID
+                                if let observedIdentity = CodexLocalUsageArtifactParser.parseSessionIdentity(lineData) {
+                                    if let canonicalIdentity {
+                                        if observedIdentity != canonicalIdentity {
+                                            identityIsAmbiguous = true
+                                        }
+                                    } else {
+                                        canonicalIdentity = observedIdentity
+                                    }
+                                }
                             }
                             if let record = CodexLocalUsageArtifactParser.parseLine(lineData) {
                                 events.append((root.profileID, record))
+                                let identity = CodexLocalExecutionIdentityReconciliation.resolve(
+                                    sessionIdentity: canonicalIdentity,
+                                    eventThreadID: record.threadID,
+                                    sourceIsAmbiguous: identityIsAmbiguous
+                                )
+                                let provenIdentity = identity.sessionIdentity
                                 turnActivities.append(CodexLocalTurnActivityEvent(
                                     profileID: root.profileID,
                                     physicalRootURL: root.codexHomeURL,
@@ -708,24 +836,30 @@ final class CodexLocalUsageObserver {
                                     durationSeconds: nil,
                                     turnTokenTotal: record.turnTokenTotal,
                                     observedAt: record.observedAt,
-                                    programName: CodexLocalSessionIndex.threadName(for: record.threadID, in: root.codexHomeURL),
-                                    sessionIdentity: headIdentity
+                                    programName: provenIdentity == nil ? nil : CodexLocalSessionIndex.threadName(for: record.threadID, in: root.codexHomeURL),
+                                    sessionIdentity: provenIdentity
                                 ))
                             }
                             if let activity = CodexLocalUsageArtifactParser.parseTurnActivity(lineData, threadID: threadID) {
-                                let programName: String?
-                                switch activity.kind {
-                                case .completed, .failed, .interrupted:
-                                    programName = CodexLocalSessionIndex.threadName(
-                                        for: activity.threadID,
-                                        in: root.codexHomeURL
-                                    )
-                                case .started, .tokenUpdated:
-                                    programName = CodexLocalSessionIndex.threadName(
-                                        for: activity.threadID,
-                                        in: root.codexHomeURL
-                                    )
+                                let identity = CodexLocalExecutionIdentityReconciliation.resolve(
+                                    sessionIdentity: canonicalIdentity,
+                                    eventThreadID: activity.threadID,
+                                    sourceIsAmbiguous: identityIsAmbiguous
+                                )
+                                // An unproven terminal record must not remove
+                                // or overwrite an execution belonging to a
+                                // different Chat. Started/token activity may
+                                // remain as an explicitly unnamed observation;
+                                // terminal state is authority-sensitive and is
+                                // dropped until identity is proven.
+                                guard identity.acceptsActivity(kind: activity.kind) else {
+                                    continue
                                 }
+                                let provenIdentity = identity.sessionIdentity
+                                let programName = provenIdentity == nil ? nil : CodexLocalSessionIndex.threadName(
+                                    for: activity.threadID,
+                                    in: root.codexHomeURL
+                                )
                                 turnActivities.append(CodexLocalTurnActivityEvent(
                                     profileID: root.profileID,
                                     physicalRootURL: root.codexHomeURL,
@@ -738,13 +872,18 @@ final class CodexLocalUsageObserver {
                                     turnTokenTotal: nil,
                                     observedAt: activity.observedAt,
                                     programName: programName,
-                                    sessionIdentity: headIdentity
+                                    sessionIdentity: provenIdentity
                                 ))
                             }
                             if let completion = CodexLocalUsageArtifactParser.parseTurnCompletion(
                                 lineData,
                                 threadID: threadID
-                            ), !cursor!.completedTurnIDs.contains(completion.turnID) {
+                            ), CodexLocalExecutionIdentityReconciliation.resolve(
+                                sessionIdentity: canonicalIdentity,
+                                eventThreadID: completion.threadID,
+                                sourceIsAmbiguous: identityIsAmbiguous
+                            ).isProven,
+                               !cursor!.completedTurnIDs.contains(completion.turnID) {
                                 cursor!.completedTurnIDs.insert(completion.turnID)
                                 turnCompletions.append((root.profileID, completion))
                             }

@@ -294,7 +294,12 @@ enum CodexExecutionDurationHistoryScanner {
                     let bytes: [UInt8] = Array(data)
                     let rawLines = bytes.split(separator: UInt8(0x0A), omittingEmptySubsequences: true)
                     let lines: [Data] = rawLines.map { Data($0) }
-                    guard let identity = lines.lazy.compactMap(CodexLocalUsageArtifactParser.parseSessionIdentity).first else { continue }
+                    let sessionIdentities = lines.compactMap(CodexLocalUsageArtifactParser.parseSessionIdentity)
+                    guard let sessionThreadID = sessionIdentities.first?.threadID,
+                          let identity = CodexLocalExecutionIdentityReconciliation.resolve(
+                              sessionIdentities: sessionIdentities,
+                              eventThreadID: sessionThreadID
+                          ).sessionIdentity else { continue }
                     let chatName = CodexLocalSessionIndex.threadName(for: identity.threadID, in: root.codexHomeURL)
                     var startedAtByTurn: [String: Date] = [:]
 
@@ -302,7 +307,10 @@ enum CodexExecutionDurationHistoryScanner {
                         guard let activity = CodexLocalUsageArtifactParser.parseTurnActivity(
                             line,
                             threadID: identity.threadID
-                        ) else { continue }
+                        ), CodexLocalExecutionIdentityReconciliation.resolve(
+                            sessionIdentity: identity,
+                            eventThreadID: activity.threadID
+                        ).isProven else { continue }
                         switch activity.kind {
                         case .started:
                             if let startedAt = activity.startedAt {

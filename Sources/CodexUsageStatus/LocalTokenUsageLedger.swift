@@ -387,12 +387,13 @@ enum LocalTokenUsageLedgerPresentation {
             }
     }
 
-    /// The hero has a bounded visual budget. Values remain fully represented
-    /// in the ledger; only the compact display changes once it exceeds the
-    /// nine-digit budget.
+    /// The hero has a bounded visual budget of ten numeric digits. Values
+    /// within that budget stay fully numeric so every digit can participate in
+    /// the Token Reel animation. Values remain fully represented in the
+    /// ledger; only the compact display changes after the ten-digit budget.
     static func heroTokenCount(_ value: Int64?) -> String {
         guard let value else { return "—" }
-        guard value <= 1_000_000_000 else { return "10億+" }
+        guard value <= 9_999_999_999 else { return "9,999,999,999+" }
         return TokenActivityPresentation.tokenCount(value)
     }
 

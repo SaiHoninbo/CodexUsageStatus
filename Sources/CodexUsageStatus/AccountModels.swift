@@ -147,6 +147,25 @@ struct CodexExecutionKey: Hashable, Equatable, Sendable {
     let normalizedPhysicalRootPath: String
     let threadID: String
     let turnID: String
+    /// Stable, non-display repository identity carried from the rollout
+    /// session metadata. The physical root remains authoritative for
+    /// worktree isolation; this digest prevents same-named repositories from
+    /// being treated as the same identity when the root is shared.
+    let repositoryIdentityDigest: String?
+
+    init(
+        profileID: UUID?,
+        normalizedPhysicalRootPath: String,
+        threadID: String,
+        turnID: String,
+        repositoryIdentityDigest: String? = nil
+    ) {
+        self.profileID = profileID
+        self.normalizedPhysicalRootPath = normalizedPhysicalRootPath
+        self.threadID = threadID
+        self.turnID = turnID
+        self.repositoryIdentityDigest = repositoryIdentityDigest
+    }
 }
 
 struct CodexExecutionProjection: Identifiable, Equatable, Sendable {
@@ -174,7 +193,8 @@ enum CodexExecutionProjectionPolicy {
             profileID: event.profileID,
             normalizedPhysicalRootPath: normalizedRootPath(event.physicalRootURL),
             threadID: event.threadID,
-            turnID: event.turnID
+            turnID: event.turnID,
+            repositoryIdentityDigest: event.sessionIdentity?.repositoryIdentityDigest
         )
     }
 
