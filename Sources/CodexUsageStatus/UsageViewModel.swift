@@ -79,6 +79,7 @@ final class UsageViewModel: ObservableObject {
     @Published private(set) var notifyOnTurnInterrupted: Bool
     @Published private(set) var notifyOnLongRunningTurn: Bool
     @Published private(set) var longRunningThresholdMinutes: Int
+    @Published private(set) var notifyOnPlanProgress: Bool
     @Published private(set) var showTurnContentInNotifications: Bool
     @Published private(set) var notifyOnAccountSwitch: Bool
     @Published private(set) var floatingHUDEnabled: Bool
@@ -161,6 +162,7 @@ final class UsageViewModel: ObservableObject {
         static let turnInterrupted = "turn.notifications.interrupted"
         static let turnLongRunning = "turn.notifications.longRunning"
         static let turnLongRunningMinutes = "turn.notifications.longRunningMinutes"
+        static let turnPlanProgress = "turn.notifications.planProgress"
         static let turnContent = "turn.notifications.content"
         static let accountSwitch = "account.notifications.switch"
         static let activeProfile = "accounts.activeProfile"
@@ -203,6 +205,9 @@ final class UsageViewModel: ObservableObject {
         notifyOnTurnInterrupted = defaults.object(forKey: PreferenceKey.turnInterrupted) as? Bool ?? true
         notifyOnLongRunningTurn = defaults.object(forKey: PreferenceKey.turnLongRunning) as? Bool ?? false
         longRunningThresholdMinutes = max(1, defaults.object(forKey: PreferenceKey.turnLongRunningMinutes) as? Int ?? 10)
+        // This new surface is opt-in for existing installations so an
+        // upgrade cannot unexpectedly add up to three banners per Turn.
+        notifyOnPlanProgress = defaults.object(forKey: PreferenceKey.turnPlanProgress) as? Bool ?? false
         // Turn content is intentionally opt-in: prompts and code can contain secrets.
         showTurnContentInNotifications = defaults.object(forKey: PreferenceKey.turnContent) as? Bool ?? false
         notifyOnAccountSwitch = defaults.object(forKey: PreferenceKey.accountSwitch) as? Bool ?? false
@@ -720,6 +725,7 @@ final class UsageViewModel: ObservableObject {
     func setTurnInterruptedNotifications(_ enabled: Bool) { notifyOnTurnInterrupted = enabled; defaults.set(enabled, forKey: PreferenceKey.turnInterrupted) }
     func setLongRunningTurnNotifications(_ enabled: Bool) { notifyOnLongRunningTurn = enabled; defaults.set(enabled, forKey: PreferenceKey.turnLongRunning) }
     func setLongRunningThresholdMinutes(_ minutes: Int) { longRunningThresholdMinutes = max(1, min(240, minutes)); defaults.set(longRunningThresholdMinutes, forKey: PreferenceKey.turnLongRunningMinutes) }
+    func setPlanProgressNotifications(_ enabled: Bool) { notifyOnPlanProgress = enabled; defaults.set(enabled, forKey: PreferenceKey.turnPlanProgress) }
     func setTurnContentInNotifications(_ enabled: Bool) { showTurnContentInNotifications = enabled; defaults.set(enabled, forKey: PreferenceKey.turnContent) }
     func setAccountSwitchNotifications(_ enabled: Bool) { notifyOnAccountSwitch = enabled; defaults.set(enabled, forKey: PreferenceKey.accountSwitch) }
     func setFloatingHUDEnabled(_ enabled: Bool) { floatingHUDEnabled = enabled; defaults.set(enabled, forKey: PreferenceKey.floatingHUDEnabled) }
@@ -1451,6 +1457,21 @@ final class UsageViewModel: ObservableObject {
     /// second activity timeline.
     private func handleTurnPlanUpdated(profileID: UUID?, envelope: TurnPlanEnvelope) {
         applyPlanToActiveExecution(profileID: profileID, envelope: envelope)
+        let decodedSteps = TurnPlanCodec.decodeSteps(from: envelope)
+
+        // Active executions are intentionally broader than the selected
+        // account's Turn card. Emit a bounded notification for any matching
+        // Repo/Workspace/Chat projection before applying the selected-Turn
+        // admission gate below.
+        if let steps = decodedSteps, !steps.isEmpty,
+           let execution = activeExecutions.first(where: {
+               $0.key.profileID == profileID &&
+               $0.key.turnID == envelope.turnID &&
+               (envelope.optionalThreadID == nil || $0.key.threadID == envelope.optionalThreadID)
+           }) {
+            evaluatePlanProgressNotification(execution)
+        }
+
         // Stage one establishes identity before touching step payloads. This
         // prevents malformed plans from an unrelated profile/thread/Turn from
         // affecting the current plan or consuming payload semantics.
@@ -1472,7 +1493,7 @@ final class UsageViewModel: ObservableObject {
             activeThreadID: activeTurn.threadID,
             activeTurnID: activeTurn.turnID,
             envelope: envelope,
-            steps: TurnPlanCodec.decodeSteps(from: envelope)
+            steps: decodedSteps
         )
         switch decision {
         case .ignore:
@@ -1487,6 +1508,7 @@ final class UsageViewModel: ObservableObject {
             // should not churn the HUD/Popover projections.
             if activeTurnPlan != snapshot { activeTurnPlan = snapshot }
         }
+
     }
 
     private func handleLocalTurnCompletion(
@@ -1856,7 +1878,24 @@ final class UsageViewModel: ObservableObject {
                 notifyOnLongRunning: notifyOnLongRunningTurn,
                 longRunningThresholdMinutes: longRunningThresholdMinutes,
                 showContentInNotifications: contentEnabled ?? (showTurnContentInNotifications && turnContentNotificationSupported),
-                soundEnabled: notificationSoundEnabled
+                soundEnabled: notificationSoundEnabled,
+                notifyOnPlanProgress: false
+            )
+        )
+    }
+
+    private func evaluatePlanProgressNotification(_ execution: CodexExecutionProjection) {
+        turnNotificationService.evaluatePlanProgress(
+            execution: execution,
+            preferences: TurnNotificationPreferences(
+                notifyOnSuccess: false,
+                notifyOnFailure: false,
+                notifyOnInterrupted: false,
+                notifyOnLongRunning: false,
+                longRunningThresholdMinutes: longRunningThresholdMinutes,
+                showContentInNotifications: false,
+                soundEnabled: notificationSoundEnabled,
+                notifyOnPlanProgress: notificationsEnabled && notifyOnPlanProgress
             )
         )
     }

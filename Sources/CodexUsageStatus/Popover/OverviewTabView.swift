@@ -61,7 +61,7 @@ extension UsagePopoverView {
                             Text(group.title)
                                 .font(.caption.weight(.semibold))
                             if group.executions.count > 1 {
-                                Text("(group.executions.count)")
+                                Text("(\(group.executions.count))")
                                     .font(.caption2.monospacedDigit())
                                     .foregroundStyle(HUDColorPalette.tertiaryText)
                             }

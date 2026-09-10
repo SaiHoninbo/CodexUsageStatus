@@ -35,7 +35,7 @@ Codex Usage Status 是 macOS 選單列用量 HUD，用來監控本機 Codex App 
 5. 如果 macOS 阻擋啟動，開啟「系統設定 → 隱私權與安全性」，在安全性提示中選擇「仍要打開」。
 6. 啟動 Codex Usage Status；它會出現在選單列，也可以在 Codex 旁顯示浮動 HUD。
 
-公開發布的 artifact 使用維護者的 Apple Development identity 簽署，尚未經 Apple notarization；除非使用明確的 release signing mode，否則本機 `package` 建置仍使用 ad-hoc signing。因此第一次啟動可能需要右鍵「打開」。建議固定放在 `/Applications`，讓登入啟動註冊使用穩定的 App 路徑。
+正式發布 artifact 使用 GitHub Release 的正式簽章與公證流程；除非使用明確的 release signing mode，否則本機 `package` 建置仍使用 ad-hoc signing。建議固定放在 `/Applications`，讓登入啟動註冊使用穩定的 App 路徑。
 
 ## 權限
 
@@ -61,6 +61,7 @@ Codex Usage Status 是 macOS 選單列用量 HUD，用來監控本機 Codex App 
 - 「只貼上」與「貼上並送出」按鈕
 - HUD 任意位置按右鍵可開啟原生操作選單（重新整理、帳號範圍、更新頻率、剪貼簿、更新檢查與位置重設）
 - GitHub Releases 更新檢查
+- 可選的 Repo／Chat 計畫進度通知（25%、50%、75% 里程碑；只代表計畫比例，不含 ETA 或步驟文字）
 
 Popover 固定收斂為四個分頁：「概覽」顯示目前配額與快速操作；「歷史」顯示
 quota 與 Token Activity 趨勢；「帳號」負責完整 profile 管理與各帳號本機活動；
@@ -104,9 +105,9 @@ App 啟動時以及執行期間會定期檢查 GitHub 的 `latest release`。發
    `CodexUsageStatus.app.zip`，驗證 bundle、版本與 code signature，再關閉舊版、覆蓋並重新啟動新版。
    「查看 Release」仍保留為手動更新 fallback。
 
-App 不使用 Mac App Store 或 Sparkle appcast。只有固定的本 repository GitHub
-Release asset、相容 bundle identifier、更新版本與有效 code signature 才會被接受；
-非官方 URL、危險 archive path 或不相容 App 會拒絕更新。
+只有固定的本 repository GitHub Release asset、相容 bundle identifier、更新版本
+與有效 code signature 才會被接受；非官方 URL、危險 archive path 或不相容 App
+會拒絕更新。
 
 ### 維護者發布規則
 
@@ -118,6 +119,24 @@ Release asset、相容 bundle identifier、更新版本與有效 code signature 
 - 不包含 `._*`、`__MACOSX`、source、tests、auth、token 或 history 檔案
 
 每個正式 artifact 的 checksum 與正式簽章 identity 應記錄在 Release notes 或維護 evidence。只把 ZIP 提交到 `main` 並不會自動建立 App 內的 Release 更新。
+
+上傳 ZIP 前，必須驗證最後要發布的那一份 artifact。驗證器會 fail closed，
+只有在 archive 只包含預期 App、使用 `Developer ID Application` 簽章且有
+Team ID、已裝訂 notarization ticket，並通過 Gatekeeper 時才允許通過：
+
+```bash
+./script/validate_release_artifact.sh outputs/CodexUsageStatus.app.zip 2.4.83
+```
+
+取得 Apple 憑證後，可使用同一條有限流程提交公證、staple、重新打包並驗證。
+只提供既有 `notarytool` keychain profile 名稱，不要把 credential 寫入 Repo：
+
+```bash
+NOTARYTOOL_KEYCHAIN_PROFILE="release-profile" \
+  ./script/validate_release_artifact.sh --notarize outputs/CodexUsageStatus.app.zip 2.4.83
+```
+
+ZIP 必須先通過這個 validator，才能上傳 GitHub Release。
 
 ## 從原始碼建置
 
@@ -150,9 +169,10 @@ outputs/CodexUsageStatus.app.zip
 預設的 `package` mode 是本機打包便利流程，使用的 ad-hoc signature
 不代表正式公開 Release。正式公開 Release 必須使用既有的 release signing
 流程，設定 `CODEX_RELEASE_MODE=1` 與明確的
-`CODEX_RELEASE_SIGNING_IDENTITY`；在這個 mode 下腳本拒絕靜默退回
-ad-hoc signing。將產出的 ZIP 發布到 GitHub Release，仍是維護者另外明確
-執行的動作。
+`CODEX_RELEASE_SIGNING_IDENTITY`。該身分必須解析為
+`Developer ID Application` 憑證；無效身分與 ad-hoc signing 在這個 mode 都會被拒絕。將產出的 ZIP 發布到
+GitHub Release，仍是維護者另外明確執行的動作。GitHub Releases 是唯一發布
+通道。
 
 若要產生一次性的 runtime 或 UI 驗證版本，請使用 `candidate` mode：
 

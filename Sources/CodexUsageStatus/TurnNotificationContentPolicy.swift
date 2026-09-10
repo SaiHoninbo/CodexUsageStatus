@@ -69,6 +69,44 @@ struct TurnNotificationContentPolicy {
         return parts.joined(separator: " · ")
     }
 
+    /// Progress notifications expose only the provider's current plan ratio
+    /// and factual elapsed time. They deliberately omit the current step,
+    /// prompt, explanation, repository URL, and any ETA.
+    static func planProgressTitle(
+        repositoryDisplayName: String?,
+        workspaceDisplayName: String?,
+        percentage: Int
+    ) -> String {
+        let scope = normalizedProgramName(repositoryDisplayName ?? workspaceDisplayName) ?? "Codex"
+        return "\(scope) · 計畫進度 \(max(0, min(100, percentage)))%"
+    }
+
+    static func planProgressSubtitle(programName: String?) -> String? {
+        normalizedProgramName(programName)
+    }
+
+    static func planProgressBody(
+        completedCount: Int,
+        totalCount: Int,
+        elapsedSeconds: Int64?
+    ) -> String {
+        var parts = ["\(max(0, completedCount)) / \(max(0, totalCount)) 步完成"]
+        if let elapsedSeconds {
+            parts.append("已執行 \(elapsedDescription(elapsedSeconds))")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    static func elapsedDescription(_ seconds: Int64) -> String {
+        let clamped = max(0, seconds)
+        let hours = clamped / 3_600
+        let minutes = (clamped % 3_600) / 60
+        let remainingSeconds = clamped % 60
+        if hours > 0 { return "\(hours) 小時 \(minutes) 分" }
+        if minutes > 0 { return "\(minutes) 分 \(remainingSeconds) 秒" }
+        return "\(remainingSeconds) 秒"
+    }
+
     static func normalizedProgramName(_ raw: String?) -> String? {
         guard let raw else { return nil }
         let normalized = raw

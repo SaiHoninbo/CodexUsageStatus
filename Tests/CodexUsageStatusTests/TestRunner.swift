@@ -98,6 +98,7 @@ struct CodexUsageStatusTests {
             ("turn plan rejection and terminal semantics", testTurnPlanRejectionAndTerminalSemantics),
             ("turn plan admission identity and invalidation", testTurnPlanAdmissionIdentityAndInvalidation),
             ("turn notification content policy", testTurnNotificationContentPolicy),
+            ("turn plan notification policy", testTurnPlanNotificationPolicy),
             ("execution projection identity and ordering", testExecutionProjectionIdentityAndOrdering),
             ("turn notification cadence policy", testTurnNotificationCadencePolicy),
             ("account profiles isolate email", testAccountProfilesIsolateEmail),
@@ -108,6 +109,8 @@ struct CodexUsageStatusTests {
             ("update version comparison", testUpdateVersionComparison),
             ("update state presentation", testUpdateStatePresentation),
             ("update authority and packaging policy", testUpdateAuthorityAndPackagingPolicy),
+            ("release signing identity guard", testReleaseSigningIdentityGuard),
+            ("release artifact validation", testReleaseArtifactValidation),
             ("accessibility permission policy", testAccessibilityPermissionPolicy),
             ("HUD context menu policy", testHUDContextMenuPolicy),
             ("usage popover tabs and app version", testUsagePopoverTabsAndAppVersion),
@@ -2710,6 +2713,78 @@ struct CodexUsageStatusTests {
         )
     }
 
+    private static func testTurnPlanNotificationPolicy() throws {
+        let first = TurnPlanNotificationPolicy.nextMilestone(
+            previousPercentage: nil,
+            currentPercentage: 60,
+            consumed: []
+        )
+        try expect(first?.milestone == 50, "an initial jump crosses lower milestones and notifies only the newest one")
+        try expect(first?.consumed == Set([25, 50]), "a jump marks every crossed lower milestone consumed")
+
+        let next = TurnPlanNotificationPolicy.nextMilestone(
+            previousPercentage: 60,
+            currentPercentage: 80,
+            consumed: first?.consumed ?? []
+        )
+        try expect(next?.milestone == 75, "the next forward crossing emits the 75 percent milestone")
+        try expect(next?.consumed == Set([25, 50, 75]), "each Turn has at most the three bounded milestones")
+
+        let regression = TurnPlanNotificationPolicy.nextMilestone(
+            previousPercentage: 80,
+            currentPercentage: 60,
+            consumed: Set([25, 50, 75])
+        )
+        try expect(regression == nil, "plan percentage regression never replays an old milestone")
+
+        try expect(
+            TurnNotificationContentPolicy.planProgressTitle(
+                repositoryDisplayName: "UsageStatus",
+                workspaceDisplayName: nil,
+                percentage: 60
+            ) == "UsageStatus · 計畫進度 60%",
+            "progress notification title is scoped to the repository and uses plan wording"
+        )
+        try expect(
+            TurnNotificationContentPolicy.planProgressBody(completedCount: 3, totalCount: 5, elapsedSeconds: 372) == "3 / 5 步完成 · 已執行 6 分 12 秒",
+            "progress notification body contains factual plan counts and elapsed time"
+        )
+        try expect(
+            TurnNotificationContentPolicy.planProgressSubtitle(programName: " Chat A ") == "Chat A",
+            "progress notification subtitle uses the safe Chat name"
+        )
+
+        let profile = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")
+        let keyA = TurnPlanNotificationPolicy.dedupeKey(
+            profileID: profile,
+            physicalRootPath: "/tmp/repo-a",
+            threadID: "chat-a",
+            turnID: "turn-a",
+            milestone: 50
+        )
+        let keyB = TurnPlanNotificationPolicy.dedupeKey(
+            profileID: profile,
+            physicalRootPath: "/tmp/repo-b",
+            threadID: "chat-b",
+            turnID: "turn-b",
+            milestone: 50
+        )
+        try expect(keyA != keyB, "different Repo/Chat/Turn executions have isolated milestone keys")
+        var persistedKeys = Set([keyA])
+        try expect(persistedKeys.contains(keyA), "existing notification key store can represent a sent milestone")
+        try expect(!persistedKeys.contains(keyB), "one execution's milestone cannot suppress another execution")
+        persistedKeys.insert(keyB)
+        try expect(persistedKeys.contains(keyB), "a second execution can independently consume the same milestone")
+        try expect(
+            TurnPlanNotificationPolicy.nextMilestone(
+                previousPercentage: nil,
+                currentPercentage: 60,
+                consumed: Set([25, 50])
+            ) == nil,
+            "a restarted service with persisted crossed milestones does not replay them"
+        )
+    }
+
     private static func testAccountProfilesIsolateEmail() throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent("codex-profiles-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: base) }
@@ -3155,6 +3230,16 @@ struct CodexUsageStatusTests {
         return String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
     }
 
+    private static func runToolStatus(_ executable: String, _ arguments: [String]) throws -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]
+        try process.run()
+        process.waitUntilExit()
+        return process.terminationStatus
+    }
+
     private static func testHUDContextMenuPolicy() throws {
         let actions = HUDContextMenuPolicy.sections.flatMap { $0 }
         try expect(actions.contains(.refresh) && actions.contains(.showDetails), "status actions are present")
@@ -3598,6 +3683,36 @@ struct CodexUsageStatusTests {
             publishedAt: nil
         )
         try expect(AppUpdateReleasePolicy.assetURL(for: unsafe) == nil, "unsafe release tags cannot form an asset path")
+    }
+
+    private static func testReleaseSigningIdentityGuard() throws {
+        let scriptURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("script/validate_release_signing_identity.sh")
+        try expect(FileManager.default.isExecutableFile(atPath: scriptURL.path), "release identity guard is executable")
+
+        let developmentIdentity = "Apple Development: quare_lin@hotmail.com (769G67L772)"
+        let developmentStatus = try runToolStatus("/bin/bash", [scriptURL.path, developmentIdentity])
+        try expect(developmentStatus != 0, "Apple Development is rejected for public release mode")
+
+        let adhocStatus = try runToolStatus("/bin/bash", [scriptURL.path, "-"])
+        try expect(adhocStatus != 0, "ad-hoc identity is rejected for public release mode")
+    }
+
+    private static func testReleaseArtifactValidation() throws {
+        let validatorURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("script/validate_release_artifact.sh")
+        try expect(FileManager.default.isExecutableFile(atPath: validatorURL.path), "release artifact validator is executable")
+
+        let artifactURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("outputs/CodexUsageStatus.app.zip")
+        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, "2.4.83"])
+        try expect(adhocStatus != 0, "ad-hoc artifact is rejected as a publishable release")
+
+        let malformedStatus = try runToolStatus("/bin/bash", [validatorURL.path, "/dev/null"])
+        try expect(malformedStatus != 0, "malformed artifact is rejected")
+
+        let missingCredentialStatus = try runToolStatus("/bin/bash", [validatorURL.path, "--notarize", artifactURL.path, "2.4.83"])
+        try expect(missingCredentialStatus != 0, "notarization fails closed without external credentials")
     }
 
     private static func testAccessibilityPermissionPolicy() throws {

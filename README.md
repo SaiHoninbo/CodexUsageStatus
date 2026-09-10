@@ -31,7 +31,7 @@ Do not download the repository source archive for installation. The source archi
 5. If macOS blocks the app, open **System Settings → Privacy & Security**, scroll to the security message, and choose **Open Anyway**.
 6. Launch Codex Usage Status. It appears as a menu-bar item and can show the floating HUD beside Codex.
 
-Published release artifacts are signed with the maintainer's Apple Development identity and are not notarized with Apple; local `package` builds remain ad-hoc unless the explicit release-signing mode is used. The first-launch confirmation may therefore be expected. Keeping the app in `/Applications` also gives the login-item registration a stable path.
+Public release artifacts use the canonical GitHub Release signing and notarization path; local `package` builds remain ad-hoc unless the explicit release-signing mode is used. Keeping the app in `/Applications` also gives the login-item registration a stable path.
 
 ## Permissions
 
@@ -57,6 +57,7 @@ Notification permission is optional. Quota and token activity continue to work i
 - Clipboard-only and paste-and-submit controls
 - A native right-click HUD menu for refresh, account scope, sync cadence, clipboard actions, update checks, and HUD reset
 - Update checks for new GitHub Releases
+- Optional Repo/Chat plan-progress notifications at the 25%, 50%, and 75% milestones (plan ratio only; no ETA or step text)
 
 The popover is intentionally organized into four sections: **Overview** for
 current quota and quick actions, **History** for quota and Token Activity
@@ -104,11 +105,10 @@ running. When a newer version is available:
 1. The app shows a compact update state in the Overview and a detailed state in Settings, and may display one notification for that release.
 2. **下載並覆蓋** downloads the fixed `CodexUsageStatus.app.zip` asset from the verified official GitHub Release, validates the bundle and signature, replaces the running app, and relaunches the new version. **查看 Release** remains available as the manual fallback.
 
-The app does not use the Mac App Store or Sparkle appcast. Version discovery and
-installation accept only the fixed official repository and its
-`CodexUsageStatus.app.zip` asset; arbitrary release URLs, archive paths, bundle
-identifiers, versions, and invalid code signatures are rejected. GitHub Releases
-remains the only distribution and update authority.
+Version discovery and installation accept only the fixed official repository and
+its `CodexUsageStatus.app.zip` asset; arbitrary release URLs, archive paths,
+bundle identifiers, versions, and invalid code signatures are rejected. GitHub
+Releases remains the only distribution and update authority.
 
 ### Release requirements for maintainers
 
@@ -120,6 +120,26 @@ Maintainers should publish a GitHub Release with:
 - No `._*`, `__MACOSX`, source, test, auth, token, or history files
 
 Record the checksum and formal signing identity for each published artifact in the release notes or maintainer evidence. A commit or ZIP pushed to `main` alone does not create an in-app release update.
+
+Before uploading the ZIP, validate the exact publishable artifact. The validator
+fails closed unless the archive contains only the expected app, uses a
+`Developer ID Application` signature with a Team ID, has a stapled notarization
+ticket, and passes Gatekeeper:
+
+```bash
+./script/validate_release_artifact.sh outputs/CodexUsageStatus.app.zip 2.4.83
+```
+
+When Apple credentials are available, the same bounded path can submit, staple,
+repack, and validate the artifact. Supply only the name of an existing
+`notarytool` keychain profile; never commit credentials:
+
+```bash
+NOTARYTOOL_KEYCHAIN_PROFILE="release-profile" \
+  ./script/validate_release_artifact.sh --notarize outputs/CodexUsageStatus.app.zip 2.4.83
+```
+
+The ZIP must pass this validator before it is uploaded to a GitHub Release.
 
 ## Building from source
 
@@ -154,9 +174,11 @@ The default `package` mode is a local packaging convenience and its ad-hoc
 signature is not a formal public release. For a public release, maintainers
 must use the existing release-signing path by setting
 `CODEX_RELEASE_MODE=1` together with an explicit
-`CODEX_RELEASE_SIGNING_IDENTITY`; the script refuses to silently fall back to
-ad-hoc signing in that mode. Publishing the resulting ZIP to a GitHub Release
-is a separate explicit maintainer action.
+`CODEX_RELEASE_SIGNING_IDENTITY`. That identity must resolve to a
+`Developer ID Application` certificate; invalid identities and ad-hoc signing
+are rejected in that mode. Publishing the resulting ZIP to a GitHub Release is
+a separate explicit maintainer action. GitHub Releases is the only distribution
+channel.
 
 For disposable runtime or UI evidence, use the `candidate` mode instead:
 

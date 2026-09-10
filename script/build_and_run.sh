@@ -50,6 +50,16 @@ APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 ICONSET_DIR="$ROOT_DIR/Resources/AppIcon.iconset"
 ICON_FILE="$ROOT_DIR/Resources/AppIcon.icns"
+
+if [[ "${CODEX_RELEASE_MODE:-0}" == "1" ]]; then
+  RELEASE_SIGNING_IDENTITY="${CODEX_RELEASE_SIGNING_IDENTITY:-}"
+  if [[ -z "$RELEASE_SIGNING_IDENTITY" || "$RELEASE_SIGNING_IDENTITY" == "-" ]]; then
+    echo "release mode requires CODEX_RELEASE_SIGNING_IDENTITY; refusing ad-hoc signing" >&2
+    exit 3
+  fi
+  "$ROOT_DIR/script/validate_release_signing_identity.sh" "$RELEASE_SIGNING_IDENTITY" >/dev/null
+fi
+
 ## Release bundles must not carry developer-local source/object paths in
 ## embedded debug information. The shipped app is not a debug artifact, so
 ## omit DWARF entirely rather than publishing machine-specific paths.
@@ -85,10 +95,6 @@ fi
 
 if [[ "${CODEX_RELEASE_MODE:-0}" == "1" ]]; then
   RELEASE_SIGNING_IDENTITY="${CODEX_RELEASE_SIGNING_IDENTITY:-}"
-  if [[ -z "$RELEASE_SIGNING_IDENTITY" || "$RELEASE_SIGNING_IDENTITY" == "-" ]]; then
-    echo "release mode requires CODEX_RELEASE_SIGNING_IDENTITY; refusing ad-hoc signing" >&2
-    exit 3
-  fi
   SIGNING_IDENTITY="$RELEASE_SIGNING_IDENTITY"
 else
   SIGNING_IDENTITY="-"
@@ -112,6 +118,20 @@ sign_plain() {
     codesign --force --sign "$SIGNING_IDENTITY" "$target"
   else
     codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$target"
+  fi
+}
+
+validate_public_release_signature() {
+  local details team
+  details="$(codesign -dvvv "$APP_BUNDLE" 2>&1)"
+  if ! printf '%s\n' "$details" | grep -Fq 'Authority=Developer ID Application:'; then
+    echo "release mode produced a non-Developer ID Application signature" >&2
+    exit 3
+  fi
+  team="$(printf '%s\n' "$details" | sed -n 's/^TeamIdentifier=//p' | head -1)"
+  if [[ -z "$team" || "$team" == "not set" ]]; then
+    echo "release mode produced a bundle without a TeamIdentifier" >&2
+    exit 3
   fi
 }
 
@@ -156,6 +176,9 @@ xattr -cr "$APP_BUNDLE"
 
 sign_deep "$APP_BUNDLE"
 codesign --verify --deep --strict --verbose=4 "$APP_BUNDLE"
+if [[ "${CODEX_RELEASE_MODE:-0}" == "1" ]]; then
+  validate_public_release_signature
+fi
 
 if [[ "$SHOULD_PACKAGE" == 1 ]]; then
   mkdir -p "$OUTPUT_DIR"

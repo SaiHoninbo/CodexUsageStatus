@@ -192,6 +192,14 @@ extension UsagePopoverView {
                 get: { model.notifyOnLongRunningTurn },
                 set: { model.setLongRunningTurnNotifications($0) }
             ))
+            Toggle("計畫進度通知", isOn: Binding(
+                get: { model.notifyOnPlanProgress },
+                set: { model.setPlanProgressNotifications($0) }
+            ))
+            Text("只在目前計畫跨過 25%、50%、75% 時通知；每個 Turn 最多三次，不包含目前步驟或 ETA。")
+                .font(.caption2)
+                .foregroundStyle(HUDColorPalette.tertiaryText)
+                .fixedSize(horizontal: false, vertical: true)
             Toggle("通知顯示 Turn 內容", isOn: Binding(
                 get: { model.showTurnContentInNotifications },
                 set: { model.setTurnContentInNotifications($0) }

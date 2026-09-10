@@ -74,7 +74,11 @@ creates the repository's canonical `outputs/CodexUsageStatus.app.zip`, but its
 ad-hoc signature is only suitable for local packaging and testing. Before public
 distribution, maintainers must use the existing release-signing path with
 `CODEX_RELEASE_MODE=1` and an explicit `CODEX_RELEASE_SIGNING_IDENTITY`; that
-mode must not silently fall back to ad-hoc signing. Publishing the resulting ZIP
-to GitHub Releases is a separate explicit action. Formal release assets must be
-inspected before distribution and must not include source archives, tests,
-credentials, token activity, history, or AppleDouble files.
+mode resolves and validates a `Developer ID Application` identity and must not
+silently fall back to ad-hoc signing. Apple Development is local-testing only.
+Publishing the resulting ZIP to GitHub Releases is a separate explicit action.
+Formal release assets must be inspected before distribution and must not include
+source archives, tests, credentials, token activity, history, or AppleDouble
+files. Notarization/stapling remains an external public-release gate when the
+required Apple credentials and service are available; it does not change the
+GitHub-only distribution channel.
