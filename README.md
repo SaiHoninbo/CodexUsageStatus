@@ -131,7 +131,7 @@ code signature, has the expected bundle identifier and semantic version, and
 passes strict bundle verification:
 
 ```bash
-./script/validate_release_artifact.sh outputs/CodexUsageStatus.app.zip 2.4.89
+./script/validate_release_artifact.sh outputs/CodexUsageStatus.app.zip 2.4.90
 ```
 
 The ZIP must pass this validator before it is uploaded to a GitHub Release.

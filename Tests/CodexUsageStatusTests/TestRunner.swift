@@ -101,6 +101,7 @@ struct CodexUsageStatusTests {
             ("turn notification content policy", testTurnNotificationContentPolicy),
             ("turn plan notification policy", testTurnPlanNotificationPolicy),
             ("execution projection identity and ordering", testExecutionProjectionIdentityAndOrdering),
+            ("execution display truthfulness policy", testExecutionDisplayTruthfulnessPolicy),
             ("observer execution estimation", testObserverExecutionEstimation),
             ("bounded duration history scan", testBoundedDurationHistoryScan),
             ("turn notification cadence policy", testTurnNotificationCadencePolicy),
@@ -2736,6 +2737,72 @@ struct CodexUsageStatusTests {
         try expect(unproven.groupName == "工作區身份未證明", "unproven scope is presented explicitly instead of as an unnamed workspace")
     }
 
+    private static func testExecutionDisplayTruthfulnessPolicy() throws {
+        let startedAt = Date(timeIntervalSince1970: 100)
+        try expect(
+            CodexExecutionProjectionPolicy.elapsedSeconds(
+                startedAt: startedAt,
+                now: Date(timeIntervalSince1970: 125)
+            ) == 25,
+            "execution elapsed time follows the supplied presentation clock"
+        )
+        try expect(
+            CodexExecutionProjectionPolicy.elapsedSeconds(
+                startedAt: startedAt,
+                now: Date(timeIntervalSince1970: 119)
+            ) == 19,
+            "execution elapsed time is not quantized to the ViewModel cadence"
+        )
+        try expect(
+            CodexExecutionProjectionPolicy.elapsedSeconds(
+                startedAt: startedAt,
+                now: Date(timeIntervalSince1970: 90)
+            ) == 0,
+            "execution elapsed time clamps a clock before start"
+        )
+
+        try expect(
+            CodexExecutionProjectionPolicy.updatedChatName(
+                current: "舊名稱",
+                incoming: "新名稱",
+                identityProven: true
+            ) == "新名稱",
+            "a proven identity accepts a later non-empty Chat rename"
+        )
+        try expect(
+            CodexExecutionProjectionPolicy.updatedChatName(
+                current: "舊名稱",
+                incoming: nil,
+                identityProven: true
+            ) == "舊名稱",
+            "nil Chat name preserves the current name"
+        )
+        try expect(
+            CodexExecutionProjectionPolicy.updatedChatName(
+                current: "舊名稱",
+                incoming: " \n\t ",
+                identityProven: true
+            ) == "舊名稱",
+            "an empty Chat name preserves the current name"
+        )
+        try expect(
+            CodexExecutionProjectionPolicy.updatedChatName(
+                current: "舊名稱",
+                incoming: "新名稱",
+                identityProven: false
+            ) == "舊名稱",
+            "an unproven identity cannot overwrite a Chat name"
+        )
+        try expect(
+            CodexExecutionProjectionPolicy.updatedChatName(
+                current: nil,
+                incoming: "  新  名稱 \n",
+                identityProven: true
+            ) == "新 名稱",
+            "a proven Chat name is normalized before first display"
+        )
+    }
+
     private static func testObserverExecutionEstimation() throws {
         let root = URL(fileURLWithPath: "/tmp/estimation-repo")
         let started = Date(timeIntervalSince1970: 1_000)
@@ -2792,7 +2859,7 @@ struct CodexUsageStatusTests {
         try expect((estimate?.lowerProgressPercent ?? 100) <= (estimate?.upperProgressPercent ?? 0), "progress range is ordered")
         try expect((estimate?.upperProgressPercent ?? 100) < 100, "active estimate never reaches 100%")
         try expect((estimate?.lowerRemainingSeconds ?? 0) <= (estimate?.upperRemainingSeconds ?? -1), "remaining range is ordered")
-        try expect(estimate?.progressText.contains("推估進度") == true, "estimate progress text uses estimate wording")
+        try expect(estimate?.progressText.contains("本機耗時推估") == true, "estimate progress text uses local duration estimate wording")
         try expect(estimate?.remainingText.contains("預估剩餘") == true, "estimate remaining text uses estimate wording")
         try expect(estimate?.confidenceText == "信心：高", "estimate confidence text is localized and explicit")
 
@@ -4097,7 +4164,7 @@ struct CodexUsageStatusTests {
 
         let artifactURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("outputs/CodexUsageStatus.app.zip")
-        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, "2.4.89"])
+        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, "2.4.90"])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted as the canonical GitHub release")
 
         let malformedStatus = try runToolStatus("/bin/bash", [validatorURL.path, "/dev/null"])

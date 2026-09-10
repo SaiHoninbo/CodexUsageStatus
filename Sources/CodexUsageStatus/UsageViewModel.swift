@@ -1341,7 +1341,11 @@ final class UsageViewModel: ObservableObject {
             guard let index = activeExecutions.firstIndex(where: { $0.key == key }) else { return }
             activeExecutions[index].tokenTotal = event.turnTokenTotal ?? activeExecutions[index].tokenTotal
             activeExecutions[index].lastObservedAt = event.observedAt
-            if activeExecutions[index].chatName == nil { activeExecutions[index].chatName = event.programName }
+            activeExecutions[index].chatName = CodexExecutionProjectionPolicy.updatedChatName(
+                current: activeExecutions[index].chatName,
+                incoming: event.programName,
+                identityProven: event.sessionIdentity != nil
+            )
             if let identity = event.sessionIdentity {
                 activeExecutions[index].repositoryDisplayName = identity.repositoryDisplayName ?? activeExecutions[index].repositoryDisplayName
                 activeExecutions[index].workspaceDisplayName = identity.workspaceDisplayName ?? activeExecutions[index].workspaceDisplayName
@@ -1353,12 +1357,16 @@ final class UsageViewModel: ObservableObject {
     }
 
     /// Returns a bounded, non-authoritative estimate for an active execution.
-    /// The Overview already advances `currentDate` on its minute display
-    /// cadence, so this adds no timer or polling subsystem.
+    /// The default overload retains the ViewModel clock for non-view callers;
+    /// the execution row supplies its own local TimelineView clock below.
     func estimatedExecution(for execution: CodexExecutionProjection) -> CodexExecutionEstimate? {
+        estimatedExecution(for: execution, now: currentDate)
+    }
+
+    func estimatedExecution(for execution: CodexExecutionProjection, now: Date) -> CodexExecutionEstimate? {
         CodexExecutionEstimationPolicy.estimate(
             for: execution,
-            now: currentDate,
+            now: now,
             samples: completedDurationSamples
         )
     }

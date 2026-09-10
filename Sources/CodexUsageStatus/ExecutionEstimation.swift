@@ -85,9 +85,9 @@ struct CodexExecutionEstimate: Equatable, Sendable {
 
     var progressText: String {
         if lowerProgressPercent == upperProgressPercent {
-            return "推估進度 \(lowerProgressPercent)%"
+            return "本機耗時推估 \(lowerProgressPercent)%"
         }
-        return "推估進度 \(lowerProgressPercent)–\(upperProgressPercent)%"
+        return "本機耗時推估 \(lowerProgressPercent)–\(upperProgressPercent)%"
     }
 
     var remainingText: String {

@@ -121,6 +121,13 @@ extension UsagePopoverView {
 
     @ViewBuilder
     private func executionRow(_ execution: CodexExecutionProjection) -> some View {
+        TimelineView(.periodic(from: .now, by: 1)) { timeline in
+            executionRowContent(execution, now: timeline.date)
+        }
+    }
+
+    @ViewBuilder
+    private func executionRowContent(_ execution: CodexExecutionProjection, now: Date) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Image(systemName: "bubble.left.and.bubble.right")
@@ -162,7 +169,7 @@ extension UsagePopoverView {
                     .font(.caption2)
                     .foregroundStyle(HUDColorPalette.secondaryText)
             }
-            if let estimate = model.estimatedExecution(for: execution) {
+            if let estimate = model.estimatedExecution(for: execution, now: now) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(estimate.progressText)
                         .font(.caption2.weight(.semibold).monospacedDigit())
@@ -176,13 +183,13 @@ extension UsagePopoverView {
                 }
             } else {
                 Text(model.executionEstimationHistoryReady
-                    ? "推估進度：估算建立中 · 資料不足"
-                    : "推估進度：估算建立中")
+                    ? "本機耗時推估：估算建立中 · 資料不足"
+                    : "本機耗時推估：估算建立中")
                     .font(.caption2)
                     .foregroundStyle(HUDColorPalette.tertiaryText)
             }
             HStack(spacing: 8) {
-                Text(durationText(max(0, Int64(model.currentDate.timeIntervalSince(execution.startedAt)))))
+                Text(durationText(CodexExecutionProjectionPolicy.elapsedSeconds(startedAt: execution.startedAt, now: now)))
                 if let tokens = execution.tokenTotal {
                     Text("\(TokenActivityPresentation.tokenCount(tokens)) token")
                 }
@@ -193,7 +200,7 @@ extension UsagePopoverView {
         .padding(.leading, 8)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(execution.chatName ?? "Chat 名稱未取得")，執行中")
-        .accessibilityValue(model.estimatedExecution(for: execution)?.progressText ?? "推估進度資料不足")
+        .accessibilityValue(model.estimatedExecution(for: execution, now: now)?.progressText ?? "本機耗時推估資料不足")
     }
 
     @ViewBuilder

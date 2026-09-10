@@ -203,6 +203,33 @@ enum CodexExecutionProjectionPolicy {
         url.standardizedFileURL.resolvingSymlinksInPath().path
     }
 
+    /// Returns a safe, identity-bound Chat name update for an observed
+    /// execution. A later metadata event may carry a renamed thread, but an
+    /// unproven identity or an empty name must never overwrite what is
+    /// already rendered.
+    static func updatedChatName(
+        current: String?,
+        incoming: String?,
+        identityProven: Bool
+    ) -> String? {
+        guard identityProven, let incoming else { return current }
+        let normalized = incoming
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return current }
+        return normalized
+    }
+
+    /// Computes elapsed execution time from the clock supplied by the
+    /// presentation layer. Keeping this pure lets the compact execution row
+    /// use a local TimelineView without coupling it to the ViewModel's slower
+    /// display cadence.
+    static func elapsedSeconds(startedAt: Date, now: Date) -> Int64 {
+        max(0, Int64(now.timeIntervalSince(startedAt)))
+    }
+
     static func key(for event: CodexLocalTurnActivityEvent) -> CodexExecutionKey {
         CodexExecutionKey(
             profileID: event.profileID,
