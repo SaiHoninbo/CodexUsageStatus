@@ -317,7 +317,10 @@ struct HUDTokenActivitySummaryView: View, Equatable {
     }
 
     private func lifetimeHero(_ metric: TokenActivityMetric, columnWidth: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: max(2, 3 * scaleFactor)) {
+        // The Hero content is a single centered value in both the static and
+        // animated paths. Center the stack itself; centering only the outer
+        // frame leaves the fixed-width static odometer leading-aligned.
+        VStack(alignment: .center, spacing: max(2, 3 * scaleFactor)) {
             if let feedback {
                 HUDTokenOdometerView(
                     feedback: feedback,

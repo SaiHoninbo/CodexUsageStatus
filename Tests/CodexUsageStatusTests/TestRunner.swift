@@ -4097,7 +4097,7 @@ struct CodexUsageStatusTests {
 
         let artifactURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("outputs/CodexUsageStatus.app.zip")
-        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, "2.4.88"])
+        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, "2.4.89"])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted as the canonical GitHub release")
 
         let malformedStatus = try runToolStatus("/bin/bash", [validatorURL.path, "/dev/null"])

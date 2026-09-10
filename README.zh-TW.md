@@ -126,7 +126,7 @@ App 啟動時以及執行期間會定期檢查 GitHub 的 `latest release`。發
 與 semantic version 正確，並通過 strict bundle verification 時才允許通過：
 
 ```bash
-./script/validate_release_artifact.sh outputs/CodexUsageStatus.app.zip 2.4.88
+./script/validate_release_artifact.sh outputs/CodexUsageStatus.app.zip 2.4.89
 ```
 
 ZIP 必須先通過這個 validator，才能上傳 GitHub Release。
