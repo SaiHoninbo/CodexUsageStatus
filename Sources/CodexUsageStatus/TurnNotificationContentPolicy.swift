@@ -18,7 +18,15 @@ enum TurnNotificationCadencePolicy {
 struct TurnNotificationContentPolicy {
     static let maximumProgramNameLength = 96
 
-    static func title(state: TurnActivityState, programName: String?) -> String {
+    static func title(state: TurnActivityState, programName: String?, repositoryDisplayName: String? = nil, workspaceDisplayName: String? = nil) -> String {
+        if let scope = normalizedProgramName(repositoryDisplayName ?? workspaceDisplayName) {
+            switch state {
+            case .completed: return "完成：\(scope)"
+            case .failed: return "失敗：\(scope)"
+            case .interrupted: return "中斷：\(scope)"
+            default: break
+            }
+        }
         guard let programName = normalizedProgramName(programName) else {
             return "Codex Turn \(state.displayName)"
         }
@@ -28,6 +36,11 @@ struct TurnNotificationContentPolicy {
         case .interrupted: return "程序中斷：\(programName)"
         default: return "Codex Turn \(state.displayName)"
         }
+    }
+
+    static func subtitle(repositoryDisplayName: String?, workspaceDisplayName: String?, programName: String?) -> String? {
+        guard repositoryDisplayName != nil || workspaceDisplayName != nil else { return nil }
+        return normalizedProgramName(programName)
     }
 
     static func body(

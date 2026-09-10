@@ -49,6 +49,26 @@ struct CodexLocalTurnActivityEvent: Equatable, Sendable {
     /// events. It is never copied into the local ledger or persisted by this
     /// observer.
     var programName: String? = nil
+    /// Safe, metadata-only session identity derived from the rollout head.
+    /// Raw paths and repository URLs are intentionally never exposed here.
+    var sessionIdentity: CodexLocalSessionIdentity? = nil
+}
+
+enum CodexLocalSessionIdentityKind: String, Equatable, Sendable {
+    case repository
+    case workspace
+    case unknown
+}
+
+/// Ephemeral identity for an observed Codex session.  Only display-safe
+/// components are retained; full cwd and origin URL never leave the parser.
+struct CodexLocalSessionIdentity: Equatable, Sendable {
+    let threadID: String
+    let repositoryDisplayName: String?
+    let workspaceDisplayName: String?
+    let kind: CodexLocalSessionIdentityKind
+
+    var displayName: String? { repositoryDisplayName ?? workspaceDisplayName }
 }
 
 struct CodexLocalTurnObservationCapabilities: Equatable, Sendable {
@@ -132,6 +152,26 @@ enum CodexLocalUsageArtifactParser {
 
     private struct SessionMetaPayload: Decodable {
         let id: String?
+        let cwd: String?
+        let git: GitMetadata?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case cwd
+            case git
+        }
+    }
+
+    private struct GitMetadata: Decodable {
+        let branch: String?
+        let commitHash: String?
+        let repositoryURL: String?
+
+        enum CodingKeys: String, CodingKey {
+            case branch
+            case commitHash = "commit_hash"
+            case repositoryURL = "repository_url"
+        }
     }
 
     private struct SessionMetaEnvelope: Decodable {
@@ -170,11 +210,45 @@ enum CodexLocalUsageArtifactParser {
     }
 
     static func parseSessionThreadID(_ data: Data) -> String? {
+        parseSessionIdentity(data)?.threadID
+    }
+
+    static func parseSessionIdentity(_ data: Data) -> CodexLocalSessionIdentity? {
         guard let envelope = try? JSONDecoder().decode(SessionMetaEnvelope.self, from: data),
               envelope.type == "session_meta",
-              let id = envelope.payload?.id,
+              let payload = envelope.payload,
+              let id = payload.id,
               !id.isEmpty else { return nil }
-        return id
+
+        let workspace = Self.safeWorkspaceName(from: payload.cwd)
+        let repository = Self.safeRepositoryName(from: payload.git?.repositoryURL)
+        let kind: CodexLocalSessionIdentityKind = repository != nil ? .repository : (workspace != nil ? .workspace : .unknown)
+        return CodexLocalSessionIdentity(
+            threadID: id,
+            repositoryDisplayName: repository,
+            workspaceDisplayName: workspace,
+            kind: kind
+        )
+    }
+
+    private static func safeWorkspaceName(from raw: String?) -> String? {
+        guard let raw else { return nil }
+        let url = URL(fileURLWithPath: raw).standardizedFileURL
+        let name = url.lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name != "/", name != "." else { return nil }
+        return name
+    }
+
+    private static func safeRepositoryName(from raw: String?) -> String? {
+        guard let raw, !raw.isEmpty else { return nil }
+        var value = raw
+        if let range = value.range(of: "#") { value.removeSubrange(range.lowerBound..<value.endIndex) }
+        if let range = value.range(of: "?") { value.removeSubrange(range.lowerBound..<value.endIndex) }
+        let component = value.split(whereSeparator: { $0 == "/" || $0 == ":" }).last.map(String.init) ?? value
+        let name = component.hasSuffix(".git") ? String(component.dropLast(4)) : component
+        let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty, normalized != ".", !normalized.contains("\\") else { return nil }
+        return normalized
     }
 
     static func parseTurnCompletion(_ data: Data, threadID: String?) -> CodexLocalTurnCompletionRecord? {
@@ -454,6 +528,14 @@ final class CodexLocalUsageObserver {
         if didAddCursor { persistCursors() }
     }
 
+    /// Returns whether a physical root is currently inside the observer's
+    /// allow-list. This is used by the parallel execution projection before
+    /// the selected-account Turn authority applies its narrower filter.
+    func containsObservationRoot(_ url: URL) -> Bool {
+        let normalized = CodexLocalTurnActivityAuthority.normalizedRoot(url)
+        return roots.contains { CodexLocalTurnActivityAuthority.normalizedRoot($0.codexHomeURL) == normalized }
+    }
+
     func start() {
         stop()
         hasStarted = true
@@ -565,6 +647,7 @@ final class CodexLocalUsageObserver {
                           fileSize >= 0 else { continue }
 
                     let path = fileURL.path
+                    let headIdentity = Self.sessionIdentity(for: fileURL)
                     var cursor = updatedCursors[path]
                     let size = UInt64(fileSize)
                     if cursor == nil {
@@ -624,7 +707,9 @@ final class CodexLocalUsageObserver {
                                     completedAt: nil,
                                     durationSeconds: nil,
                                     turnTokenTotal: record.turnTokenTotal,
-                                    observedAt: record.observedAt
+                                    observedAt: record.observedAt,
+                                    programName: CodexLocalSessionIndex.threadName(for: record.threadID, in: root.codexHomeURL),
+                                    sessionIdentity: headIdentity
                                 ))
                             }
                             if let activity = CodexLocalUsageArtifactParser.parseTurnActivity(lineData, threadID: threadID) {
@@ -636,7 +721,10 @@ final class CodexLocalUsageObserver {
                                         in: root.codexHomeURL
                                     )
                                 case .started, .tokenUpdated:
-                                    programName = nil
+                                    programName = CodexLocalSessionIndex.threadName(
+                                        for: activity.threadID,
+                                        in: root.codexHomeURL
+                                    )
                                 }
                                 turnActivities.append(CodexLocalTurnActivityEvent(
                                     profileID: root.profileID,
@@ -649,7 +737,8 @@ final class CodexLocalUsageObserver {
                                     durationSeconds: activity.durationSeconds,
                                     turnTokenTotal: nil,
                                     observedAt: activity.observedAt,
-                                    programName: programName
+                                    programName: programName,
+                                    sessionIdentity: headIdentity
                                 ))
                             }
                             if let completion = CodexLocalUsageArtifactParser.parseTurnCompletion(
@@ -701,6 +790,18 @@ final class CodexLocalUsageObserver {
         for line in data.split(separator: 0x0A, omittingEmptySubsequences: false) {
             if let id = CodexLocalUsageArtifactParser.parseSessionThreadID(Data(line)) {
                 return id
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func sessionIdentity(for fileURL: URL) -> CodexLocalSessionIdentity? {
+        guard let handle = try? FileHandle(forReadingFrom: fileURL) else { return nil }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: 128 * 1024) else { return nil }
+        for line in data.split(separator: 0x0A, omittingEmptySubsequences: false) {
+            if let identity = CodexLocalUsageArtifactParser.parseSessionIdentity(Data(line)) {
+                return identity
             }
         }
         return nil

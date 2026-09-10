@@ -98,6 +98,7 @@ struct CodexUsageStatusTests {
             ("turn plan rejection and terminal semantics", testTurnPlanRejectionAndTerminalSemantics),
             ("turn plan admission identity and invalidation", testTurnPlanAdmissionIdentityAndInvalidation),
             ("turn notification content policy", testTurnNotificationContentPolicy),
+            ("execution projection identity and ordering", testExecutionProjectionIdentityAndOrdering),
             ("turn notification cadence policy", testTurnNotificationCadencePolicy),
             ("account profiles isolate email", testAccountProfilesIsolateEmail),
             ("account read disables refresh token", testAccountReadDisablesRefreshToken),
@@ -1203,11 +1204,18 @@ struct CodexUsageStatusTests {
         let missingIdentity = Data(#"{"timestamp":"2026-09-07T03:18:41.123Z","type":"token_usage_record","payload":{"thread_id":"","turn_id":"turn-live","usage":{"total_tokens":321},"thread_token_usage":{"total_tokens":9876}}}"#.utf8)
         try expect(CodexLocalUsageArtifactParser.parseLine(missingIdentity) == nil, "artifacts without stable identity are ignored")
 
-        let sessionMeta = Data(#"{"type":"session_meta","payload":{"id":"thread-from-session-meta"}}"#.utf8)
+        let sessionMeta = Data(#"{"type":"session_meta","payload":{"id":"thread-from-session-meta","cwd":"/Users/boss/Projects/UsageStatus","git":{"branch":"main","commit_hash":"abc123","repository_url":"https://github.com/example/codex-usage-status.git"}}}"#.utf8)
         try expect(
             CodexLocalUsageArtifactParser.parseSessionThreadID(sessionMeta) == "thread-from-session-meta",
             "session metadata provides the rollout thread identity"
         )
+        let identity = try unwrap(
+            CodexLocalUsageArtifactParser.parseSessionIdentity(sessionMeta),
+            "safe rollout session identity"
+        )
+        try expect(identity.kind == .repository, "git metadata classifies a session as repository work")
+        try expect(identity.repositoryDisplayName == "codex-usage-status", "repository URL is reduced to a safe display name")
+        try expect(identity.workspaceDisplayName == "UsageStatus", "cwd is reduced to a workspace display name")
         let sessionIndexRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-session-index-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: sessionIndexRoot) }
@@ -2583,6 +2591,18 @@ struct CodexUsageStatusTests {
         )
     }
 
+    private static func testExecutionProjectionIdentityAndOrdering() throws {
+        let root = URL(fileURLWithPath: "/tmp/project")
+        let identity = CodexLocalSessionIdentity(threadID: "thread-1", repositoryDisplayName: "project", workspaceDisplayName: "project", kind: .repository)
+        let event = CodexLocalTurnActivityEvent(profileID: nil, physicalRootURL: root, threadID: "thread-1", turnID: "turn-1", kind: .started, startedAt: Date(timeIntervalSince1970: 100), completedAt: nil, durationSeconds: nil, turnTokenTotal: nil, observedAt: Date(timeIntervalSince1970: 100), programName: "Chat A", sessionIdentity: identity)
+        let key = CodexExecutionProjectionPolicy.key(for: event)
+        try expect(key.threadID == "thread-1" && key.turnID == "turn-1", "execution key keeps thread and Turn identity")
+        try expect(key.normalizedPhysicalRootPath == root.standardizedFileURL.resolvingSymlinksInPath().path, "execution key includes normalized physical root")
+        let newer = CodexExecutionProjection(key: key, repositoryDisplayName: "project", workspaceDisplayName: "project", chatName: "Chat A", startedAt: Date(timeIntervalSince1970: 200), tokenTotal: nil, plan: nil, lastObservedAt: Date(timeIntervalSince1970: 200))
+        let older = CodexExecutionProjection(key: CodexExecutionKey(profileID: nil, normalizedPhysicalRootPath: "/tmp/project", threadID: "thread-2", turnID: "turn-2"), repositoryDisplayName: "project", workspaceDisplayName: "project", chatName: "Chat B", startedAt: Date(timeIntervalSince1970: 100), tokenTotal: nil, plan: nil, lastObservedAt: Date(timeIntervalSince1970: 100))
+        try expect(CodexExecutionProjectionPolicy.sorted([older, newer]).first?.key.turnID == "turn-1", "executions sort newest first within a group")
+    }
+
     private static func testTurnNotificationContentPolicy() throws {
         try expect(
             TurnNotificationContentPolicy.title(state: .completed, programName: "Build release") == "程序完成：Build release",
@@ -2603,6 +2623,14 @@ struct CodexUsageStatusTests {
         try expect(
             TurnNotificationContentPolicy.title(state: .completed, programName: " \n\t ") == "Codex Turn 已完成",
             "empty or whitespace program name uses the fallback"
+        )
+        try expect(
+            TurnNotificationContentPolicy.title(state: .completed, programName: "Chat A", repositoryDisplayName: "UsageStatus") == "完成：UsageStatus",
+            "repository identity scopes terminal notification title"
+        )
+        try expect(
+            TurnNotificationContentPolicy.subtitle(repositoryDisplayName: "UsageStatus", workspaceDisplayName: nil, programName: "Chat A") == "Chat A",
+            "chat name is exposed as notification subtitle only with a scope identity"
         )
         try expect(
             TurnNotificationContentPolicy.normalizedProgramName("  Alpha\nBeta\tGamma  ") == "Alpha Beta Gamma",

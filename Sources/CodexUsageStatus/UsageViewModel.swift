@@ -58,6 +58,10 @@ final class UsageViewModel: ObservableObject {
     @Published private(set) var activeTurn: TurnActivitySnapshot = .idle {
         didSet { refreshStatusItemPresentation() }
     }
+    /// Parallel in-memory execution projection for all observer-approved
+    /// physical roots. The selected account's `activeTurn` remains the HUD
+    /// authority; this collection is only the Overview's multi-execution view.
+    @Published private(set) var activeExecutions: [CodexExecutionProjection] = []
     @Published private(set) var activeTurnPlan: TurnPlanSnapshot? {
         didSet { refreshStatusItemPresentation() }
     }
@@ -1276,7 +1280,70 @@ final class UsageViewModel: ObservableObject {
         }
     }
 
+    private func updateActiveExecutionProjection(_ event: CodexLocalTurnActivityEvent) {
+        guard localUsageObserver?.containsObservationRoot(event.physicalRootURL) == true else { return }
+        let key = CodexExecutionProjectionPolicy.key(for: event)
+        switch event.kind {
+        case .started:
+            let identity = event.sessionIdentity
+            let projection = CodexExecutionProjection(
+                key: key,
+                repositoryDisplayName: identity?.repositoryDisplayName,
+                workspaceDisplayName: identity?.workspaceDisplayName,
+                chatName: event.programName,
+                startedAt: event.startedAt ?? event.observedAt,
+                tokenTotal: nil,
+                plan: nil,
+                lastObservedAt: event.observedAt
+            )
+            if let index = activeExecutions.firstIndex(where: { $0.key == key }) {
+                activeExecutions[index] = projection
+            } else {
+                activeExecutions.append(projection)
+            }
+            activeExecutions = CodexExecutionProjectionPolicy.sorted(activeExecutions)
+
+        case .tokenUpdated:
+            guard let index = activeExecutions.firstIndex(where: { $0.key == key }) else { return }
+            activeExecutions[index].tokenTotal = event.turnTokenTotal ?? activeExecutions[index].tokenTotal
+            activeExecutions[index].lastObservedAt = event.observedAt
+            if activeExecutions[index].chatName == nil { activeExecutions[index].chatName = event.programName }
+            if let identity = event.sessionIdentity {
+                activeExecutions[index].repositoryDisplayName = identity.repositoryDisplayName ?? activeExecutions[index].repositoryDisplayName
+                activeExecutions[index].workspaceDisplayName = identity.workspaceDisplayName ?? activeExecutions[index].workspaceDisplayName
+            }
+
+        case .completed, .failed, .interrupted:
+            activeExecutions.removeAll { $0.key == key }
+        }
+    }
+
+    private func applyPlanToActiveExecution(profileID: UUID?, envelope: TurnPlanEnvelope) {
+        let turnID = envelope.turnID
+        let candidates = activeExecutions.indices.filter { index in
+            let execution = activeExecutions[index]
+            guard execution.key.profileID == profileID, execution.key.turnID == turnID else { return false }
+            if let threadID = envelope.optionalThreadID { return execution.key.threadID == threadID }
+            return true
+        }
+        guard candidates.count == 1, let index = candidates.first else { return }
+        guard let steps = TurnPlanCodec.decodeSteps(from: envelope), !steps.isEmpty else {
+            activeExecutions[index].plan = nil
+            return
+        }
+        let snapshot = TurnPlanSnapshot(
+            profileID: profileID,
+            threadID: activeExecutions[index].key.threadID,
+            turnID: turnID,
+            steps: steps
+        )
+        if activeExecutions[index].plan != snapshot { activeExecutions[index].plan = snapshot }
+    }
+
     private func handleLocalTurnActivity(_ event: CodexLocalTurnActivityEvent) {
+        // Maintain the all-roots execution projection first. The selected
+        // account filter below only governs the existing single Turn card/HUD.
+        updateActiveExecutionProjection(event)
         // Only the physical root selected by the current account context may
         // drive the visible Turn card. Other roots still feed their own local
         // ledger, but can never overwrite the current account's activity.
@@ -1313,7 +1380,9 @@ final class UsageViewModel: ObservableObject {
                 content: nil,
                 errorMessage: nil,
                 receivedAt: event.observedAt,
-                programName: event.programName
+                programName: event.programName,
+                repositoryDisplayName: event.sessionIdentity?.repositoryDisplayName,
+                workspaceDisplayName: event.sessionIdentity?.workspaceDisplayName
             )
 
         case .tokenUpdated:
@@ -1365,7 +1434,9 @@ final class UsageViewModel: ObservableObject {
                 content: nil,
                 errorMessage: message,
                 receivedAt: event.observedAt,
-                programName: event.programName ?? activeTurn.programName
+                programName: event.programName ?? activeTurn.programName,
+                repositoryDisplayName: event.sessionIdentity?.repositoryDisplayName ?? activeTurn.repositoryDisplayName,
+                workspaceDisplayName: event.sessionIdentity?.workspaceDisplayName ?? activeTurn.workspaceDisplayName
             )
             // Rollouts intentionally expose metadata only. Never pass the
             // opt-in content preference into this source's notification path.
@@ -1379,6 +1450,7 @@ final class UsageViewModel: ObservableObject {
     /// keeps one terminal authority and prevents plan updates from creating a
     /// second activity timeline.
     private func handleTurnPlanUpdated(profileID: UUID?, envelope: TurnPlanEnvelope) {
+        applyPlanToActiveExecution(profileID: profileID, envelope: envelope)
         // Stage one establishes identity before touching step payloads. This
         // prevents malformed plans from an unrelated profile/thread/Turn from
         // affecting the current plan or consuming payload semantics.

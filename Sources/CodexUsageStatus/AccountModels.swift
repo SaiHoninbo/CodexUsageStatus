@@ -122,6 +122,8 @@ struct TurnActivitySnapshot: Equatable {
     /// one in its metadata-only session index.  This is intentionally kept
     /// separate from prompt/conversation content.
     var programName: String? = nil
+    var repositoryDisplayName: String? = nil
+    var workspaceDisplayName: String? = nil
 
     static let idle = TurnActivitySnapshot(
         state: .idle, threadID: nil, turnID: nil, startedAt: nil,
@@ -135,6 +137,54 @@ struct TurnActivitySnapshot: Equatable {
             completedAt: nil, elapsedSeconds: nil, tokenTotal: nil,
             content: nil, errorMessage: nil, receivedAt: receivedAt
         )
+    }
+}
+
+/// Stable in-memory key for one observed execution. The physical rollout root
+/// remains part of identity so two profiles cannot be collapsed by thread ID.
+struct CodexExecutionKey: Hashable, Equatable, Sendable {
+    let profileID: UUID?
+    let normalizedPhysicalRootPath: String
+    let threadID: String
+    let turnID: String
+}
+
+struct CodexExecutionProjection: Identifiable, Equatable, Sendable {
+    let key: CodexExecutionKey
+    var repositoryDisplayName: String?
+    var workspaceDisplayName: String?
+    var chatName: String?
+    var startedAt: Date
+    var tokenTotal: Int64?
+    var plan: TurnPlanSnapshot?
+    var lastObservedAt: Date
+
+    var id: CodexExecutionKey { key }
+    var groupName: String { repositoryDisplayName ?? workspaceDisplayName ?? "未命名工作區" }
+    var isRepository: Bool { repositoryDisplayName != nil }
+}
+
+enum CodexExecutionProjectionPolicy {
+    static func normalizedRootPath(_ url: URL) -> String {
+        url.standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    static func key(for event: CodexLocalTurnActivityEvent) -> CodexExecutionKey {
+        CodexExecutionKey(
+            profileID: event.profileID,
+            normalizedPhysicalRootPath: normalizedRootPath(event.physicalRootURL),
+            threadID: event.threadID,
+            turnID: event.turnID
+        )
+    }
+
+    static func sorted(_ executions: [CodexExecutionProjection]) -> [CodexExecutionProjection] {
+        executions.sorted {
+            if $0.groupName != $1.groupName { return $0.groupName.localizedStandardCompare($1.groupName) == .orderedAscending }
+            if $0.startedAt != $1.startedAt { return $0.startedAt > $1.startedAt }
+            if $0.key.threadID != $1.key.threadID { return $0.key.threadID < $1.key.threadID }
+            return $0.key.turnID < $1.key.turnID
+        }
     }
 }
 

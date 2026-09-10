@@ -3,11 +3,27 @@ import SwiftUI
 /// Overview owns the current-state composition and its account/quota helpers.
 /// Historical Token detail remains isolated in History.
 extension UsagePopoverView {
+    private struct ExecutionGroup: Identifiable {
+        let id: String
+        let title: String
+        let isRepository: Bool
+        let executions: [CodexExecutionProjection]
+    }
+
+    private var executionGroups: [ExecutionGroup] {
+        let grouped = Dictionary(grouping: model.activeExecutions, by: { $0.groupName })
+        return grouped.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }.map { name in
+            let executions = CodexExecutionProjectionPolicy.sorted(grouped[name] ?? [])
+            return ExecutionGroup(id: name, title: name, isRepository: executions.first?.isRepository == true, executions: executions)
+        }
+    }
+
     var overviewTab: some View {
         VStack(alignment: .leading, spacing: 8) {
             overviewActionableAlertSummary
             overviewUpdateCard
             quotaSummarySection
+            activeExecutionsSection
             overviewTurnActivity
 
             if model.resetCredits != nil {
@@ -29,6 +45,96 @@ extension UsagePopoverView {
 
             quickActions
         }
+    }
+
+    @ViewBuilder
+    private var activeExecutionsSection: some View {
+        if !model.activeExecutions.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("執行中的 Codex", systemImage: "bolt.horizontal.circle")
+                    .font(.subheadline.weight(.semibold))
+                ForEach(executionGroups) { group in
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 6) {
+                            Image(systemName: group.isRepository ? "folder.fill" : "rectangle.3.group")
+                                .foregroundStyle(HUDColorPalette.sevenDay)
+                            Text(group.title)
+                                .font(.caption.weight(.semibold))
+                            if group.executions.count > 1 {
+                                Text("(group.executions.count)")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(HUDColorPalette.tertiaryText)
+                            }
+                        }
+                        ForEach(group.executions) { execution in
+                            executionRow(execution)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            .padding(10)
+            .background(HUDColorPalette.controlSurface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(HUDColorPalette.border, lineWidth: 0.7) }
+            .accessibilityElement(children: .contain)
+        }
+    }
+
+    @ViewBuilder
+    private func executionRow(_ execution: CodexExecutionProjection) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: "bubble.left.and.bubble.right")
+                    .foregroundStyle(HUDColorPalette.secondaryText)
+                Text(execution.chatName ?? "未命名 Chat")
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Text("執行中")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(HUDColorPalette.sevenDay)
+            }
+            if let plan = execution.plan {
+                let progress = TurnPlanProgressPolicy.make(from: plan)
+                ProgressView(value: Double(progress.completedCount), total: Double(max(1, progress.totalCount)))
+                    .tint(HUDColorPalette.sevenDay)
+                Text(progress.compactText ?? "進度未知")
+                    .font(.caption2.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(HUDColorPalette.sevenDay)
+                if let step = TurnPlanCodec.normalizedStepText(progress.currentStepText, maxLength: 96) {
+                    Text("目前：\(step)")
+                        .font(.caption2)
+                        .foregroundStyle(HUDColorPalette.secondaryText)
+                        .lineLimit(2)
+                } else if progress.hasMultipleInProgress {
+                    Text("目前：多個步驟進行中")
+                        .font(.caption2)
+                        .foregroundStyle(HUDColorPalette.secondaryText)
+                }
+                if progress.remainingStepCount == 1 {
+                    Text("目前計畫剩 1 步")
+                        .font(.caption2)
+                        .foregroundStyle(HUDColorPalette.tertiaryText)
+                }
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+                Text("進度未知")
+                    .font(.caption2)
+                    .foregroundStyle(HUDColorPalette.secondaryText)
+            }
+            HStack(spacing: 8) {
+                Text(durationText(max(0, Int64(model.currentDate.timeIntervalSince(execution.startedAt)))))
+                if let tokens = execution.tokenTotal {
+                    Text("\(TokenActivityPresentation.tokenCount(tokens)) token")
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(HUDColorPalette.tertiaryText)
+        }
+        .padding(.leading, 8)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(execution.chatName ?? "未命名 Chat")，執行中")
     }
 
     @ViewBuilder
@@ -503,7 +609,7 @@ extension UsagePopoverView {
 
     @ViewBuilder
     var overviewTurnActivity: some View {
-        if model.accountScope != .current {
+        if model.accountScope != .current || !model.activeExecutions.isEmpty {
             EmptyView()
         } else {
             switch model.activeTurn.state {

@@ -43,7 +43,19 @@ final class TurnNotificationService: NSObject, UNUserNotificationCenterDelegate 
         if let eventType, let turnID = event.turnID,
            let reservation = reserveIfNeeded(profileID: profileID, turnID: turnID, eventType: eventType) {
             let content = UNMutableNotificationContent()
-            content.title = TurnNotificationContentPolicy.title(state: event.state, programName: event.programName)
+            content.title = TurnNotificationContentPolicy.title(
+                state: event.state,
+                programName: event.programName,
+                repositoryDisplayName: event.repositoryDisplayName,
+                workspaceDisplayName: event.workspaceDisplayName
+            )
+            if let subtitle = TurnNotificationContentPolicy.subtitle(
+                repositoryDisplayName: event.repositoryDisplayName,
+                workspaceDisplayName: event.workspaceDisplayName,
+                programName: event.programName
+            ) {
+                content.subtitle = subtitle
+            }
             content.body = TurnNotificationContentPolicy.body(
                 elapsedSeconds: event.elapsedSeconds,
                 tokenTotal: event.tokenTotal,
