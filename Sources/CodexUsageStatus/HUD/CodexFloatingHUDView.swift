@@ -131,6 +131,18 @@ struct CodexFloatingHUDView: View {
         .onAppear {
             setHUDThemeAppearance(selectedHUDPalette.appearance)
             evaluateThemeRotationIfDue()
+            // The HUD is the user's always-available update surface. Perform
+            // one bounded foreground check when it first appears so a Release
+            // published while the app was already running is not hidden until
+            // the six-hour cadence. Existing AppUpdateNotificationService
+            // dedupe and permission semantics remain unchanged.
+            checkForUpdates()
+            // If the model completed its check before this view appeared,
+            // replay the existing in-app presentation once instead of relying
+            // solely on `onChange` delivery.
+            if case .available = model.updateState {
+                presentUpdateFeedback(for: model.updateState)
+            }
         }
         .onChange(of: storedHUDTheme) { _, rawValue in
             let theme = HUDTheme(rawValue: rawValue) ?? .neonPurple
