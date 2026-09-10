@@ -4,18 +4,57 @@ import SwiftUI
 /// Historical Token detail remains isolated in History.
 extension UsagePopoverView {
     private struct ExecutionGroup: Identifiable {
-        let id: String
+        let id: CodexExecutionScopeKey
         let title: String
         let isRepository: Bool
         let executions: [CodexExecutionProjection]
     }
 
     private var executionGroups: [ExecutionGroup] {
-        let grouped = Dictionary(grouping: model.activeExecutions, by: { $0.groupName })
-        return grouped.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }.map { name in
-            let executions = CodexExecutionProjectionPolicy.sorted(grouped[name] ?? [])
-            return ExecutionGroup(id: name, title: name, isRepository: executions.first?.isRepository == true, executions: executions)
+        let candidates = Dictionary(grouping: model.activeExecutions, by: \.scopeKey).map { key, rawExecutions in
+            let executions = CodexExecutionProjectionPolicy.sorted(rawExecutions)
+            return (key: key, title: executions.first?.groupName ?? "工作區身份未證明", isRepository: executions.first?.isRepository == true, executions: executions)
         }
+        let titleCounts = Dictionary(grouping: candidates, by: { $0.title }).mapValues(\.count)
+        var duplicateOrdinals: [String: Int] = [:]
+        return candidates.sorted { lhs, rhs in
+            if lhs.title != rhs.title {
+                return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+            }
+            let leftKey = scopeSortKey(lhs.key)
+            let rightKey = scopeSortKey(rhs.key)
+            return leftKey.localizedStandardCompare(rightKey) == .orderedAscending
+        }.map { candidate in
+            guard titleCounts[candidate.title, default: 0] > 1 else {
+                return ExecutionGroup(id: candidate.key, title: candidate.title, isRepository: candidate.isRepository, executions: candidate.executions)
+            }
+
+            let ordinal = (duplicateOrdinals[candidate.title] ?? 0) + 1
+            duplicateOrdinals[candidate.title] = ordinal
+            let suffix: String
+            if let workspace = candidate.executions.first?.workspaceDisplayName,
+               !workspace.isEmpty,
+               workspace != candidate.title {
+                suffix = workspace
+            } else if let digest = candidate.key.repositoryIdentityDigest,
+                      !digest.isEmpty {
+                suffix = String(digest.prefix(8))
+            } else {
+                suffix = "工作區 \(ordinal)"
+            }
+            return ExecutionGroup(
+                id: candidate.key,
+                title: "\(candidate.title) · \(suffix)",
+                isRepository: candidate.isRepository,
+                executions: candidate.executions
+            )
+        }
+    }
+
+    /// Sorting uses the opaque scope identity only for deterministic ordering;
+    /// raw roots never reach the rendered title.
+    private func scopeSortKey(_ key: CodexExecutionScopeKey) -> String {
+        "\(key.profileID?.uuidString ?? "default")|\(key.normalizedPhysicalRootPath)|\(key.repositoryIdentityDigest ?? "")"
     }
 
     var overviewTab: some View {
@@ -86,7 +125,7 @@ extension UsagePopoverView {
             HStack(spacing: 6) {
                 Image(systemName: "bubble.left.and.bubble.right")
                     .foregroundStyle(HUDColorPalette.secondaryText)
-                Text(execution.chatName ?? "未命名 Chat")
+                Text(execution.chatName ?? "Chat 名稱未取得")
                     .font(.caption.weight(.semibold))
                     .lineLimit(1)
                 Spacer(minLength: 4)
@@ -153,7 +192,7 @@ extension UsagePopoverView {
         }
         .padding(.leading, 8)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(execution.chatName ?? "未命名 Chat")，執行中")
+        .accessibilityLabel("\(execution.chatName ?? "Chat 名稱未取得")，執行中")
         .accessibilityValue(model.estimatedExecution(for: execution)?.progressText ?? "推估進度資料不足")
     }
 

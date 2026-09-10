@@ -1353,6 +1353,7 @@ final class UsageViewModel: ObservableObject {
             threadID: event.threadID,
             turnID: event.turnID,
             repositoryDisplayName: event.sessionIdentity?.repositoryDisplayName,
+            repositoryIdentityDigest: event.sessionIdentity?.repositoryIdentityDigest,
             workspaceDisplayName: event.sessionIdentity?.workspaceDisplayName,
             chatName: event.programName,
             durationSeconds: durationSeconds,
@@ -1366,7 +1367,8 @@ final class UsageViewModel: ObservableObject {
         var merged: [String: CodexExecutionDurationSample] = [:]
         for sample in completedDurationSamples + incoming {
             let profile = sample.profileID?.uuidString ?? "default"
-            let key = "\(profile)|\(sample.normalizedPhysicalRootPath)|\(sample.threadID)|\(sample.turnID)"
+            let repository = sample.repositoryIdentityDigest ?? "unproven"
+            let key = "\(profile)|\(sample.normalizedPhysicalRootPath)|\(repository)|\(sample.threadID)|\(sample.turnID)"
             merged[key] = sample
         }
         completedDurationSamples = merged.values

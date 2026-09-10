@@ -1367,6 +1367,10 @@ struct CodexUsageStatusTests {
         try expect(CodexLocalSessionIndex.threadName(for: "thread-a", in: sessionIndexRoot) == "Chat A", "Chat A is resolved only by thread A")
         try expect(CodexLocalSessionIndex.threadName(for: "thread-b", in: sessionIndexRoot) == "Chat B", "Chat B is resolved only by thread B")
         try expect(CodexLocalSessionIndex.threadName(for: "thread-missing", in: sessionIndexRoot) == nil, "missing Chat title is not borrowed from another thread")
+        let renamedWithoutTitle = #"{"id":"thread-a","thread_name":""}"#
+        try Data((sessionIndex + "\n" + renamedWithoutTitle + "\n").utf8)
+            .write(to: sessionIndexRoot.appendingPathComponent("session_index.jsonl"), options: .atomic)
+        try expect(CodexLocalSessionIndex.threadName(for: "thread-a", in: sessionIndexRoot) == nil, "latest empty Chat title does not resurrect a stale name")
 
         let keyA = CodexExecutionKey(
             profileID: nil,
@@ -2697,7 +2701,7 @@ struct CodexUsageStatusTests {
 
     private static func testExecutionProjectionIdentityAndOrdering() throws {
         let root = URL(fileURLWithPath: "/tmp/project")
-        let identity = CodexLocalSessionIdentity(threadID: "thread-1", repositoryDisplayName: "project", workspaceDisplayName: "project", kind: .repository)
+        let identity = CodexLocalSessionIdentity(threadID: "thread-1", repositoryDisplayName: "project", workspaceDisplayName: "project", kind: .repository, repositoryIdentityDigest: "repo-a")
         let event = CodexLocalTurnActivityEvent(profileID: nil, physicalRootURL: root, threadID: "thread-1", turnID: "turn-1", kind: .started, startedAt: Date(timeIntervalSince1970: 100), completedAt: nil, durationSeconds: nil, turnTokenTotal: nil, observedAt: Date(timeIntervalSince1970: 100), programName: "Chat A", sessionIdentity: identity)
         let key = CodexExecutionProjectionPolicy.key(for: event)
         try expect(key.threadID == "thread-1" && key.turnID == "turn-1", "execution key keeps thread and Turn identity")
@@ -2705,6 +2709,30 @@ struct CodexUsageStatusTests {
         let newer = CodexExecutionProjection(key: key, repositoryDisplayName: "project", workspaceDisplayName: "project", chatName: "Chat A", startedAt: Date(timeIntervalSince1970: 200), tokenTotal: nil, plan: nil, lastObservedAt: Date(timeIntervalSince1970: 200))
         let older = CodexExecutionProjection(key: CodexExecutionKey(profileID: nil, normalizedPhysicalRootPath: "/tmp/project", threadID: "thread-2", turnID: "turn-2"), repositoryDisplayName: "project", workspaceDisplayName: "project", chatName: "Chat B", startedAt: Date(timeIntervalSince1970: 100), tokenTotal: nil, plan: nil, lastObservedAt: Date(timeIntervalSince1970: 100))
         try expect(CodexExecutionProjectionPolicy.sorted([older, newer]).first?.key.turnID == "turn-1", "executions sort newest first within a group")
+        let otherRemote = CodexExecutionProjection(
+            key: CodexExecutionKey(profileID: nil, normalizedPhysicalRootPath: "/tmp/other-project", threadID: "thread-3", turnID: "turn-3", repositoryIdentityDigest: "remote-b"),
+            repositoryDisplayName: "project",
+            workspaceDisplayName: "project",
+            chatName: "Chat C",
+            startedAt: Date(timeIntervalSince1970: 150),
+            tokenTotal: nil,
+            plan: nil,
+            lastObservedAt: Date(timeIntervalSince1970: 150)
+        )
+        try expect(newer.scopeKey != otherRemote.scopeKey, "same display name from another remote/worktree remains a distinct UI scope")
+        let sameRemoteOtherWorktree = CodexExecutionProjection(
+            key: CodexExecutionKey(profileID: nil, normalizedPhysicalRootPath: "/tmp/project-worktree", threadID: "thread-4", turnID: "turn-4", repositoryIdentityDigest: key.repositoryIdentityDigest),
+            repositoryDisplayName: "project",
+            workspaceDisplayName: "project-worktree",
+            chatName: "Chat D",
+            startedAt: Date(timeIntervalSince1970: 140),
+            tokenTotal: nil,
+            plan: nil,
+            lastObservedAt: Date(timeIntervalSince1970: 140)
+        )
+        try expect(newer.scopeKey != sameRemoteOtherWorktree.scopeKey, "same remote in another physical worktree remains a distinct UI scope")
+        let unproven = CodexExecutionProjection(key: CodexExecutionKey(profileID: nil, normalizedPhysicalRootPath: "/tmp/unknown", threadID: "thread-unknown", turnID: "turn-unknown"), repositoryDisplayName: nil, workspaceDisplayName: nil, chatName: nil, startedAt: Date(timeIntervalSince1970: 100), tokenTotal: nil, plan: nil, lastObservedAt: Date(timeIntervalSince1970: 100))
+        try expect(unproven.groupName == "工作區身份未證明", "unproven scope is presented explicitly instead of as an unnamed workspace")
     }
 
     private static func testObserverExecutionEstimation() throws {
@@ -2715,7 +2743,8 @@ struct CodexUsageStatusTests {
             profileID: nil,
             normalizedPhysicalRootPath: root.standardizedFileURL.resolvingSymlinksInPath().path,
             threadID: "thread-a",
-            turnID: "turn-active"
+            turnID: "turn-active",
+            repositoryIdentityDigest: "repo-digest"
         )
         let execution = CodexExecutionProjection(
             key: key,
@@ -2740,6 +2769,7 @@ struct CodexUsageStatusTests {
                 threadID: threadID,
                 turnID: turnID,
                 repositoryDisplayName: repository,
+                repositoryIdentityDigest: repository == nil ? nil : "repo-digest",
                 workspaceDisplayName: repository,
                 chatName: "Chat A",
                 durationSeconds: duration,
@@ -2780,6 +2810,64 @@ struct CodexUsageStatusTests {
         try expect(selectedRepo.kind == .sameRepository, "Repo cohort is the next fallback after Chat")
         try expect(selectedRepo.samples.count == 8, "Repo fallback retains all bounded samples")
 
+        let otherRemoteSamples = (0..<12).map { index in
+            CodexExecutionDurationSample(
+                profileID: nil,
+                physicalRootURL: root,
+                threadID: "other-remote-thread",
+                turnID: "other-remote-\(index)",
+                repositoryDisplayName: "Repo",
+                repositoryIdentityDigest: "repo-b-digest",
+                workspaceDisplayName: "Repo",
+                chatName: "Chat B",
+                durationSeconds: 4_000,
+                completedAt: started.addingTimeInterval(TimeInterval(index + 40))
+            )
+        }
+        let isolatedRepository = CodexExecutionEstimationPolicy.selectCohort(
+            for: CodexExecutionProjection(
+                key: CodexExecutionKey(
+                    profileID: nil,
+                    normalizedPhysicalRootPath: root.path,
+                    threadID: "thread-without-history",
+                    turnID: "turn-without-history",
+                    repositoryIdentityDigest: "repo-digest"
+                ),
+                repositoryDisplayName: "Repo",
+                workspaceDisplayName: "Repo",
+                chatName: "Chat A",
+                startedAt: started,
+                tokenTotal: nil,
+                plan: nil,
+                lastObservedAt: now
+            ),
+            samples: repoSamples + otherRemoteSamples
+        )
+        try expect(isolatedRepository.kind == .sameRepository, "repository cohort remains repository-scoped when same-named remote history exists")
+        try expect(isolatedRepository.samples.allSatisfy { $0.repositoryIdentityDigest == "repo-digest" }, "different repository digest cannot contaminate duration cohort")
+
+        let missingDigestExecution = CodexExecutionProjection(
+            key: CodexExecutionKey(
+                profileID: nil,
+                normalizedPhysicalRootPath: root.path,
+                threadID: "thread-missing-digest",
+                turnID: "turn-missing-digest"
+            ),
+            repositoryDisplayName: "Repo",
+            workspaceDisplayName: "Repo",
+            chatName: "Chat A",
+            startedAt: started,
+            tokenTotal: nil,
+            plan: nil,
+            lastObservedAt: now
+        )
+        let missingDigestCohort = CodexExecutionEstimationPolicy.selectCohort(
+            for: missingDigestExecution,
+            samples: repoSamples
+        )
+        try expect(missingDigestCohort.kind == .global, "missing repository identity does not guess a display-name Repo cohort")
+        try expect(missingDigestCohort.samples.count == repoSamples.count, "missing repository identity uses only the explicit broad fallback")
+
         try expect(
             CodexExecutionEstimationPolicy.estimate(for: execution, now: now, samples: []) == nil,
             "zero history does not invent a percentage"
@@ -2797,7 +2885,8 @@ struct CodexUsageStatusTests {
                 profileID: nil,
                 normalizedPhysicalRootPath: key.normalizedPhysicalRootPath,
                 threadID: "thread-a",
-                turnID: "turn-new"
+                turnID: "turn-new",
+                repositoryIdentityDigest: "repo-digest"
             ),
             repositoryDisplayName: "Repo",
             workspaceDisplayName: "Repo",
@@ -3949,7 +4038,7 @@ struct CodexUsageStatusTests {
 
         let artifactURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("outputs/CodexUsageStatus.app.zip")
-        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, "2.4.86"])
+        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, "2.4.87"])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted as the canonical GitHub release")
 
         let malformedStatus = try runToolStatus("/bin/bash", [validatorURL.path, "/dev/null"])

@@ -168,6 +168,16 @@ struct CodexExecutionKey: Hashable, Equatable, Sendable {
     }
 }
 
+/// Identity of one Repo/worktree scope for the active-execution projection.
+/// Thread and Turn IDs intentionally do not participate: multiple Chats in
+/// one physical worktree belong under the same Repo group, while two
+/// worktrees remain distinct even when their display names are identical.
+struct CodexExecutionScopeKey: Hashable, Equatable, Sendable {
+    let profileID: UUID?
+    let normalizedPhysicalRootPath: String
+    let repositoryIdentityDigest: String?
+}
+
 struct CodexExecutionProjection: Identifiable, Equatable, Sendable {
     let key: CodexExecutionKey
     var repositoryDisplayName: String?
@@ -179,8 +189,13 @@ struct CodexExecutionProjection: Identifiable, Equatable, Sendable {
     var lastObservedAt: Date
 
     var id: CodexExecutionKey { key }
-    var groupName: String { repositoryDisplayName ?? workspaceDisplayName ?? "未命名工作區" }
+    /// An absent scope is an explicitly unproven identity, not an unnamed
+    /// repository that may be merged with another worktree.
+    var groupName: String { repositoryDisplayName ?? workspaceDisplayName ?? "工作區身份未證明" }
     var isRepository: Bool { repositoryDisplayName != nil }
+    var scopeKey: CodexExecutionScopeKey {
+        CodexExecutionProjectionPolicy.scopeKey(for: self)
+    }
 }
 
 enum CodexExecutionProjectionPolicy {
@@ -195,6 +210,14 @@ enum CodexExecutionProjectionPolicy {
             threadID: event.threadID,
             turnID: event.turnID,
             repositoryIdentityDigest: event.sessionIdentity?.repositoryIdentityDigest
+        )
+    }
+
+    static func scopeKey(for execution: CodexExecutionProjection) -> CodexExecutionScopeKey {
+        CodexExecutionScopeKey(
+            profileID: execution.key.profileID,
+            normalizedPhysicalRootPath: execution.key.normalizedPhysicalRootPath,
+            repositoryIdentityDigest: execution.key.repositoryIdentityDigest
         )
     }
 

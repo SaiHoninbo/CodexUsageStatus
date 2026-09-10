@@ -331,7 +331,10 @@ struct HUDTokenActivitySummaryView: View, Equatable {
                 )
             }
         }
-        .frame(width: columnWidth, alignment: .leading)
+        // Keep the fixed-width reel centered in the left Hero column. The
+        // odometer owns its full column width on animated updates, so both
+        // static and animated values need the same explicit center contract.
+        .frame(width: columnWidth, alignment: .center)
     }
 
     private func secondaryGrid(_ secondaryMetrics: [TokenActivityMetric], width: CGFloat) -> some View {
@@ -373,7 +376,7 @@ struct HUDTokenActivitySummaryView: View, Equatable {
                     value: feedback?.generation ?? 0
                 )
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 }
 

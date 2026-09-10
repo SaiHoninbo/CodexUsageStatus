@@ -10,6 +10,7 @@ struct CodexExecutionDurationSample: Equatable, Sendable {
     let threadID: String
     let turnID: String
     let repositoryDisplayName: String?
+    let repositoryIdentityDigest: String?
     let workspaceDisplayName: String?
     let chatName: String?
     let durationSeconds: Int64
@@ -21,6 +22,7 @@ struct CodexExecutionDurationSample: Equatable, Sendable {
         threadID: String,
         turnID: String,
         repositoryDisplayName: String?,
+        repositoryIdentityDigest: String? = nil,
         workspaceDisplayName: String?,
         chatName: String?,
         durationSeconds: Int64,
@@ -31,6 +33,7 @@ struct CodexExecutionDurationSample: Equatable, Sendable {
         self.threadID = threadID
         self.turnID = turnID
         self.repositoryDisplayName = repositoryDisplayName
+        self.repositoryIdentityDigest = repositoryIdentityDigest
         self.workspaceDisplayName = workspaceDisplayName
         self.chatName = chatName
         self.durationSeconds = max(0, durationSeconds)
@@ -167,6 +170,7 @@ enum CodexExecutionEstimationPolicy {
             $0.profileID == execution.key.profileID
                 && $0.normalizedPhysicalRootPath == root
                 && $0.threadID == execution.key.threadID
+                && $0.repositoryIdentityDigest == execution.key.repositoryIdentityDigest
         }
         let sameRepository = samples.filter {
             $0.profileID == execution.key.profileID
@@ -205,13 +209,23 @@ enum CodexExecutionEstimationPolicy {
         _ sample: CodexExecutionDurationSample,
         execution: CodexExecutionProjection
     ) -> Bool {
-        if let repository = execution.repositoryDisplayName {
-            return sample.repositoryDisplayName == repository
+        if execution.repositoryDisplayName != nil {
+            // A display name is never sufficient to establish Repo identity.
+            // If the execution lacks a canonical remote digest, the
+            // repository-specific cohort is not proven and must not match.
+            guard let digest = execution.key.repositoryIdentityDigest else { return false }
+            return sample.repositoryIdentityDigest == digest
         }
         if let workspace = execution.workspaceDisplayName {
-            return sample.workspaceDisplayName == workspace
+            // Workspace-only observations are already scoped by the physical
+            // root in the caller. Keep them separate from repository-backed
+            // samples and retain the display name only as a local label.
+            return sample.repositoryIdentityDigest == nil
+                && sample.workspaceDisplayName == workspace
         }
-        return sample.repositoryDisplayName == nil && sample.workspaceDisplayName == nil
+        return sample.repositoryIdentityDigest == nil
+            && sample.repositoryDisplayName == nil
+            && sample.workspaceDisplayName == nil
     }
 
     private static func confidence(
@@ -331,6 +345,7 @@ enum CodexExecutionDurationHistoryScanner {
                                 threadID: identity.threadID,
                                 turnID: activity.turnID,
                                 repositoryDisplayName: identity.repositoryDisplayName,
+                                repositoryIdentityDigest: identity.repositoryIdentityDigest,
                                 workspaceDisplayName: identity.workspaceDisplayName,
                                 chatName: chatName,
                                 durationSeconds: duration,

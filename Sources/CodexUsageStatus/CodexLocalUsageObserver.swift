@@ -441,15 +441,17 @@ enum CodexLocalSessionIndex {
         // from the end avoids returning an obsolete name after a rename.
         for line in data.split(separator: 0x0A, omittingEmptySubsequences: true).reversed() {
             guard let entry = try? JSONDecoder().decode(Entry.self, from: Data(line)),
-                  entry.id == threadID,
-                  let rawName = entry.threadName else { continue }
+                  entry.id == threadID else { continue }
+            // A matching row with no usable name is authoritative evidence
+            // that the current title is unavailable. Do not resurrect an
+            // older title from an earlier row for the same thread.
+            guard let rawName = entry.threadName else { return nil }
             let name = rawName
                 .components(separatedBy: .whitespacesAndNewlines)
                 .filter { !$0.isEmpty }
                 .joined(separator: " ")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty else { continue }
-            return name
+            return name.isEmpty ? nil : name
         }
         return nil
     }
@@ -543,17 +545,28 @@ private struct CodexLocalUsageCursor: Codable, Equatable, Sendable {
     var byteOffset: UInt64
     var threadID: String?
     var completedTurnIDs: Set<String>
+    /// Once a rollout contains contradictory session metadata, its identity
+    /// remains ambiguous across incremental scans. This prevents a tail-only
+    /// scan from restoring stale Repo/Chat provenance.
+    var identityIsAmbiguous: Bool
 
     private enum CodingKeys: String, CodingKey {
         case byteOffset
         case threadID
         case completedTurnIDs
+        case identityIsAmbiguous
     }
 
-    init(byteOffset: UInt64, threadID: String? = nil, completedTurnIDs: Set<String> = []) {
+    init(
+        byteOffset: UInt64,
+        threadID: String? = nil,
+        completedTurnIDs: Set<String> = [],
+        identityIsAmbiguous: Bool = false
+    ) {
         self.byteOffset = byteOffset
         self.threadID = threadID
         self.completedTurnIDs = completedTurnIDs
+        self.identityIsAmbiguous = identityIsAmbiguous
     }
 
     init(from decoder: Decoder) throws {
@@ -561,6 +574,7 @@ private struct CodexLocalUsageCursor: Codable, Equatable, Sendable {
         byteOffset = try values.decode(UInt64.self, forKey: .byteOffset)
         threadID = try values.decodeIfPresent(String.self, forKey: .threadID)
         completedTurnIDs = try values.decodeIfPresent(Set<String>.self, forKey: .completedTurnIDs) ?? []
+        identityIsAmbiguous = try values.decodeIfPresent(Bool.self, forKey: .identityIsAmbiguous) ?? false
     }
 }
 
@@ -760,8 +774,13 @@ final class CodexLocalUsageObserver {
                     // ambiguous; subsequent events may still be observed for
                     // liveness, but can never receive Repo/Chat provenance.
                     var canonicalIdentity = headIdentity
-                    var identityIsAmbiguous = false
                     var cursor = updatedCursors[path]
+                    var identityIsAmbiguous = cursor?.identityIsAmbiguous ?? false
+                    if let headIdentity,
+                       let cursorThreadID = cursor?.threadID,
+                       cursorThreadID != headIdentity.threadID {
+                        identityIsAmbiguous = true
+                    }
                     let size = UInt64(fileSize)
                     if cursor == nil {
                         // Existing rollouts are seeded at EOF; a rollout created
@@ -775,6 +794,7 @@ final class CodexLocalUsageObserver {
                         updatedSeededPaths.insert(path)
                         if cursor?.byteOffset == size { continue }
                     }
+                    cursor?.identityIsAmbiguous = identityIsAmbiguous
                     if cursor?.threadID == nil {
                         cursor?.threadID = Self.threadIdentity(for: fileURL)
                     }
@@ -816,6 +836,7 @@ final class CodexLocalUsageObserver {
                                         canonicalIdentity = observedIdentity
                                     }
                                 }
+                                cursor?.identityIsAmbiguous = identityIsAmbiguous
                             }
                             if let record = CodexLocalUsageArtifactParser.parseLine(lineData) {
                                 events.append((root.profileID, record))
@@ -889,6 +910,7 @@ final class CodexLocalUsageObserver {
                             }
                         }
                         cursor?.byteOffset = offset + UInt64(consumed)
+                        cursor?.identityIsAmbiguous = identityIsAmbiguous
                         updatedCursors[path] = cursor!
                     } catch {
                         continue
