@@ -100,6 +100,8 @@ struct CodexUsageStatusTests {
             ("turn notification content policy", testTurnNotificationContentPolicy),
             ("turn plan notification policy", testTurnPlanNotificationPolicy),
             ("execution projection identity and ordering", testExecutionProjectionIdentityAndOrdering),
+            ("observer execution estimation", testObserverExecutionEstimation),
+            ("bounded duration history scan", testBoundedDurationHistoryScan),
             ("turn notification cadence policy", testTurnNotificationCadencePolicy),
             ("account profiles isolate email", testAccountProfilesIsolateEmail),
             ("account read disables refresh token", testAccountReadDisablesRefreshToken),
@@ -2606,6 +2608,138 @@ struct CodexUsageStatusTests {
         try expect(CodexExecutionProjectionPolicy.sorted([older, newer]).first?.key.turnID == "turn-1", "executions sort newest first within a group")
     }
 
+    private static func testObserverExecutionEstimation() throws {
+        let root = URL(fileURLWithPath: "/tmp/estimation-repo")
+        let started = Date(timeIntervalSince1970: 1_000)
+        let now = started.addingTimeInterval(600)
+        let key = CodexExecutionKey(
+            profileID: nil,
+            normalizedPhysicalRootPath: root.standardizedFileURL.resolvingSymlinksInPath().path,
+            threadID: "thread-a",
+            turnID: "turn-active"
+        )
+        let execution = CodexExecutionProjection(
+            key: key,
+            repositoryDisplayName: "Repo",
+            workspaceDisplayName: "Repo",
+            chatName: "Chat A",
+            startedAt: started,
+            tokenTotal: nil,
+            plan: nil,
+            lastObservedAt: now
+        )
+        func sample(
+            threadID: String = "thread-a",
+            turnID: String,
+            duration: Int64,
+            repository: String? = "Repo",
+            completedAt: Date
+        ) -> CodexExecutionDurationSample {
+            CodexExecutionDurationSample(
+                profileID: nil,
+                physicalRootURL: root,
+                threadID: threadID,
+                turnID: turnID,
+                repositoryDisplayName: repository,
+                workspaceDisplayName: repository,
+                chatName: "Chat A",
+                durationSeconds: duration,
+                completedAt: completedAt
+            )
+        }
+
+        let chatSamples = [800, 900, 1_000, 1_100, 1_200].enumerated().map { index, duration in
+            sample(turnID: "turn-history-\(index)", duration: Int64(duration), completedAt: started.addingTimeInterval(TimeInterval(index)))
+        }
+        let estimate = CodexExecutionEstimationPolicy.estimate(
+            for: execution,
+            now: now,
+            samples: chatSamples
+        )
+        try expect(estimate?.cohort == .sameChat, "same Chat history is preferred when sufficient")
+        try expect(estimate?.sampleCount == 5, "same Chat estimate keeps the cohort count")
+        try expect(estimate?.confidence == .high, "narrow same Chat history has high confidence")
+        try expect((estimate?.lowerProgressPercent ?? 100) <= (estimate?.upperProgressPercent ?? 0), "progress range is ordered")
+        try expect((estimate?.upperProgressPercent ?? 100) < 100, "active estimate never reaches 100%")
+        try expect((estimate?.lowerRemainingSeconds ?? 0) <= (estimate?.upperRemainingSeconds ?? -1), "remaining range is ordered")
+        try expect(estimate?.progressText.contains("推估進度") == true, "estimate progress text uses estimate wording")
+        try expect(estimate?.remainingText.contains("預估剩餘") == true, "estimate remaining text uses estimate wording")
+        try expect(estimate?.confidenceText == "信心：高", "estimate confidence text is localized and explicit")
+
+        let repoSamples = (0..<8).map { index in
+            sample(
+                threadID: "other-thread",
+                turnID: "repo-history-\(index)",
+                duration: 900,
+                completedAt: started.addingTimeInterval(TimeInterval(index + 10))
+            )
+        }
+        let selectedRepo = CodexExecutionEstimationPolicy.selectCohort(
+            for: execution,
+            samples: repoSamples
+        )
+        try expect(selectedRepo.kind == .sameRepository, "Repo cohort is the next fallback after Chat")
+        try expect(selectedRepo.samples.count == 8, "Repo fallback retains all bounded samples")
+
+        try expect(
+            CodexExecutionEstimationPolicy.estimate(for: execution, now: now, samples: []) == nil,
+            "zero history does not invent a percentage"
+        )
+        let beyondHistory = CodexExecutionEstimationPolicy.estimate(
+            for: execution,
+            now: started.addingTimeInterval(10_000),
+            samples: chatSamples
+        )
+        try expect(beyondHistory?.upperProgressPercent == 95, "elapsed beyond history is capped at 95%")
+        try expect(beyondHistory?.lowerRemainingSeconds == 0, "elapsed beyond history does not invent positive remaining time")
+
+        let newTurn = CodexExecutionProjection(
+            key: CodexExecutionKey(
+                profileID: nil,
+                normalizedPhysicalRootPath: key.normalizedPhysicalRootPath,
+                threadID: "thread-a",
+                turnID: "turn-new"
+            ),
+            repositoryDisplayName: "Repo",
+            workspaceDisplayName: "Repo",
+            chatName: "Chat A",
+            startedAt: now,
+            tokenTotal: nil,
+            plan: nil,
+            lastObservedAt: now
+        )
+        let newTurnEstimate = CodexExecutionEstimationPolicy.estimate(
+            for: newTurn,
+            now: now,
+            samples: chatSamples
+        )
+        try expect(newTurnEstimate?.lowerProgressPercent == 0, "new Turn starts its estimate at zero")
+    }
+
+    private static func testBoundedDurationHistoryScan() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-estimation-scan-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let rolloutDirectory = base.appendingPathComponent("sessions.local", isDirectory: true)
+        try FileManager.default.createDirectory(at: rolloutDirectory, withIntermediateDirectories: true)
+        let rollout = rolloutDirectory.appendingPathComponent("rollout-test.jsonl")
+        let content = [
+            #"{"type":"session_meta","payload":{"id":"thread-scan","cwd":"/tmp/Repo","git":{"repository_url":"https://github.com/example/Repo.git"}}}"#,
+            #"{"timestamp":"1970-01-01T00:16:40.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-scan","started_at":1000}}"#,
+            #"{"timestamp":"1970-01-01T00:18:40.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-scan","started_at":1000,"completed_at":1120,"duration_ms":120000}}"#
+        ].joined(separator: "\n") + "\n"
+        try Data(content.utf8).write(to: rollout)
+
+        let samples = CodexExecutionDurationHistoryScanner.scan(
+            roots: [CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: base)],
+            maxSamples: 10
+        )
+        try expect(samples.count == 1, "bounded scan returns one completed metadata sample")
+        try expect(samples.first?.durationSeconds == 120, "scan reads terminal duration only")
+        try expect(samples.first?.repositoryDisplayName == "Repo", "scan keeps safe repository display name")
+        try expect(samples.first?.threadID == "thread-scan", "scan keeps thread identity")
+    }
+
     private static func testTurnNotificationContentPolicy() throws {
         try expect(
             TurnNotificationContentPolicy.title(state: .completed, programName: "Build release") == "程序完成：Build release",
@@ -3702,7 +3836,7 @@ struct CodexUsageStatusTests {
 
         let artifactURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("outputs/CodexUsageStatus.app.zip")
-        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, "2.4.84"])
+        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, "2.4.85"])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted as the canonical GitHub release")
 
         let malformedStatus = try runToolStatus("/bin/bash", [validatorURL.path, "/dev/null"])

@@ -62,6 +62,9 @@ final class UsageViewModel: ObservableObject {
     /// physical roots. The selected account's `activeTurn` remains the HUD
     /// authority; this collection is only the Overview's multi-execution view.
     @Published private(set) var activeExecutions: [CodexExecutionProjection] = []
+    /// Observer-based estimates are separate from provider Plan snapshots and
+    /// are derived only from bounded local Turn duration evidence.
+    @Published private(set) var executionEstimationHistoryReady = false
     @Published private(set) var activeTurnPlan: TurnPlanSnapshot? {
         didSet { refreshStatusItemPresentation() }
     }
@@ -150,6 +153,8 @@ final class UsageViewModel: ObservableObject {
     private var localStoresLoaded = false
     private var startupTask: Task<Void, Never>?
     private var defaultClientStopTask: Task<Void, Never>?
+    private var estimationHistoryScanTask: Task<Void, Never>?
+    private var completedDurationSamples: [CodexExecutionDurationSample] = []
 
     private enum PreferenceKey {
         static let notificationsEnabled = "usage.notifications.enabled"
@@ -389,6 +394,7 @@ final class UsageViewModel: ObservableObject {
         displayTimer?.invalidate()
         updateCheckTimer?.invalidate()
         startupTask?.cancel()
+        estimationHistoryScanTask?.cancel()
     }
 
     func start() {
@@ -477,6 +483,8 @@ final class UsageViewModel: ObservableObject {
         managedWorkers.removeAll()
         startupTask?.cancel()
         startupTask = nil
+        estimationHistoryScanTask?.cancel()
+        estimationHistoryScanTask = nil
         tokenReelAudioPlayer.cancel()
         defaultClientStopTask?.cancel()
         defaultClientStopTask = nil
@@ -1324,6 +1332,67 @@ final class UsageViewModel: ObservableObject {
         }
     }
 
+    /// Returns a bounded, non-authoritative estimate for an active execution.
+    /// The Overview already advances `currentDate` on its minute display
+    /// cadence, so this adds no timer or polling subsystem.
+    func estimatedExecution(for execution: CodexExecutionProjection) -> CodexExecutionEstimate? {
+        CodexExecutionEstimationPolicy.estimate(
+            for: execution,
+            now: currentDate,
+            samples: completedDurationSamples
+        )
+    }
+
+    private func recordCompletedDurationSample(from event: CodexLocalTurnActivityEvent) {
+        guard event.kind == .completed,
+              let durationSeconds = event.durationSeconds,
+              durationSeconds > 0 else { return }
+        let sample = CodexExecutionDurationSample(
+            profileID: event.profileID,
+            physicalRootURL: event.physicalRootURL,
+            threadID: event.threadID,
+            turnID: event.turnID,
+            repositoryDisplayName: event.sessionIdentity?.repositoryDisplayName,
+            workspaceDisplayName: event.sessionIdentity?.workspaceDisplayName,
+            chatName: event.programName,
+            durationSeconds: durationSeconds,
+            completedAt: event.completedAt ?? event.observedAt
+        )
+        mergeCompletedDurationSamples([sample])
+    }
+
+    private func mergeCompletedDurationSamples(_ incoming: [CodexExecutionDurationSample]) {
+        guard !incoming.isEmpty else { return }
+        var merged: [String: CodexExecutionDurationSample] = [:]
+        for sample in completedDurationSamples + incoming {
+            let profile = sample.profileID?.uuidString ?? "default"
+            let key = "\(profile)|\(sample.normalizedPhysicalRootPath)|\(sample.threadID)|\(sample.turnID)"
+            merged[key] = sample
+        }
+        completedDurationSamples = merged.values
+            .sorted { $0.completedAt > $1.completedAt }
+            .prefix(200)
+            .map { $0 }
+    }
+
+    private func startExecutionDurationHistoryScan() {
+        estimationHistoryScanTask?.cancel()
+        if completedDurationSamples.count >= 15 {
+            executionEstimationHistoryReady = true
+            return
+        }
+        executionEstimationHistoryReady = false
+        let roots = localUsageObservationRoots()
+        estimationHistoryScanTask = Task { @MainActor [weak self] in
+            let samples = await Task.detached(priority: .utility) {
+                CodexExecutionDurationHistoryScanner.scan(roots: roots)
+            }.value
+            guard let self, !Task.isCancelled, !self.isStopping else { return }
+            self.mergeCompletedDurationSamples(samples)
+            self.executionEstimationHistoryReady = true
+        }
+    }
+
     private func applyPlanToActiveExecution(profileID: UUID?, envelope: TurnPlanEnvelope) {
         let turnID = envelope.turnID
         let candidates = activeExecutions.indices.filter { index in
@@ -1347,6 +1416,10 @@ final class UsageViewModel: ObservableObject {
     }
 
     private func handleLocalTurnActivity(_ event: CodexLocalTurnActivityEvent) {
+        // Capture completed duration metadata before the lifecycle projection
+        // removes its terminal row. Failed/interrupted Turns are excluded from
+        // the completed-duration distribution.
+        recordCompletedDurationSample(from: event)
         // Maintain the all-roots execution projection first. The selected
         // account filter below only governs the existing single Turn card/HUD.
         updateActiveExecutionProjection(event)
@@ -1525,8 +1598,7 @@ final class UsageViewModel: ObservableObject {
         refreshHUDTokenActivitySummary()
     }
 
-    private func refreshLocalUsageObserverRoots() {
-        guard let localUsageObserver else { return }
+    private func localUsageObservationRoots() -> [CodexLocalUsageObservationRoot] {
         let defaultHome = CodexLocalUsageObservationRoot.canonicalDefaultHomeURL()
         // The physical default CODEX_HOME is a stable machine observation
         // source. It must not change high-water namespace when the selected
@@ -1538,7 +1610,16 @@ final class UsageViewModel: ObservableObject {
                 codexHomeURL: profileStore.codexHomeURL(for: $0)
             )
         })
+        return roots
+    }
+
+    private func refreshLocalUsageObserverRoots() {
+        guard let localUsageObserver else { return }
+        let roots = localUsageObservationRoots()
         localUsageObserver.setRoots(roots)
+        if localStoresLoaded {
+            startExecutionDurationHistoryScan()
+        }
     }
 
     private func refreshHUDTokenActivityFetchedAt(fallback: Date? = nil) {

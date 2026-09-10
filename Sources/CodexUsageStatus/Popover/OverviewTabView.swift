@@ -123,6 +123,25 @@ extension UsagePopoverView {
                     .font(.caption2)
                     .foregroundStyle(HUDColorPalette.secondaryText)
             }
+            if let estimate = model.estimatedExecution(for: execution) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(estimate.progressText)
+                        .font(.caption2.weight(.semibold).monospacedDigit())
+                        .foregroundStyle(HUDColorPalette.warning)
+                    HStack(spacing: 7) {
+                        Text(estimate.remainingText)
+                        Text(estimate.confidenceText)
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(HUDColorPalette.tertiaryText)
+                }
+            } else {
+                Text(model.executionEstimationHistoryReady
+                    ? "推估進度：估算建立中 · 資料不足"
+                    : "推估進度：估算建立中")
+                    .font(.caption2)
+                    .foregroundStyle(HUDColorPalette.tertiaryText)
+            }
             HStack(spacing: 8) {
                 Text(durationText(max(0, Int64(model.currentDate.timeIntervalSince(execution.startedAt)))))
                 if let tokens = execution.tokenTotal {
@@ -135,6 +154,7 @@ extension UsagePopoverView {
         .padding(.leading, 8)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(execution.chatName ?? "未命名 Chat")，執行中")
+        .accessibilityValue(model.estimatedExecution(for: execution)?.progressText ?? "推估進度資料不足")
     }
 
     @ViewBuilder
