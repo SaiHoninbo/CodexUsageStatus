@@ -3,12 +3,14 @@ import Foundation
 enum HUDQuotaWindowKind: Equatable, CaseIterable, Hashable {
     case fiveHour
     case sevenDay
+    case thirtyDay
     case gptReserveWeekly
 
     var durationMins: Int64 {
         switch self {
         case .fiveHour: return 300
         case .sevenDay: return 10_080
+        case .thirtyDay: return 43_200
         case .gptReserveWeekly: return 10_080
         }
     }
@@ -17,6 +19,7 @@ enum HUDQuotaWindowKind: Equatable, CaseIterable, Hashable {
         switch self {
         case .fiveHour: return "5 小時"
         case .sevenDay: return "7 天"
+        case .thirtyDay: return "30 天"
         case .gptReserveWeekly: return "GPT reserve Weekly"
         }
     }
@@ -38,6 +41,7 @@ struct HUDDualQuotaPresentation: Equatable {
     let profileID: UUID
     let fiveHour: HUDQuotaWindowPresentation?
     let sevenDay: HUDQuotaWindowPresentation?
+    let thirtyDay: HUDQuotaWindowPresentation?
     let gptReserveWeekly: HUDQuotaWindowPresentation?
     let credits: CreditsBalance?
 
@@ -45,18 +49,20 @@ struct HUDDualQuotaPresentation: Equatable {
         profileID: UUID,
         fiveHour: HUDQuotaWindowPresentation?,
         sevenDay: HUDQuotaWindowPresentation?,
+        thirtyDay: HUDQuotaWindowPresentation? = nil,
         gptReserveWeekly: HUDQuotaWindowPresentation? = nil,
         credits: CreditsBalance? = nil
     ) {
         self.profileID = profileID
         self.fiveHour = fiveHour
         self.sevenDay = sevenDay
+        self.thirtyDay = thirtyDay
         self.gptReserveWeekly = gptReserveWeekly
         self.credits = credits
     }
 
     var rows: [HUDQuotaWindowPresentation] {
-        [fiveHour, sevenDay, gptReserveWeekly].compactMap { $0 }
+        [fiveHour, sevenDay, thirtyDay, gptReserveWeekly].compactMap { $0 }
     }
 
     var rowCount: Int { rows.count }
@@ -76,6 +82,9 @@ enum HUDQuotaPresentationPolicy {
         let windows = [snapshot?.primary, snapshot?.secondary].compactMap { $0 }
         let fiveHour = makeWindow(.fiveHour, from: windows, now: now)
         let sevenDay = makeWindow(.sevenDay, from: windows, now: now)
+        // Free accounts currently expose a single rolling 30-day window.
+        // Keep its real duration instead of presenting it as a 5-hour quota.
+        let thirtyDay = makeWindow(.thirtyDay, from: windows, now: now)
         // `gpt-reserve` is a separate rate-limit bucket in
         // `rateLimitsByLimitId`, not the optional spend-control/monthly
         // credit object. Prefer the real window when present and retain the
@@ -86,11 +95,12 @@ enum HUDQuotaPresentationPolicy {
             from: [snapshot?.gptReserveWeekly].compactMap { $0 },
             now: now
         ) ?? makeSpendControl(snapshot?.individualLimit, now: now)
-        guard fiveHour != nil || sevenDay != nil || gptReserveWeekly != nil else { return nil }
+        guard fiveHour != nil || sevenDay != nil || thirtyDay != nil || gptReserveWeekly != nil else { return nil }
         return HUDDualQuotaPresentation(
             profileID: profileID,
             fiveHour: fiveHour,
             sevenDay: sevenDay,
+            thirtyDay: thirtyDay,
             gptReserveWeekly: gptReserveWeekly,
             credits: snapshot?.credits
         )

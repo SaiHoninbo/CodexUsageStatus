@@ -51,6 +51,7 @@ struct CodexUsageStatusTests {
     static func main() async {
         let tests: [(String, () throws -> Void)] = [
             ("full snapshot prefers codex bucket", testFullSnapshotPrefersCodexBucket),
+            ("Free 30-day quota presentation", testFreeThirtyDayQuotaPresentation),
             ("empty codex bucket falls back", testEmptyCodexBucketFallsBack),
             ("sparse patch preserves metadata", testSparsePatchPreservesMetadata),
             ("purchased credits decode and format", testPurchasedCreditsDecodeAndFormat),
@@ -211,6 +212,37 @@ struct CodexUsageStatusTests {
         try expect(snapshot.gptReserveWeekly?.usedPercent == 0, "gpt-reserve bucket should be decoded")
         try expect(snapshot.gptReserveWeekly?.remainingPercent == 100, "gpt-reserve remaining percent")
         try expect(snapshot.credits?.displayBalance == "814.39", "credits should round to two decimals")
+    }
+
+    private static func testFreeThirtyDayQuotaPresentation() throws {
+        let result: [String: Any] = [
+            "rateLimits": [
+                "limitId": "codex",
+                "planType": "free",
+                "primary": ["usedPercent": 55, "windowDurationMins": 43_200, "resetsAt": 1_791_702_190],
+                "secondary": NSNull()
+            ],
+            "rateLimitsByLimitId": [
+                "codex": [
+                    "limitId": "codex",
+                    "planType": "free",
+                    "primary": ["usedPercent": 55, "windowDurationMins": 43_200, "resetsAt": 1_791_702_190],
+                    "secondary": NSNull()
+                ]
+            ]
+        ]
+        let snapshot = try UsageDataCodec.decodeFullSnapshot(from: result)
+        let presentation = HUDQuotaPresentationPolicy.make(
+            snapshot: snapshot,
+            profileID: UUID(),
+            now: Date(timeIntervalSince1970: 1_789_000_000)
+        )
+        try expect(snapshot.planType == "free", "Free plan metadata should be retained")
+        try expect(snapshot.primary?.usedPercent == 55, "Free used percent should decode")
+        try expect(presentation?.fiveHour == nil, "Free 30-day window must not be labeled 5-hour")
+        try expect(presentation?.thirtyDay?.remainingPercent == 45, "Free 30-day remaining percent")
+        try expect(presentation?.thirtyDay?.label == "30 天", "Free 30-day label")
+        try expect(presentation?.rows.count == 1, "Free single 30-day window produces one row")
     }
 
     private static func testEmptyCodexBucketFallsBack() throws {
@@ -4330,13 +4362,13 @@ struct CodexUsageStatusTests {
 
         let artifactURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("outputs/CodexUsageStatus.app.zip")
-        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, "2.4.91"])
+        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, "2.4.92"])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 
-        let publicStatus = try runToolStatus("/bin/bash", [validatorURL.path, "--public-release", artifactURL.path, "2.4.91"])
+        let publicStatus = try runToolStatus("/bin/bash", [validatorURL.path, "--public-release", artifactURL.path, "2.4.92"])
         try expect(publicStatus == 0, "ad-hoc artifact is accepted by the public GitHub release gate")
 
-        let notarizeStatus = try runToolStatus("/bin/bash", [validatorURL.path, "--notarize", artifactURL.path, "2.4.91"])
+        let notarizeStatus = try runToolStatus("/bin/bash", [validatorURL.path, "--notarize", artifactURL.path, "2.4.92"])
         try expect(notarizeStatus != 0, "retired notarization mode is rejected")
 
         let malformedStatus = try runToolStatus("/bin/bash", [validatorURL.path, "/dev/null"])

@@ -28,6 +28,7 @@ struct HUDQuotaRow: View {
         switch kind {
         case .fiveHour: return palette.fiveHour
         case .sevenDay: return palette.sevenDay
+        case .thirtyDay: return palette.sevenDay
         case .gptReserveWeekly: return palette.gptReserveWeekly
         }
     }
@@ -36,6 +37,7 @@ struct HUDQuotaRow: View {
         switch kind {
         case .fiveHour: return palette.fiveHourSurface
         case .sevenDay: return palette.sevenDaySurface
+        case .thirtyDay: return palette.sevenDaySurface
         case .gptReserveWeekly: return palette.gptReserveSurface
         }
     }

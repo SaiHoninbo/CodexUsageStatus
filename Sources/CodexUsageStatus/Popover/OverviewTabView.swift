@@ -463,6 +463,9 @@ extension UsagePopoverView {
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
                     quotaSummaryRow(kind: .fiveHour, presentation: presentation?.fiveHour, accent: HUDColorPalette.fiveHour)
                     quotaSummaryRow(kind: .sevenDay, presentation: presentation?.sevenDay, accent: HUDColorPalette.sevenDay)
+                    if let thirtyDay = presentation?.thirtyDay {
+                        quotaSummaryRow(kind: .thirtyDay, presentation: thirtyDay, accent: HUDColorPalette.sevenDay)
+                    }
                     if let reserve = presentation?.gptReserveWeekly {
                         quotaSummaryRow(kind: .gptReserveWeekly, presentation: reserve, accent: HUDColorPalette.gptReserveWeekly)
                     }

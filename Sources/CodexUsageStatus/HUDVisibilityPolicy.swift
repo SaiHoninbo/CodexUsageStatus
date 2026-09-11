@@ -98,6 +98,7 @@ enum HUDVisibilityPolicy {
             profileID: currentProfileID,
             fiveHour: live.fiveHour ?? cached.fiveHour,
             sevenDay: live.sevenDay ?? cached.sevenDay,
+            thirtyDay: live.thirtyDay ?? cached.thirtyDay,
             gptReserveWeekly: live.gptReserveWeekly ?? cached.gptReserveWeekly,
             credits: live.credits ?? cached.credits
         )
