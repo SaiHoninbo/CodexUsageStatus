@@ -586,6 +586,17 @@ private struct CodexLocalUsageScanResult: Sendable {
     let seededPaths: Set<String>
 }
 
+/// Bounded reconciliation metadata emitted by the existing rollout scan. It
+/// does not persist an active-execution database or introduce another timer;
+/// it tells the projection when an observation epoch changed and which roots
+/// are no longer authoritative.
+struct CodexLocalActiveExecutionReconciliation: Equatable, Sendable {
+    let observationEpoch: UInt64
+    let resetActiveExecutions: Bool
+    let prunedPhysicalRootURLs: [URL]
+    let observedActivityCount: Int
+}
+
 /// Watches only already-known Codex HOME session roots and tails append-only
 /// rollout JSONL files. Existing files are initially positioned at EOF, so an
 /// old conversation cannot be imported as new local usage on first launch.
@@ -594,6 +605,7 @@ final class CodexLocalUsageObserver {
     typealias ObservationHandler = (UUID?, CodexLocalTokenUsageRecord) -> Void
     typealias TurnCompletionHandler = (UUID?, CodexLocalTurnCompletionRecord) -> Void
     typealias TurnActivityHandler = (CodexLocalTurnActivityEvent) -> Void
+    typealias ActiveExecutionReconciliationHandler = (CodexLocalActiveExecutionReconciliation) -> Void
 
     private let cursorURL: URL
     private var roots: [CodexLocalUsageObservationRoot] = []
@@ -601,31 +613,53 @@ final class CodexLocalUsageObserver {
     private var seededPaths: Set<String> = []
     private var timer: Timer?
     private var scanInFlight = false
+    private var scanGeneration: UInt64 = 0
     private var handler: ObservationHandler?
     private var turnCompletionHandler: TurnCompletionHandler?
     private var turnActivityHandler: TurnActivityHandler?
+    private var activeExecutionReconciliationHandler: ActiveExecutionReconciliationHandler?
     private var hasStarted = false
     private var rootsGeneration: UInt64 = 0
     private var lifecycleGeneration: UInt64 = 0
+    private var observationEpoch: UInt64 = 0
 
     init(
         cursorURL: URL,
         handler: ObservationHandler? = nil,
         turnCompletionHandler: TurnCompletionHandler? = nil,
-        turnActivityHandler: TurnActivityHandler? = nil
+        turnActivityHandler: TurnActivityHandler? = nil,
+        activeExecutionReconciliationHandler: ActiveExecutionReconciliationHandler? = nil
     ) {
         self.cursorURL = cursorURL
         self.handler = handler
         self.turnCompletionHandler = turnCompletionHandler
         self.turnActivityHandler = turnActivityHandler
+        self.activeExecutionReconciliationHandler = activeExecutionReconciliationHandler
         loadCursors()
     }
 
     func setRoots(_ roots: [CodexLocalUsageObservationRoot]) {
-        let previousRootPaths = Set(self.roots.map { $0.codexHomeURL.path })
+        let previousRoots = self.roots
+        let previousRootPaths = Set(previousRoots.map { $0.codexHomeURL.path })
         self.roots = roots
         rootsGeneration &+= 1
         guard hasStarted else { return }
+
+        if previousRoots != roots {
+            observationEpoch &+= 1
+            let currentRootPaths = Set(roots.map { $0.codexHomeURL.path })
+            let removedRoots = previousRoots
+                .map(\.codexHomeURL)
+                .filter { !currentRootPaths.contains($0.path) }
+            activeExecutionReconciliationHandler?(
+                CodexLocalActiveExecutionReconciliation(
+                    observationEpoch: observationEpoch,
+                    resetActiveExecutions: true,
+                    prunedPhysicalRootURLs: removedRoots,
+                    observedActivityCount: 0
+                )
+            )
+        }
 
         // A managed profile can be added after observation has started. Seed
         // rollout files that already exist at their current EOF so adding a
@@ -661,6 +695,15 @@ final class CodexLocalUsageObserver {
         stop()
         hasStarted = true
         lifecycleGeneration &+= 1
+        observationEpoch &+= 1
+        activeExecutionReconciliationHandler?(
+            CodexLocalActiveExecutionReconciliation(
+                observationEpoch: observationEpoch,
+                resetActiveExecutions: true,
+                prunedPhysicalRootURLs: [],
+                observedActivityCount: 0
+            )
+        )
         seededPaths = Self.rolloutPaths(in: roots)
         scan()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
@@ -671,11 +714,23 @@ final class CodexLocalUsageObserver {
     }
 
     func stop() {
+        let wasStarted = hasStarted
         timer?.invalidate()
         timer = nil
         hasStarted = false
         lifecycleGeneration &+= 1
+        observationEpoch &+= 1
         scanInFlight = false
+        if wasStarted {
+            activeExecutionReconciliationHandler?(
+                CodexLocalActiveExecutionReconciliation(
+                    observationEpoch: observationEpoch,
+                    resetActiveExecutions: true,
+                    prunedPhysicalRootURLs: [],
+                    observedActivityCount: 0
+                )
+            )
+        }
     }
 
     deinit {
@@ -700,18 +755,29 @@ final class CodexLocalUsageObserver {
     private func scan() {
         guard !scanInFlight, !roots.isEmpty else { return }
         scanInFlight = true
+        scanGeneration &+= 1
         let roots = roots
         let cursors = cursors
         let seededPaths = seededPaths
         let rootsGeneration = rootsGeneration
         let lifecycleGeneration = lifecycleGeneration
-        Task.detached(priority: .utility) { [roots, cursors, seededPaths, rootsGeneration, lifecycleGeneration] in
+        let observationEpoch = observationEpoch
+        let scanGeneration = scanGeneration
+        Task.detached(priority: .utility) { [roots, cursors, seededPaths, rootsGeneration, lifecycleGeneration, observationEpoch, scanGeneration] in
             let result = Self.scanRoots(roots, cursors: cursors, seededPaths: seededPaths)
             await MainActor.run { [weak self] in
                 guard let self else { return }
+                guard self.scanGeneration == scanGeneration else { return }
+                self.scanInFlight = false
                 guard self.hasStarted,
                       self.lifecycleGeneration == lifecycleGeneration else { return }
-                self.scanInFlight = false
+                guard self.observationEpoch == observationEpoch else {
+                    // The root set changed while this detached scan was
+                    // reading. Discard its events and immediately scan the
+                    // current roots instead of leaving scanInFlight latched.
+                    self.scan()
+                    return
+                }
                 guard self.rootsGeneration == rootsGeneration else {
                     // Roots changed while this detached scan was reading. Do
                     // not apply events or replace cursors from the stale root
@@ -732,6 +798,14 @@ final class CodexLocalUsageObserver {
                 for event in result.turnCompletions {
                     self.turnCompletionHandler?(event.profileID, event.record)
                 }
+                self.activeExecutionReconciliationHandler?(
+                    CodexLocalActiveExecutionReconciliation(
+                        observationEpoch: observationEpoch,
+                        resetActiveExecutions: false,
+                        prunedPhysicalRootURLs: [],
+                        observedActivityCount: result.turnActivities.count
+                    )
+                )
             }
         }
     }
@@ -867,13 +941,19 @@ final class CodexLocalUsageObserver {
                                     eventThreadID: activity.threadID,
                                     sourceIsAmbiguous: identityIsAmbiguous
                                 )
-                                // An unproven terminal record must not remove
-                                // or overwrite an execution belonging to a
-                                // different Chat. Started/token activity may
-                                // remain as an explicitly unnamed observation;
-                                // terminal state is authority-sensitive and is
-                                // dropped until identity is proven.
-                                guard identity.acceptsActivity(kind: activity.kind) else {
+                                // An unproven terminal record is still useful
+                                // to the active projection when its physical
+                                // Turn identity can be matched uniquely. The
+                                // ViewModel performs that ambiguity check;
+                                // unknown lifecycle payloads remain rejected
+                                // by the parser above.
+                                let isTerminal: Bool = {
+                                    switch activity.kind {
+                                    case .completed, .failed, .interrupted: return true
+                                    case .started, .tokenUpdated: return false
+                                    }
+                                }()
+                                guard identity.acceptsActivity(kind: activity.kind) || isTerminal else {
                                     continue
                                 }
                                 let provenIdentity = identity.sessionIdentity

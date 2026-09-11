@@ -101,6 +101,7 @@ struct CodexUsageStatusTests {
             ("turn notification content policy", testTurnNotificationContentPolicy),
             ("turn plan notification policy", testTurnPlanNotificationPolicy),
             ("execution projection identity and ordering", testExecutionProjectionIdentityAndOrdering),
+            ("active execution reconciliation policy", testActiveExecutionReconciliationPolicy),
             ("execution display truthfulness policy", testExecutionDisplayTruthfulnessPolicy),
             ("observer execution estimation", testObserverExecutionEstimation),
             ("bounded duration history scan", testBoundedDurationHistoryScan),
@@ -153,6 +154,13 @@ struct CodexUsageStatusTests {
             }
         }
         do {
+            try await testActiveExecutionObserverEpochs()
+            print("PASS active execution observer epochs")
+        } catch {
+            failures += 1
+            print("FAIL active execution observer epochs: \(error)")
+        }
+        do {
             try await testLoginLifecycleShutdown()
             print("PASS login lifecycle shutdown")
         } catch {
@@ -166,7 +174,7 @@ struct CodexUsageStatusTests {
             failures += 1
             print("FAIL persistence write coordinator: \(error)")
         }
-        print("\(tests.count + 2 - failures)/\(tests.count + 2) tests passed")
+        print("\(tests.count + 3 - failures)/\(tests.count + 3) tests passed")
         if failures > 0 { exit(1) }
     }
 
@@ -2757,6 +2765,138 @@ struct CodexUsageStatusTests {
         try expect(newer.scopeKey != sameRemoteOtherWorktree.scopeKey, "same remote in another physical worktree remains a distinct UI scope")
         let unproven = CodexExecutionProjection(key: CodexExecutionKey(profileID: nil, normalizedPhysicalRootPath: "/tmp/unknown", threadID: "thread-unknown", turnID: "turn-unknown"), repositoryDisplayName: nil, workspaceDisplayName: nil, chatName: nil, startedAt: Date(timeIntervalSince1970: 100), tokenTotal: nil, plan: nil, lastObservedAt: Date(timeIntervalSince1970: 100))
         try expect(unproven.groupName == "工作區身份未證明", "unproven scope is presented explicitly instead of as an unnamed workspace")
+    }
+
+    private static func testActiveExecutionReconciliationPolicy() throws {
+        let root = URL(fileURLWithPath: "/tmp/reconciliation-project")
+        let identityA = CodexLocalSessionIdentity(
+            threadID: "thread-reconcile",
+            repositoryDisplayName: "project",
+            workspaceDisplayName: "project",
+            kind: .repository,
+            repositoryIdentityDigest: "repo-a"
+        )
+        let identityB = CodexLocalSessionIdentity(
+            threadID: "thread-reconcile",
+            repositoryDisplayName: "project",
+            workspaceDisplayName: "project-worktree",
+            kind: .repository,
+            repositoryIdentityDigest: "repo-b"
+        )
+        let startedAt = Date(timeIntervalSince1970: 100)
+        let started = CodexLocalTurnActivityEvent(
+            profileID: nil,
+            physicalRootURL: root,
+            threadID: "thread-reconcile",
+            turnID: "turn-reconcile",
+            kind: .started,
+            startedAt: startedAt,
+            completedAt: nil,
+            durationSeconds: nil,
+            turnTokenTotal: nil,
+            observedAt: startedAt,
+            programName: "Chat A",
+            sessionIdentity: identityA
+        )
+        let exactProjection = CodexExecutionProjection(
+            key: CodexExecutionProjectionPolicy.key(for: started),
+            repositoryDisplayName: "project",
+            workspaceDisplayName: "project",
+            chatName: "Chat A",
+            startedAt: startedAt,
+            tokenTotal: nil,
+            plan: nil,
+            lastObservedAt: startedAt
+        )
+        let exactTerminal = CodexLocalTurnActivityEvent(
+            profileID: nil,
+            physicalRootURL: root,
+            threadID: "thread-reconcile",
+            turnID: "turn-reconcile",
+            kind: .completed,
+            startedAt: startedAt,
+            completedAt: startedAt.addingTimeInterval(5),
+            durationSeconds: 5,
+            turnTokenTotal: nil,
+            observedAt: startedAt.addingTimeInterval(5),
+            sessionIdentity: identityA
+        )
+        try expect(
+            CodexExecutionProjectionPolicy.terminalMatchIndices(for: exactTerminal, in: [exactProjection]) == [0],
+            "exact terminal identity retires the matching execution"
+        )
+
+        let partialTerminal = CodexLocalTurnActivityEvent(
+            profileID: nil,
+            physicalRootURL: root,
+            threadID: "thread-reconcile",
+            turnID: "turn-reconcile",
+            kind: .completed,
+            startedAt: startedAt,
+            completedAt: startedAt.addingTimeInterval(5),
+            durationSeconds: 5,
+            turnTokenTotal: nil,
+            observedAt: startedAt.addingTimeInterval(5),
+            sessionIdentity: nil
+        )
+        try expect(
+            CodexExecutionProjectionPolicy.terminalMatchIndices(for: partialTerminal, in: [exactProjection]) == [0],
+            "a terminal without repository digest retires a unique physical Turn"
+        )
+
+        let ambiguousProjection = CodexExecutionProjection(
+            key: CodexExecutionKey(
+                profileID: nil,
+                normalizedPhysicalRootPath: root.standardizedFileURL.resolvingSymlinksInPath().path,
+                threadID: "thread-reconcile",
+                turnID: "turn-reconcile",
+                repositoryIdentityDigest: identityB.repositoryIdentityDigest
+            ),
+            repositoryDisplayName: "project",
+            workspaceDisplayName: "project-worktree",
+            chatName: "Chat B",
+            startedAt: startedAt,
+            tokenTotal: nil,
+            plan: nil,
+            lastObservedAt: startedAt
+        )
+        try expect(
+            CodexExecutionProjectionPolicy.terminalMatchIndices(
+                for: partialTerminal,
+                in: [exactProjection, ambiguousProjection]
+            ).isEmpty,
+            "an ambiguous partial terminal cannot retire either execution"
+        )
+    }
+
+    @MainActor
+    private static func testActiveExecutionObserverEpochs() async throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-active-epoch-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let cursorURL = base.appendingPathComponent("cursor.json")
+        let rootA = base.appendingPathComponent("home-a", isDirectory: true)
+        let rootB = base.appendingPathComponent("home-b", isDirectory: true)
+        var reconciliations: [CodexLocalActiveExecutionReconciliation] = []
+        let observer = CodexLocalUsageObserver(
+            cursorURL: cursorURL,
+            activeExecutionReconciliationHandler: { reconciliations.append($0) }
+        )
+        observer.setRoots([CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: rootA)])
+        observer.start()
+        try expect(reconciliations.last?.resetActiveExecutions == true, "observer start opens a fresh active epoch")
+        let startEpoch = try unwrap(reconciliations.last?.observationEpoch, "observer start epoch")
+
+        observer.setRoots([CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: rootB)])
+        let rootChange = try unwrap(reconciliations.last, "root-change reconciliation")
+        try expect(rootChange.resetActiveExecutions, "root change resets the old active epoch")
+        try expect(rootChange.observationEpoch > startEpoch, "root change advances the observation epoch")
+        try expect(rootChange.prunedPhysicalRootURLs == [rootA], "root change reports the removed physical root")
+
+        observer.stop()
+        let stop = try unwrap(reconciliations.last, "observer stop reconciliation")
+        try expect(stop.resetActiveExecutions, "observer stop retires the active epoch")
+        try expect(stop.observationEpoch > rootChange.observationEpoch, "observer stop advances the observation epoch")
     }
 
     private static func testExecutionDisplayTruthfulnessPolicy() throws {

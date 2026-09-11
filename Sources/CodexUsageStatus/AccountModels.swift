@@ -240,6 +240,49 @@ enum CodexExecutionProjectionPolicy {
         )
     }
 
+    static func keyWithoutRepositoryIdentity(for event: CodexLocalTurnActivityEvent) -> CodexExecutionKey {
+        CodexExecutionKey(
+            profileID: event.profileID,
+            normalizedPhysicalRootPath: normalizedRootPath(event.physicalRootURL),
+            threadID: event.threadID,
+            turnID: event.turnID
+        )
+    }
+
+    /// Returns the active rows that represent the same physical Turn without
+    /// requiring repository identity. This is intentionally narrower than a
+    /// display-name match: profile, physical root, thread, and Turn are the
+    /// only fields safe to use when a terminal event has no repository digest.
+    static func partialMatches(
+        for event: CodexLocalTurnActivityEvent,
+        in executions: [CodexExecutionProjection]
+    ) -> [Int] {
+        let root = normalizedRootPath(event.physicalRootURL)
+        return executions.indices.filter { index in
+            let execution = executions[index]
+            return execution.key.profileID == event.profileID
+                && execution.key.normalizedPhysicalRootPath == root
+                && execution.key.threadID == event.threadID
+                && execution.key.turnID == event.turnID
+        }
+    }
+
+    /// A terminal event with a complete key removes the exact row. If the
+    /// terminal's repository identity is incomplete, it may retire one and
+    /// only one matching physical Turn. Ambiguous partial matches are left
+    /// untouched so identity safety wins over eager cleanup.
+    static func terminalMatchIndices(
+        for event: CodexLocalTurnActivityEvent,
+        in executions: [CodexExecutionProjection]
+    ) -> [Int] {
+        let exactKey = key(for: event)
+        let exactMatches = executions.indices.filter { executions[$0].key == exactKey }
+        if !exactMatches.isEmpty { return exactMatches }
+        guard event.sessionIdentity?.repositoryIdentityDigest == nil else { return [] }
+        let partial = partialMatches(for: event, in: executions)
+        return partial.count == 1 ? partial : []
+    }
+
     static func scopeKey(for execution: CodexExecutionProjection) -> CodexExecutionScopeKey {
         CodexExecutionScopeKey(
             profileID: execution.key.profileID,

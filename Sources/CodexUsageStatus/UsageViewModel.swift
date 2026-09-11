@@ -62,6 +62,8 @@ final class UsageViewModel: ObservableObject {
     /// physical roots. The selected account's `activeTurn` remains the HUD
     /// authority; this collection is only the Overview's multi-execution view.
     @Published private(set) var activeExecutions: [CodexExecutionProjection] = []
+    private var activeExecutionObservationEpoch: UInt64?
+    private var retiredActiveExecutionKeys: Set<CodexExecutionKey> = []
     /// Observer-based estimates are separate from provider Plan snapshots and
     /// are derived only from bounded local Turn duration evidence.
     @Published private(set) var executionEstimationHistoryReady = false
@@ -384,6 +386,9 @@ final class UsageViewModel: ObservableObject {
             },
             turnActivityHandler: { [weak self] event in
                 self?.handleLocalTurnActivity(event)
+            },
+            activeExecutionReconciliationHandler: { [weak self] reconciliation in
+                self?.handleActiveExecutionReconciliation(reconciliation)
             }
         )
     }
@@ -473,6 +478,8 @@ final class UsageViewModel: ObservableObject {
         updateCheckTimer?.invalidate()
         updateCheckTimer = nil
         localUsageObserver?.stop()
+        activeExecutions.removeAll()
+        retiredActiveExecutionKeys.removeAll()
         client.stop()
         accountManagementService.stopAllLogins()
         for worker in managedWorkers.values { worker.stop() }
@@ -1336,28 +1343,21 @@ final class UsageViewModel: ObservableObject {
     private func updateActiveExecutionProjection(_ event: CodexLocalTurnActivityEvent) {
         guard localUsageObserver?.containsObservationRoot(event.physicalRootURL) == true else { return }
         let key = CodexExecutionProjectionPolicy.key(for: event)
-        switch event.kind {
-        case .started:
+        func makeProjection() -> CodexExecutionProjection {
             let identity = event.sessionIdentity
-            let projection = CodexExecutionProjection(
+            return CodexExecutionProjection(
                 key: key,
                 repositoryDisplayName: identity?.repositoryDisplayName,
                 workspaceDisplayName: identity?.workspaceDisplayName,
                 chatName: event.programName,
                 startedAt: event.startedAt ?? event.observedAt,
-                tokenTotal: nil,
+                tokenTotal: event.turnTokenTotal,
                 plan: nil,
                 lastObservedAt: event.observedAt
             )
-            if let index = activeExecutions.firstIndex(where: { $0.key == key }) {
-                activeExecutions[index] = projection
-            } else {
-                activeExecutions.append(projection)
-            }
-            activeExecutions = CodexExecutionProjectionPolicy.sorted(activeExecutions)
+        }
 
-        case .tokenUpdated:
-            guard let index = activeExecutions.firstIndex(where: { $0.key == key }) else { return }
+        func applyTokenUpdate(at index: Int) {
             activeExecutions[index].tokenTotal = event.turnTokenTotal ?? activeExecutions[index].tokenTotal
             activeExecutions[index].lastObservedAt = event.observedAt
             activeExecutions[index].chatName = CodexExecutionProjectionPolicy.updatedChatName(
@@ -1369,9 +1369,88 @@ final class UsageViewModel: ObservableObject {
                 activeExecutions[index].repositoryDisplayName = identity.repositoryDisplayName ?? activeExecutions[index].repositoryDisplayName
                 activeExecutions[index].workspaceDisplayName = identity.workspaceDisplayName ?? activeExecutions[index].workspaceDisplayName
             }
+        }
+
+        switch event.kind {
+        case .started:
+            guard !retiredActiveExecutionKeys.contains(key),
+                  !retiredActiveExecutionKeys.contains(CodexExecutionProjectionPolicy.keyWithoutRepositoryIdentity(for: event)) else {
+                return
+            }
+            let projection = makeProjection()
+            if let index = activeExecutions.firstIndex(where: { $0.key == key }) {
+                activeExecutions[index] = projection
+            } else {
+                activeExecutions.append(projection)
+            }
+            activeExecutions = CodexExecutionProjectionPolicy.sorted(activeExecutions)
+
+        case .tokenUpdated:
+            guard !retiredActiveExecutionKeys.contains(key),
+                  !retiredActiveExecutionKeys.contains(CodexExecutionProjectionPolicy.keyWithoutRepositoryIdentity(for: event)) else {
+                return
+            }
+            if let index = activeExecutions.firstIndex(where: { $0.key == key }) {
+                applyTokenUpdate(at: index)
+                return
+            }
+
+            let partial = CodexExecutionProjectionPolicy.partialMatches(for: event, in: activeExecutions)
+            guard partial.count <= 1 else { return }
+            if let index = partial.first {
+                applyTokenUpdate(at: index)
+                return
+            }
+
+            if activeExecutions.firstIndex(where: { $0.key == key }) == nil {
+                // A new observation epoch intentionally starts empty. A
+                // token record is valid current activity and may re-admit its
+                // Turn without replaying historical `started` records.
+                activeExecutions.append(makeProjection())
+                activeExecutions = CodexExecutionProjectionPolicy.sorted(activeExecutions)
+            }
 
         case .completed, .failed, .interrupted:
-            activeExecutions.removeAll { $0.key == key }
+            let matches = CodexExecutionProjectionPolicy.terminalMatchIndices(
+                for: event,
+                in: activeExecutions
+            )
+            let hasCompleteTerminalIdentity = event.sessionIdentity?.repositoryIdentityDigest != nil
+            guard !matches.isEmpty || hasCompleteTerminalIdentity else { return }
+            if !matches.isEmpty {
+                let matchSet = Set(matches)
+                activeExecutions = activeExecutions.enumerated()
+                    .filter { !matchSet.contains($0.offset) }
+                    .map(\.element)
+            }
+            retiredActiveExecutionKeys.insert(key)
+            retiredActiveExecutionKeys.insert(CodexExecutionProjectionPolicy.keyWithoutRepositoryIdentity(for: event))
+        }
+    }
+
+    private func handleActiveExecutionReconciliation(
+        _ reconciliation: CodexLocalActiveExecutionReconciliation
+    ) {
+        if reconciliation.resetActiveExecutions {
+            activeExecutions.removeAll()
+            retiredActiveExecutionKeys.removeAll()
+            activeExecutionObservationEpoch = reconciliation.observationEpoch
+            return
+        }
+
+        guard activeExecutionObservationEpoch == nil
+                || activeExecutionObservationEpoch == reconciliation.observationEpoch else {
+            return
+        }
+
+        let prunedRoots = Set(
+            reconciliation.prunedPhysicalRootURLs.map {
+                CodexExecutionProjectionPolicy.normalizedRootPath($0)
+            }
+        )
+        guard !prunedRoots.isEmpty else { return }
+        activeExecutions.removeAll {
+            prunedRoots.contains($0.key.normalizedPhysicalRootPath)
         }
     }
 
@@ -1392,6 +1471,7 @@ final class UsageViewModel: ObservableObject {
 
     private func recordCompletedDurationSample(from event: CodexLocalTurnActivityEvent) {
         guard event.kind == .completed,
+              event.sessionIdentity != nil,
               let durationSeconds = event.durationSeconds,
               durationSeconds > 0 else { return }
         let sample = CodexExecutionDurationSample(
