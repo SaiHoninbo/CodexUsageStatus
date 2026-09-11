@@ -317,27 +317,28 @@ struct HUDTokenActivitySummaryView: View, Equatable {
     }
 
     private func lifetimeHero(_ metric: TokenActivityMetric, columnWidth: CGFloat) -> some View {
-        // The Hero content is a single centered value in both the static and
-        // animated paths. Center the stack itself; centering only the outer
-        // frame leaves the fixed-width static odometer leading-aligned.
-        VStack(alignment: .center, spacing: max(2, 3 * scaleFactor)) {
-            if let feedback {
-                HUDTokenOdometerView(
-                    feedback: feedback,
-                    scaleFactor: scaleFactor,
-                    reduceMotion: reduceMotion
-                )
-            } else {
-                HUDTokenStaticOdometerView(
-                    value: metric.value,
-                    scaleFactor: scaleFactor
-                )
+        // Center the intrinsic odometer between explicit spacers. A
+        // maxWidth frame on the odometer itself can absorb the whole column
+        // and still render its fixed cells from the leading edge on macOS.
+        VStack(spacing: max(2, 3 * scaleFactor)) {
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+                if let feedback {
+                    HUDTokenOdometerView(
+                        feedback: feedback,
+                        scaleFactor: scaleFactor,
+                        reduceMotion: reduceMotion
+                    )
+                } else {
+                    HUDTokenStaticOdometerView(
+                        value: metric.value,
+                        scaleFactor: scaleFactor
+                    )
+                }
+                Spacer(minLength: 0)
             }
+            .frame(width: columnWidth, alignment: .center)
         }
-        // Keep the fixed-width reel centered in the left Hero column. The
-        // odometer owns its full column width on animated updates, so both
-        // static and animated values need the same explicit center contract.
-        .frame(width: columnWidth, alignment: .center)
     }
 
     private func secondaryGrid(_ secondaryMetrics: [TokenActivityMetric], width: CGFloat) -> some View {
@@ -419,11 +420,6 @@ struct HUDTokenStaticOdometerView: View {
         }
         .lineLimit(1)
         .fixedSize(horizontal: true, vertical: false)
-        // Keep the idle/static path aligned with the animated reel. Without
-        // this explicit expansion, a fixed-width odometer can inherit the
-        // leading edge of the Hero column even though the outer stack is
-        // centered.
-        .frame(maxWidth: .infinity, alignment: .center)
         .accessibilityHidden(true)
     }
 }
@@ -472,11 +468,6 @@ struct HUDTokenOdometerView: View {
             }
         }
         .lineLimit(1)
-        // The animated reel must use the same centered contract as the
-        // static odometer.  The outer Hero column is centered, but a
-        // full-width reel with leading alignment would otherwise pin every
-        // animated value back to the left edge during updates.
-        .frame(maxWidth: .infinity, alignment: .center)
         .accessibilityHidden(true)
     }
 }
