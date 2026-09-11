@@ -419,6 +419,11 @@ struct HUDTokenStaticOdometerView: View {
         }
         .lineLimit(1)
         .fixedSize(horizontal: true, vertical: false)
+        // Keep the idle/static path aligned with the animated reel. Without
+        // this explicit expansion, a fixed-width odometer can inherit the
+        // leading edge of the Hero column even though the outer stack is
+        // centered.
+        .frame(maxWidth: .infinity, alignment: .center)
         .accessibilityHidden(true)
     }
 }
@@ -467,7 +472,11 @@ struct HUDTokenOdometerView: View {
             }
         }
         .lineLimit(1)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        // The animated reel must use the same centered contract as the
+        // static odometer.  The outer Hero column is centered, but a
+        // full-width reel with leading alignment would otherwise pin every
+        // animated value back to the left edge during updates.
+        .frame(maxWidth: .infinity, alignment: .center)
         .accessibilityHidden(true)
     }
 }

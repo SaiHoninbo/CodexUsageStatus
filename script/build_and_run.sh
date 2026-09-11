@@ -5,6 +5,8 @@ MODE="${1:-run}"
 APP_NAME="CodexUsageStatus"
 BUNDLE_ID="com.openai.codex-usage-status"
 MIN_SYSTEM_VERSION="14.0"
+RELEASE_MODE="${CODEX_RELEASE_MODE:-0}"
+RELEASE_SIGNING_IDENTITY="${CODEX_RELEASE_SIGNING_IDENTITY:-}"
 
 case "$MODE" in
   package)
@@ -84,14 +86,47 @@ elif [[ -f "$ICON_FILE" ]]; then
   cp "$ICON_FILE" "$APP_RESOURCES/AppIcon.icns"
 fi
 
-# All candidate, local package, and GitHub Release artifacts use ad-hoc
-# signing. The GitHub repository and fixed asset validation provide the
-# distribution trust boundary; no external signing identity is required.
-SIGNING_IDENTITY="-"
+# Candidate and local-test bundles intentionally remain ad-hoc. A public
+# GitHub Release must opt into the stable Developer ID path explicitly so a
+# missing or incorrect keychain identity fails before an artifact is made.
+case "$RELEASE_MODE" in
+  0)
+    if [[ -n "$RELEASE_SIGNING_IDENTITY" ]]; then
+      echo "CODEX_RELEASE_SIGNING_IDENTITY requires CODEX_RELEASE_MODE=1" >&2
+      exit 3
+    fi
+    SIGNING_IDENTITY="-"
+    ;;
+  1)
+    if [[ "$MODE" != "package" ]]; then
+      echo "CODEX_RELEASE_MODE=1 is only valid with package mode" >&2
+      exit 3
+    fi
+    if [[ -z "$RELEASE_SIGNING_IDENTITY" ]]; then
+      echo "CODEX_RELEASE_MODE=1 requires CODEX_RELEASE_SIGNING_IDENTITY" >&2
+      exit 3
+    fi
+    IDENTITY_VALIDATOR="$ROOT_DIR/script/validate_release_signing_identity.sh"
+    [[ -x "$IDENTITY_VALIDATOR" ]] || {
+      echo "release identity validator is missing or not executable" >&2
+      exit 3
+    }
+    "$IDENTITY_VALIDATOR" "$RELEASE_SIGNING_IDENTITY" >/dev/null
+    SIGNING_IDENTITY="$RELEASE_SIGNING_IDENTITY"
+    ;;
+  *)
+    echo "CODEX_RELEASE_MODE must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
 
 sign_deep() {
   local target="$1"
-  codesign --force --deep --sign "$SIGNING_IDENTITY" "$target"
+  if [[ "$RELEASE_MODE" == "1" ]]; then
+    codesign --force --deep --options runtime --sign "$SIGNING_IDENTITY" "$target"
+  else
+    codesign --force --deep --sign "$SIGNING_IDENTITY" "$target"
+  fi
 }
 
 cat > "$INFO_PLIST" <<PLIST
