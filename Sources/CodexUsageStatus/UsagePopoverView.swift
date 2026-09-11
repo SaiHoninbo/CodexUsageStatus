@@ -83,12 +83,12 @@ struct UsagePopoverView: View {
         } message: {
             Text("這會刪除最近 30 天的用量時間序列，不會影響 Codex 或登入狀態。")
         }
-        .alert("使用 Reset Credit？", isPresented: $showResetCreditConfirmation) {
-            Button("使用", role: .destructive) { model.consumeSelectedResetCredit() }
+        .alert("確認使用 Reset Credit？", isPresented: $showResetCreditConfirmation) {
+            Button("確認使用", role: .destructive) { model.consumeSelectedResetCredit() }
             Button("取消", role: .cancel) { model.cancelResetCredit() }
         } message: {
             if let credit = model.selectedResetCredit {
-                Text("Credit：\(credit.title ?? "所選 Reset credit")\nBucket：\(credit.resetType ?? "未知")\n到期：\(creditDate(credit.expiresAt))\n此操作不可自動復原。")
+                Text("即將使用：\(credit.title ?? "所選 Reset credit")\nBucket：\(credit.resetType ?? "未知")\n到期：\(creditDate(credit.expiresAt))\n這會立即消耗一張 Reset Credit，且無法自動復原。")
             } else {
                 Text("請先選擇一張可用的 Reset credit。")
             }

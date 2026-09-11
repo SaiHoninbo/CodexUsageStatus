@@ -278,10 +278,7 @@ final class UsageViewModel: ObservableObject {
             guard semanticChange else { return }
             self.snapshot = snapshot
             self.resetCredits = snapshot.rateLimitResetCredits
-            if let selected = self.selectedResetCreditID,
-               !(snapshot.rateLimitResetCredits?.availableCredits.contains(where: { $0.id == selected }) ?? false) {
-                self.selectedResetCreditID = nil
-            }
+            self.reconcileSelectedResetCredit()
             // A valid snapshot callback is live even though the client publishes
             // .connected immediately after invoking this callback.  History is
             // written only after the semantic quota payload changes.
@@ -769,6 +766,27 @@ final class UsageViewModel: ObservableObject {
         if resetCreditOperationState != .consuming { resetCreditOperationState = .idle }
     }
 
+    /// Keep one safe default selection for the integrated Reset Credit card
+    /// list while preserving an explicit user's choice whenever that credit
+    /// remains available. The soonest future expiry is preferred so the
+    /// action can be used without a redundant picker below the list.
+    private func reconcileSelectedResetCredit() {
+        guard let resetCredits else {
+            selectedResetCreditID = nil
+            return
+        }
+
+        let available = resetCredits.availableCredits
+        if let selectedResetCreditID,
+           available.contains(where: { $0.id == selectedResetCreditID }) {
+            return
+        }
+        selectedResetCreditID = HUDResetCreditSelectionPolicy.preferredID(
+            in: available,
+            now: currentDate
+        )
+    }
+
     func consumeSelectedResetCredit() {
         guard accountScope == .current else {
             resetCreditMessage = "請切回目前帳號後再使用 Reset credit。"
@@ -1170,6 +1188,7 @@ final class UsageViewModel: ObservableObject {
         guard semanticChange else { return false }
         self.snapshot = snapshot
         resetCredits = snapshot.rateLimitResetCredits
+        reconcileSelectedResetCredit()
         historyStore = HistoryStore(fileURL: profileStore.historyURL(for: profile))
         _ = historyStore.record(snapshot: snapshot, connectionState: .connected, now: snapshot.receivedAt)
         syncHistoryState()

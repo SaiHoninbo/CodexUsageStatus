@@ -210,6 +210,67 @@ enum HUDResetCreditCountdownPolicy {
     }
 }
 
+/// Pure ordering and selection semantics shared by the Reset Credit overview
+/// and its confirmation action. Available credits with a known future expiry
+/// are shown first, ordered by the soonest expiry; entries without an expiry
+/// remain usable but follow the dated entries. Expired entries are retained at
+/// the end so the UI can explain their state without allowing them to become
+/// the preferred credit.
+enum HUDResetCreditSelectionPolicy {
+    static func ordered(
+        _ credits: [RateLimitResetCredit],
+        now: Date
+    ) -> [RateLimitResetCredit] {
+        let nowTimestamp = Int64(now.timeIntervalSince1970)
+        return credits
+            .filter(\.isAvailable)
+            .sorted { lhs, rhs in
+                let lhsRank = expiryRank(lhs.expiresAt, nowTimestamp: nowTimestamp)
+                let rhsRank = expiryRank(rhs.expiresAt, nowTimestamp: nowTimestamp)
+                if lhsRank != rhsRank { return lhsRank < rhsRank }
+
+                switch (lhs.expiresAt, rhs.expiresAt) {
+                case let (left?, right?) where left != right:
+                    return left < right
+                default:
+                    return lhs.id.localizedStandardCompare(rhs.id) == .orderedAscending
+                }
+            }
+    }
+
+    static func preferredID(
+        in credits: [RateLimitResetCredit],
+        now: Date
+    ) -> String? {
+        let nowTimestamp = Int64(now.timeIntervalSince1970)
+        return ordered(credits, now: now)
+            .first { expiryRank($0.expiresAt, nowTimestamp: nowTimestamp) < 2 }?
+            .id
+    }
+
+    static func fastestExpiryID(
+        in credits: [RateLimitResetCredit],
+        now: Date
+    ) -> String? {
+        let nowTimestamp = Int64(now.timeIntervalSince1970)
+        return credits
+            .filter(\.isAvailable)
+            .compactMap { credit -> (String, Int64)? in
+                guard let expiresAt = credit.expiresAt, expiresAt > nowTimestamp else { return nil }
+                return (credit.id, expiresAt)
+            }
+            .min { lhs, rhs in
+                if lhs.1 != rhs.1 { return lhs.1 < rhs.1 }
+                return lhs.0.localizedStandardCompare(rhs.0) == .orderedAscending
+            }?.0
+    }
+
+    private static func expiryRank(_ expiresAt: Int64?, nowTimestamp: Int64) -> Int {
+        guard let expiresAt else { return 1 }
+        return expiresAt > nowTimestamp ? 0 : 2
+    }
+}
+
 enum HUDPasteActionPolicy {
     static func canStart(isInFlight: Bool, isCodexFocused: Bool) -> Bool {
         !isInFlight && isCodexFocused

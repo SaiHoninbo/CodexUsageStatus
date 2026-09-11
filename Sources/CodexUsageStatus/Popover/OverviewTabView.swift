@@ -773,11 +773,31 @@ extension UsagePopoverView {
                     .foregroundStyle(HUDColorPalette.tertiaryText)
             }
             if let credits = model.resetCredits, credits.availableCount > 0 {
-                let details = credits.availableCredits
+                let details = HUDResetCreditSelectionPolicy.ordered(
+                    credits.availableCredits,
+                    now: model.currentDate
+                )
+                let fastestID = HUDResetCreditSelectionPolicy.fastestExpiryID(
+                    in: details,
+                    now: model.currentDate
+                )
                 if !details.isEmpty {
                     VStack(spacing: 0) {
                         ForEach(Array(details.enumerated()), id: \.element.id) { index, credit in
-                            resetCreditDetailRow(credit, index: index)
+                            Button {
+                                acknowledgeAction("Reset Credit 選擇已接受", control: "resetCredit.selection")
+                                PopoverInteractionTrace.started("resetCredit.selection")
+                                model.selectResetCredit(id: credit.id)
+                            } label: {
+                                resetCreditDetailRow(
+                                    credit,
+                                    index: index,
+                                    isFastest: credit.id == fastestID,
+                                    isSelected: credit.id == model.selectedResetCreditID
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .contentShape(Rectangle())
                             if credit.id != details.last?.id {
                                 Divider()
                                     .overlay(HUDColorPalette.divider)
@@ -791,23 +811,36 @@ extension UsagePopoverView {
                             .stroke(HUDColorPalette.border, lineWidth: 0.7)
                     }
 
-                    Picker("選擇 credit", selection: Binding(
-                        get: { model.selectedResetCreditID ?? "" },
-                        set: { model.selectResetCredit(id: $0.isEmpty ? nil : $0) }
-                    )) {
-                        Text("請選擇…").tag("")
-                        ForEach(Array(details.enumerated()), id: \.element.id) { index, credit in
-                            Text(credit.title ?? "Reset credit \(index + 1)").tag(credit.id)
+                    HStack(spacing: 8) {
+                        if let selected = model.selectedResetCredit {
+                            Label(
+                                "已選：\(selected.title ?? "Reset credit")",
+                                systemImage: "checkmark.circle.fill"
+                            )
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(HUDColorPalette.secondaryText)
+                            .lineLimit(1)
+                        } else {
+                            Text("請點選一張 Reset credit")
+                                .font(.caption2)
+                                .foregroundStyle(HUDColorPalette.tertiaryText)
                         }
+                        Spacer(minLength: 6)
+                        Button(model.resetCreditOperationState == .consuming ? "使用中…" : "使用重置") {
+                            acknowledgeAction("已開啟 Reset Credit 確認", control: "resetCredit.confirmation")
+                            PopoverInteractionTrace.started("resetCredit.confirmation")
+                            showResetCreditConfirmation = true
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(
+                            model.accountScope == .all ||
+                            model.selectedResetCredit == nil ||
+                            model.resetCreditOperationState == .consuming ||
+                            model.resetCreditOperationState == .unknown
+                        )
                     }
-                    Button(model.resetCreditOperationState == .consuming ? "使用中…" : "使用所選 Reset Credit") {
-                        acknowledgeAction("已開啟 Reset Credit 確認", control: "resetCredit.confirmation")
-                        PopoverInteractionTrace.started("resetCredit.confirmation")
-                        showResetCreditConfirmation = true
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(model.accountScope == .all || model.selectedResetCredit == nil || model.resetCreditOperationState == .consuming || model.resetCreditOperationState == .unknown)
+                    .padding(.top, 4)
                 } else {
                     Text("服務只回傳可用數量，尚未提供可安全選擇的 credit 詳細資料。請稍後 Refresh。")
                         .font(.caption)
@@ -825,19 +858,30 @@ extension UsagePopoverView {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .onChange(of: model.selectedResetCreditID) { _, _ in
-            acknowledgeAction("Reset Credit 選擇已接受", control: "resetCredit.selection")
-            PopoverInteractionTrace.started("resetCredit.selection")
-        }
     }
 
-    private func resetCreditDetailRow(_ credit: RateLimitResetCredit, index: Int) -> some View {
+    private func resetCreditDetailRow(
+        _ credit: RateLimitResetCredit,
+        index: Int,
+        isFastest: Bool,
+        isSelected: Bool
+    ) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(credit.title ?? "Reset credit \(index + 1)")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(HUDColorPalette.primaryText)
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(credit.title ?? "Reset credit \(index + 1)")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(HUDColorPalette.primaryText)
+                        .lineLimit(1)
+                    if isFastest {
+                        Text("最快到期")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(HUDColorPalette.verificationAction)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(HUDColorPalette.verificationAction.opacity(0.14), in: Capsule())
+                    }
+                }
                 Spacer(minLength: 6)
                 Text(HUDResetCreditCountdownPolicy.text(
                     expiresAt: credit.expiresAt,
@@ -858,7 +902,17 @@ extension UsagePopoverView {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .overlay(alignment: .leading) {
+            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(isSelected ? HUDColorPalette.verificationAction : HUDColorPalette.tertiaryText)
+        }
+        .padding(.leading, 18)
         .padding(.vertical, 7)
+        .background(
+            isSelected ? HUDColorPalette.verificationAction.opacity(0.10) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+        )
     }
 
     private func resetCreditCountdownColor(_ expiresAt: Int64?) -> Color {

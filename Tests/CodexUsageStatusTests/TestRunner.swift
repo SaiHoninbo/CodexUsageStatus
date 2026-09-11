@@ -2349,6 +2349,28 @@ struct CodexUsageStatusTests {
         )
         try expect(presentation.count == 4, "HUD count comes from the authoritative availableCount")
         try expect(presentation.nextExpiryAt == nearest, "HUD selects the earliest usable future expiry regardless of API order")
+        let orderedIDs = HUDResetCreditSelectionPolicy
+            .ordered(credits.availableCredits, now: now)
+            .map(\.id)
+        try expect(
+            orderedIDs == ["nearest", "later", "unknown", "expired-service-available"],
+            "Reset Credit overview orders soonest future expiry first and keeps unknown/expired entries after it"
+        )
+        try expect(
+            HUDResetCreditSelectionPolicy.fastestExpiryID(in: credits.availableCredits, now: now) == "nearest",
+            "Reset Credit overview marks the fastest-expiring usable credit"
+        )
+        try expect(
+            HUDResetCreditSelectionPolicy.preferredID(in: credits.availableCredits, now: now) == "nearest",
+            "Reset Credit action defaults to the fastest-expiring usable credit"
+        )
+        try expect(
+            HUDResetCreditSelectionPolicy.preferredID(
+                in: [credit("expired-only", expiresAt: expired)],
+                now: now
+            ) == nil,
+            "Reset Credit action does not default to an expired credit"
+        )
         try expect(
             HUDResetCreditCountdownPolicy.nearestFutureExpiry(in: credits.availableCredits, now: now) == nearest,
             "grantedAt, unavailable, expired, and missing-expiry entries do not change the HUD target"
