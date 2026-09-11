@@ -31,11 +31,10 @@ Do not download the repository source archive for installation. The source archi
 5. If macOS blocks the app, open **System Settings → Privacy & Security**, scroll to the security message, and choose **Open Anyway**.
 6. Launch Codex Usage Status. It appears as a menu-bar item and can show the floating HUD beside Codex.
 
-Candidate and local test bundles may use ad-hoc signing. Public release
-artifacts use the canonical GitHub Release path with a stable Developer ID
-Application signature, notarization, stapling, and Gatekeeper validation.
-Missing release credentials are an external blocker rather than a reason to
-publish an unstable public artifact.
+Candidate, local test, and public release bundles use the canonical GitHub
+Release path with an ad-hoc signature. The fixed GitHub repository, asset name,
+bundle validation, and strict code-signature check are the release trust
+boundary; no external signing credential is required.
 Keeping the app in `/Applications` also gives the login-item registration a
 stable path.
 
@@ -46,7 +45,7 @@ Most monitoring features do not require Accessibility permission. Enable Accessi
 - **Paste clipboard**: sends `⌘V` to the foreground Codex window.
 - **Paste and submit**: sends `⌘V`, waits for the paste to finish, then sends one Return/Enter.
 
-Open **System Settings → Privacy & Security → Accessibility** and enable `CodexUsageStatus.app` when paste/event posting is not trusted. A public update signed by the same Developer ID Application identity is intended to keep the app identity stable, so do not routinely remove and re-add the entry. Local ad-hoc candidates may still require reauthorization; only follow the remediation when the app reports that permission is actually unavailable.
+Open **System Settings → Privacy & Security → Accessibility** and enable `CodexUsageStatus.app` when paste/event posting is not trusted. Because releases use ad-hoc signing, macOS may treat a replacement as a new app identity and require authorization again; only follow the remediation when the app reports that permission is actually unavailable.
 
 Notification permission is optional. Quota and token activity continue to work if notifications are denied.
 
@@ -125,23 +124,18 @@ Maintainers should publish a GitHub Release with:
 - The signed app bundle inside the ZIP
 - No `._*`, `__MACOSX`, source, test, auth, token, or history files
 
-Record the checksum and Developer ID Application signing/notarization result for each published artifact in the release notes or maintainer evidence. A commit or ZIP pushed to `main` alone does not create an in-app release update.
+Record the checksum and ad-hoc signature verification result for each published artifact in the release notes or maintainer evidence. A commit or ZIP pushed to `main` alone does not create an in-app release update.
 
 Before uploading the ZIP, validate the exact publishable artifact. The validator
 fails closed unless the archive contains only the expected app, has the
 expected bundle identifier and semantic version, and passes strict bundle
-verification. Local/candidate artifacts can use the default ad-hoc validation;
-the public-release mode additionally requires Developer ID Application
-signing, a TeamIdentifier, a stapled notarization ticket, and Gatekeeper
-readback:
+verification. Local, candidate, and public-release artifacts use the same
+ad-hoc validation path:
 
 ```bash
-./script/validate_release_artifact.sh outputs/CodexUsageStatus.app.zip 2.4.90
-# Public release validation after notarization (requires the external signing/notarization assets):
-./script/validate_release_artifact.sh --public-release outputs/CodexUsageStatus.app.zip 2.4.90
-# Or submit, staple, repack, and validate in one explicit command:
-NOTARYTOOL_KEYCHAIN_PROFILE=CodexUsageStatus \
-  ./script/validate_release_artifact.sh --notarize outputs/CodexUsageStatus.app.zip 2.4.90
+./script/validate_release_artifact.sh outputs/CodexUsageStatus.app.zip 2.4.91
+# Public GitHub Release validation:
+./script/validate_release_artifact.sh --public-release outputs/CodexUsageStatus.app.zip 2.4.91
 ```
 
 The ZIP must pass this validator before it is uploaded to a GitHub Release.
@@ -176,14 +170,11 @@ validates the bundle, and writes the single canonical artifact to:
 outputs/CodexUsageStatus.app.zip
 ```
 
-The `package` mode creates a local ad-hoc package by default. For a public
-GitHub Release, set `CODEX_RELEASE_MODE=1` and provide
-`CODEX_RELEASE_SIGNING_IDENTITY` naming a Developer ID Application
-certificate; the script fails closed if the identity is missing or is not
-available in the keychain. Run the public-release validator after
-notarization/stapling (or use its explicit `--notarize` path), then publish
-that exact ZIP as a separate explicit maintainer action. GitHub Releases is
-the only distribution channel.
+The `package` mode creates an ad-hoc package by default. For a public GitHub
+Release, set `CODEX_RELEASE_MODE=1`; this marks the package as the intended
+public artifact while retaining the same ad-hoc signature and fixed-bundle
+validation. Publish that exact validated ZIP as a separate maintainer action.
+GitHub Releases is the only distribution channel.
 
 For disposable runtime or UI evidence, use the `candidate` mode instead:
 

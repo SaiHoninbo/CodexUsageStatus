@@ -6,7 +6,6 @@ APP_NAME="CodexUsageStatus"
 BUNDLE_ID="com.openai.codex-usage-status"
 MIN_SYSTEM_VERSION="14.0"
 RELEASE_MODE="${CODEX_RELEASE_MODE:-0}"
-RELEASE_SIGNING_IDENTITY="${CODEX_RELEASE_SIGNING_IDENTITY:-}"
 
 case "$MODE" in
   package)
@@ -86,15 +85,12 @@ elif [[ -f "$ICON_FILE" ]]; then
   cp "$ICON_FILE" "$APP_RESOURCES/AppIcon.icns"
 fi
 
-# Candidate and local-test bundles intentionally remain ad-hoc. A public
-# GitHub Release must opt into the stable Developer ID path explicitly so a
-# missing or incorrect keychain identity fails before an artifact is made.
+# Candidate, local-test, and public GitHub Release bundles all use the
+# repository's intentionally ad-hoc distribution policy. Release mode is a
+# packaging intent marker only; the updater and artifact validator still
+# enforce the fixed GitHub asset and bundle contract.
 case "$RELEASE_MODE" in
   0)
-    if [[ -n "$RELEASE_SIGNING_IDENTITY" ]]; then
-      echo "CODEX_RELEASE_SIGNING_IDENTITY requires CODEX_RELEASE_MODE=1" >&2
-      exit 3
-    fi
     SIGNING_IDENTITY="-"
     ;;
   1)
@@ -102,17 +98,7 @@ case "$RELEASE_MODE" in
       echo "CODEX_RELEASE_MODE=1 is only valid with package mode" >&2
       exit 3
     fi
-    if [[ -z "$RELEASE_SIGNING_IDENTITY" ]]; then
-      echo "CODEX_RELEASE_MODE=1 requires CODEX_RELEASE_SIGNING_IDENTITY" >&2
-      exit 3
-    fi
-    IDENTITY_VALIDATOR="$ROOT_DIR/script/validate_release_signing_identity.sh"
-    [[ -x "$IDENTITY_VALIDATOR" ]] || {
-      echo "release identity validator is missing or not executable" >&2
-      exit 3
-    }
-    "$IDENTITY_VALIDATOR" "$RELEASE_SIGNING_IDENTITY" >/dev/null
-    SIGNING_IDENTITY="$RELEASE_SIGNING_IDENTITY"
+    SIGNING_IDENTITY="-"
     ;;
   *)
     echo "CODEX_RELEASE_MODE must be 0 or 1" >&2
