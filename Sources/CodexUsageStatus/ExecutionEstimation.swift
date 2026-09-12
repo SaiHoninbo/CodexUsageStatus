@@ -71,17 +71,25 @@ enum CodexExecutionEstimateCohort: String, Equatable, Sendable {
     }
 }
 
-/// A bounded, deliberately non-authoritative estimate for an active Turn.
-/// It never represents terminal state and is capped below 100% so the UI
-/// cannot accidentally imply that a Turn has completed.
-struct CodexExecutionEstimate: Equatable, Sendable {
+enum CodexExecutionEstimateHistoricalSupport: String, Equatable, Sendable {
+    case supported
+    case outOfSupport
+}
+
+enum CodexExecutionEstimateActivityFreshness: String, Equatable, Sendable {
+    case fresh
+    case aging
+    case stale
+}
+
+/// Numeric output is optional by design. A missing numeric estimate is not
+/// the same thing as a cold start: callers must inspect the surrounding
+/// historical-support and activity-freshness facts before choosing text.
+struct CodexExecutionEstimateNumeric: Equatable, Sendable {
     let lowerProgressPercent: Int
     let upperProgressPercent: Int
     let lowerRemainingSeconds: Int64
     let upperRemainingSeconds: Int64
-    let confidence: CodexExecutionEstimateConfidence
-    let cohort: CodexExecutionEstimateCohort
-    let sampleCount: Int
 
     var progressText: String {
         if lowerProgressPercent == upperProgressPercent {
@@ -99,13 +107,94 @@ struct CodexExecutionEstimate: Equatable, Sendable {
         return "預估剩餘 約 \(lower)–\(upper) 分鐘"
     }
 
-    var confidenceText: String {
-        "信心：\(confidence.displayName)"
-    }
-
     private static func displayMinutes(_ seconds: Int64) -> Int64 {
         guard seconds > 0 else { return 0 }
         return max(1, (seconds + 59) / 60)
+    }
+}
+
+/// A bounded, deliberately non-authoritative estimate for an active Turn.
+/// Historical support and activity freshness remain separate facts. Numeric
+/// presentation may be unavailable when either fact makes a time estimate
+/// unsafe to present, while the estimate itself remains available for
+/// truthful UI text.
+struct CodexExecutionEstimate: Equatable, Sendable {
+    let numericEstimate: CodexExecutionEstimateNumeric?
+    /// Confidence attributable to the historical duration distribution only.
+    let historicalConfidence: CodexExecutionEstimateConfidence
+    let historicalSupport: CodexExecutionEstimateHistoricalSupport
+    let activityFreshness: CodexExecutionEstimateActivityFreshness
+    let cohort: CodexExecutionEstimateCohort
+    let sampleCount: Int
+
+    /// Compatibility accessor for existing policy consumers. This is the
+    /// historical confidence and is not freshness-adjusted presentation
+    /// confidence.
+    var confidence: CodexExecutionEstimateConfidence { historicalConfidence }
+
+    var displayedConfidence: CodexExecutionEstimateConfidence {
+        switch activityFreshness {
+        case .fresh:
+            return historicalSupport == .supported ? historicalConfidence : .low
+        case .aging:
+            guard historicalSupport == .supported else { return .low }
+            switch historicalConfidence {
+            case .high: return .medium
+            case .medium, .low: return .low
+            }
+        case .stale:
+            return .low
+        }
+    }
+
+    var progressText: String {
+        switch presentationState {
+        case .supported:
+            return numericEstimate?.progressText ?? "本機耗時推估：暫無可靠估計"
+        case .outOfSupport:
+            return "本機耗時推估：超出歷史範圍"
+        case .stale:
+            return "本機耗時推估：暫無可靠估計"
+        }
+    }
+
+    var remainingText: String? {
+        switch presentationState {
+        case .stale:
+            return nil
+        case .outOfSupport:
+            return "剩餘時間：暫無可靠估計"
+        case .supported:
+            return numericEstimate?.remainingText
+        }
+    }
+
+    /// Explains why a precise time estimate is withheld without implying that
+    /// the active Turn has ended or stalled permanently.
+    var uncertaintyText: String? {
+        presentationState == .stale ? "近期活動證據不足" : nil
+    }
+
+    var confidenceText: String {
+        "信心：\(displayedConfidence.displayName)"
+    }
+
+    var accessibilityText: String {
+        [progressText, uncertaintyText, remainingText, confidenceText]
+            .compactMap { $0 }
+            .joined(separator: "；")
+    }
+
+    private enum PresentationState {
+        case supported
+        case outOfSupport
+        case stale
+    }
+
+    private var presentationState: PresentationState {
+        if activityFreshness == .stale { return .stale }
+        if historicalSupport == .outOfSupport { return .outOfSupport }
+        return .supported
     }
 }
 
@@ -135,30 +224,48 @@ enum CodexExecutionEstimationPolicy {
         guard !durations.isEmpty else { return nil }
 
         // Prefer completed durations that could still contain the active Turn.
-        // If elapsed already exceeds all history, retain the full distribution
-        // and use a robust upper quantile instead of fabricating an ETA.
+        // An empty comparable set is evidence that this cohort no longer
+        // supports a numeric estimate. Keep the historical distribution only
+        // for its confidence metadata; never use it to fabricate an ETA.
         let comparable = durations.filter { Double($0) > elapsed }
-        let distribution = comparable.isEmpty ? durations : comparable
-        let lowerQuantile = quantile(distribution, comparable.isEmpty ? 0.50 : 0.25)
-        let upperQuantile = quantile(distribution, comparable.isEmpty ? 0.90 : 0.75)
-        guard let lowerQuantile, let upperQuantile else { return nil }
-
-        let lowerTotal = max(0, lowerQuantile)
-        let upperTotal = max(lowerTotal, upperQuantile)
-        let lowerProgress = boundedPercentage(elapsed / max(1, upperTotal))
-        let upperProgress = boundedPercentage(elapsed / max(1, lowerTotal))
-        let lowerRemaining = max(0, Int64((lowerTotal - elapsed).rounded(.down)))
-        let upperRemaining = max(lowerRemaining, Int64((upperTotal - elapsed).rounded(.down)))
+        let historicalSupport: CodexExecutionEstimateHistoricalSupport = comparable.isEmpty ? .outOfSupport : .supported
+        var numericEstimate: CodexExecutionEstimateNumeric?
+        if !comparable.isEmpty,
+           let lowerQuantile = quantile(comparable, 0.25),
+           let upperQuantile = quantile(comparable, 0.75) {
+            let lowerTotal = max(0, lowerQuantile)
+            let upperTotal = max(lowerTotal, upperQuantile)
+            let lowerProgress = boundedPercentage(elapsed / max(1, upperTotal))
+            let upperProgress = boundedPercentage(elapsed / max(1, lowerTotal))
+            let lowerRemaining = max(0, Int64((lowerTotal - elapsed).rounded(.down)))
+            let upperRemaining = max(lowerRemaining, Int64((upperTotal - elapsed).rounded(.down)))
+            numericEstimate = CodexExecutionEstimateNumeric(
+                lowerProgressPercent: min(lowerProgress, upperProgress),
+                upperProgressPercent: max(lowerProgress, upperProgress),
+                lowerRemainingSeconds: lowerRemaining,
+                upperRemainingSeconds: upperRemaining
+            )
+        }
 
         return CodexExecutionEstimate(
-            lowerProgressPercent: min(lowerProgress, upperProgress),
-            upperProgressPercent: max(lowerProgress, upperProgress),
-            lowerRemainingSeconds: lowerRemaining,
-            upperRemainingSeconds: upperRemaining,
-            confidence: confidence(for: candidate, durations: durations),
+            numericEstimate: numericEstimate,
+            historicalConfidence: confidence(for: candidate, durations: durations),
+            historicalSupport: historicalSupport,
+            activityFreshness: activityFreshness(for: execution, now: now),
             cohort: candidate.kind,
             sampleCount: candidate.samples.count
         )
+    }
+
+    private static func activityFreshness(
+        for execution: CodexExecutionProjection,
+        now: Date
+    ) -> CodexExecutionEstimateActivityFreshness {
+        let latestKnownActivity = max(execution.lastObservedAt, execution.startedAt)
+        let age = max(0, now.timeIntervalSince(latestKnownActivity))
+        if age <= 15 { return .fresh }
+        if age <= 60 { return .aging }
+        return .stale
     }
 
     static func selectCohort(

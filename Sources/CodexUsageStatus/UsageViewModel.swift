@@ -1359,7 +1359,10 @@ final class UsageViewModel: ObservableObject {
 
         func applyTokenUpdate(at index: Int) {
             activeExecutions[index].tokenTotal = event.turnTokenTotal ?? activeExecutions[index].tokenTotal
-            activeExecutions[index].lastObservedAt = event.observedAt
+            activeExecutions[index].lastObservedAt = CodexExecutionProjectionPolicy.monotonicLastObservedAt(
+                current: activeExecutions[index].lastObservedAt,
+                incoming: event.observedAt
+            )
             activeExecutions[index].chatName = CodexExecutionProjectionPolicy.updatedChatName(
                 current: activeExecutions[index].chatName,
                 incoming: event.programName,

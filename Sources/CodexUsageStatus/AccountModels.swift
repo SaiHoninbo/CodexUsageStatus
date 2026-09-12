@@ -230,6 +230,13 @@ enum CodexExecutionProjectionPolicy {
         max(0, Int64(now.timeIntervalSince(startedAt)))
     }
 
+    /// Observation timestamps are authoritative only in monotonic order. A
+    /// delayed delivery of an older event must not make a live execution look
+    /// less fresh than the activity already applied to its projection.
+    static func monotonicLastObservedAt(current: Date, incoming: Date) -> Date {
+        max(current, incoming)
+    }
+
     static func key(for event: CodexLocalTurnActivityEvent) -> CodexExecutionKey {
         CodexExecutionKey(
             profileID: event.profileID,

@@ -3092,12 +3092,14 @@ struct CodexUsageStatusTests {
         try expect(estimate?.cohort == .sameChat, "same Chat history is preferred when sufficient")
         try expect(estimate?.sampleCount == 5, "same Chat estimate keeps the cohort count")
         try expect(estimate?.confidence == .high, "narrow same Chat history has high confidence")
-        try expect((estimate?.lowerProgressPercent ?? 100) <= (estimate?.upperProgressPercent ?? 0), "progress range is ordered")
-        try expect((estimate?.upperProgressPercent ?? 100) < 100, "active estimate never reaches 100%")
-        try expect((estimate?.lowerRemainingSeconds ?? 0) <= (estimate?.upperRemainingSeconds ?? -1), "remaining range is ordered")
+        try expect((estimate?.numericEstimate?.lowerProgressPercent ?? 100) <= (estimate?.numericEstimate?.upperProgressPercent ?? 0), "progress range is ordered")
+        try expect((estimate?.numericEstimate?.upperProgressPercent ?? 100) < 100, "active estimate never reaches 100%")
+        try expect((estimate?.numericEstimate?.lowerRemainingSeconds ?? 0) <= (estimate?.numericEstimate?.upperRemainingSeconds ?? -1), "remaining range is ordered")
         try expect(estimate?.progressText.contains("本機耗時推估") == true, "estimate progress text uses local duration estimate wording")
-        try expect(estimate?.remainingText.contains("預估剩餘") == true, "estimate remaining text uses estimate wording")
+        try expect(estimate?.remainingText?.contains("預估剩餘") == true, "estimate remaining text uses estimate wording")
         try expect(estimate?.confidenceText == "信心：高", "estimate confidence text is localized and explicit")
+        try expect(estimate?.historicalSupport == .supported, "comparable history supports the numeric estimate")
+        try expect(estimate?.activityFreshness == .fresh, "recent projection activity is fresh")
 
         let repoSamples = (0..<8).map { index in
             sample(
@@ -3176,13 +3178,36 @@ struct CodexUsageStatusTests {
             CodexExecutionEstimationPolicy.estimate(for: execution, now: now, samples: []) == nil,
             "zero history does not invent a percentage"
         )
+        let beyondHistoryNow = started.addingTimeInterval(10_000)
+        var beyondHistoryExecution = execution
+        beyondHistoryExecution.lastObservedAt = beyondHistoryNow
         let beyondHistory = CodexExecutionEstimationPolicy.estimate(
-            for: execution,
-            now: started.addingTimeInterval(10_000),
+            for: beyondHistoryExecution,
+            now: beyondHistoryNow,
             samples: chatSamples
         )
-        try expect(beyondHistory?.upperProgressPercent == 95, "elapsed beyond history is capped at 95%")
-        try expect(beyondHistory?.lowerRemainingSeconds == 0, "elapsed beyond history does not invent positive remaining time")
+        try expect(beyondHistory?.historicalSupport == .outOfSupport, "elapsed beyond history is marked out of support")
+        try expect(beyondHistory?.numericEstimate == nil, "elapsed beyond history has no numeric estimate")
+        try expect(beyondHistory?.progressText == "本機耗時推估：超出歷史範圍", "elapsed beyond history uses explicit uncertainty wording")
+        try expect(beyondHistory?.remainingText == "剩餘時間：暫無可靠估計", "elapsed beyond history suppresses precise remaining time")
+        try expect(!((beyondHistory?.accessibilityText ?? "").contains("95%")), "out-of-support accessibility omits capped progress")
+        try expect(!((beyondHistory?.accessibilityText ?? "").contains("0 分鐘")), "out-of-support accessibility omits zero-minute precision")
+
+        var staleBeyondHistoryExecution = beyondHistoryExecution
+        staleBeyondHistoryExecution.lastObservedAt = beyondHistoryNow.addingTimeInterval(-61)
+        let staleBeyondHistory = try unwrap(
+            CodexExecutionEstimationPolicy.estimate(
+                for: staleBeyondHistoryExecution,
+                now: beyondHistoryNow,
+                samples: chatSamples
+            ),
+            "stale out-of-support estimate"
+        )
+        try expect(staleBeyondHistory.historicalSupport == .outOfSupport, "stale out-of-support execution retains history fact")
+        try expect(staleBeyondHistory.activityFreshness == .stale, "stale out-of-support execution records stale activity fact")
+        try expect(staleBeyondHistory.progressText == "本機耗時推估：暫無可靠估計", "stale presentation takes priority over out-of-support wording")
+        try expect(staleBeyondHistory.uncertaintyText == "近期活動證據不足", "stale presentation explains missing activity evidence")
+        try expect(staleBeyondHistory.remainingText == nil, "stale presentation suppresses remaining time even when history is exhausted")
 
         let newTurn = CodexExecutionProjection(
             key: CodexExecutionKey(
@@ -3205,7 +3230,50 @@ struct CodexUsageStatusTests {
             now: now,
             samples: chatSamples
         )
-        try expect(newTurnEstimate?.lowerProgressPercent == 0, "new Turn starts its estimate at zero")
+        try expect(newTurnEstimate?.numericEstimate?.lowerProgressPercent == 0, "new Turn starts its estimate at zero")
+        try expect(newTurnEstimate?.historicalSupport == .supported, "new Turn remains supported by future history")
+
+        try expect(
+            CodexExecutionProjectionPolicy.monotonicLastObservedAt(
+                current: started.addingTimeInterval(40),
+                incoming: started.addingTimeInterval(10)
+            ) == started.addingTimeInterval(40),
+            "older activity cannot move lastObservedAt backwards"
+        )
+
+        var agingExecution = execution
+        agingExecution.lastObservedAt = now.addingTimeInterval(-30)
+        let agingEstimate = try unwrap(
+            CodexExecutionEstimationPolicy.estimate(for: agingExecution, now: now, samples: chatSamples),
+            "aging estimate"
+        )
+        try expect(agingEstimate.activityFreshness == .aging, "activity older than 15 seconds is aging")
+        try expect(agingEstimate.numericEstimate != nil, "aging retains numeric estimate")
+        try expect(agingEstimate.confidence == .high, "aging preserves historical confidence")
+        try expect(agingEstimate.confidenceText == "信心：中", "aging lowers displayed confidence")
+        try expect(agingEstimate.progressText.contains("%"), "aging still presents numeric progress")
+
+        var staleExecution = execution
+        staleExecution.lastObservedAt = now.addingTimeInterval(-61)
+        let staleEstimate = try unwrap(
+            CodexExecutionEstimationPolicy.estimate(for: staleExecution, now: now, samples: chatSamples),
+            "stale estimate"
+        )
+        try expect(staleEstimate.activityFreshness == .stale, "activity older than 60 seconds is stale")
+        try expect(staleEstimate.historicalSupport == .supported, "stale activity does not erase historical support")
+        try expect(staleEstimate.progressText == "本機耗時推估：暫無可靠估計", "stale suppresses numeric progress")
+        try expect(staleEstimate.uncertaintyText == "近期活動證據不足", "stale explains why numeric progress is withheld")
+        try expect(staleEstimate.remainingText == nil, "stale suppresses numeric remaining time")
+        try expect(staleEstimate.confidenceText == "信心：低", "stale displayed confidence is low")
+        try expect(!staleEstimate.accessibilityText.contains("95%"), "stale accessibility omits capped progress")
+        try expect(!staleEstimate.accessibilityText.contains("預估剩餘"), "stale accessibility omits precise remaining time")
+
+        var coldStaleExecution = execution
+        coldStaleExecution.lastObservedAt = started
+        try expect(
+            CodexExecutionEstimationPolicy.estimate(for: coldStaleExecution, now: now, samples: []) == nil,
+            "cold start remains nil even when activity is old"
+        )
     }
 
     private static func testBoundedDurationHistoryScan() throws {

@@ -174,8 +174,15 @@ extension UsagePopoverView {
                     Text(estimate.progressText)
                         .font(.caption2.weight(.semibold).monospacedDigit())
                         .foregroundStyle(HUDColorPalette.warning)
+                    if let uncertaintyText = estimate.uncertaintyText {
+                        Text(uncertaintyText)
+                            .font(.caption2)
+                            .foregroundStyle(HUDColorPalette.tertiaryText)
+                    }
                     HStack(spacing: 7) {
-                        Text(estimate.remainingText)
+                        if let remainingText = estimate.remainingText {
+                            Text(remainingText)
+                        }
                         Text(estimate.confidenceText)
                     }
                     .font(.caption2)
@@ -200,7 +207,7 @@ extension UsagePopoverView {
         .padding(.leading, 8)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(execution.chatName ?? "Chat 名稱未取得")，執行中")
-        .accessibilityValue(model.estimatedExecution(for: execution, now: now)?.progressText ?? "本機耗時推估資料不足")
+        .accessibilityValue(model.estimatedExecution(for: execution, now: now)?.accessibilityText ?? "本機耗時推估資料不足")
     }
 
     @ViewBuilder
