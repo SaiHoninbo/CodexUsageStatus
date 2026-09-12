@@ -55,7 +55,7 @@ struct CodexLocalTurnActivityEvent: Equatable, Sendable {
     var sessionIdentity: CodexLocalSessionIdentity? = nil
 }
 
-enum CodexLocalSessionIdentityKind: String, Equatable, Sendable {
+enum CodexLocalSessionIdentityKind: String, Codable, Equatable, Sendable {
     case repository
     case workspace
     case unknown
@@ -63,7 +63,7 @@ enum CodexLocalSessionIdentityKind: String, Equatable, Sendable {
 
 /// Ephemeral identity for an observed Codex session.  Only display-safe
 /// components are retained; full cwd and origin URL never leave the parser.
-struct CodexLocalSessionIdentity: Equatable, Sendable {
+struct CodexLocalSessionIdentity: Codable, Equatable, Sendable {
     let threadID: String
     let repositoryDisplayName: String?
     let workspaceDisplayName: String?
@@ -541,9 +541,20 @@ enum CodexLocalTurnActivityAuthority {
     }
 }
 
-private struct CodexLocalUsageCursor: Codable, Equatable, Sendable {
+struct CodexLocalUsageCursor: Codable, Equatable, Sendable {
     var byteOffset: UInt64
     var threadID: String?
+    /// The first session identity observed for this rollout. Caching it in
+    /// the cursor lets an unchanged, caught-up rollout avoid reopening and
+    /// reparsing its head on every observer tick.
+    var sessionIdentity: CodexLocalSessionIdentity?
+    /// Resource metadata used to validate the head-identity cache. Older
+    /// cursor files decode these as nil and pay one compatibility read.
+    var fileSize: UInt64?
+    var modificationTime: Date?
+    /// A resource identifier catches atomic replacement even when the new
+    /// rollout happens to have the same size and modification timestamp.
+    var fileResourceIdentifier: String?
     var completedTurnIDs: Set<String>
     /// Once a rollout contains contradictory session metadata, its identity
     /// remains ambiguous across incremental scans. This prevents a tail-only
@@ -553,6 +564,10 @@ private struct CodexLocalUsageCursor: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case byteOffset
         case threadID
+        case sessionIdentity
+        case fileSize
+        case modificationTime
+        case fileResourceIdentifier
         case completedTurnIDs
         case identityIsAmbiguous
     }
@@ -560,11 +575,19 @@ private struct CodexLocalUsageCursor: Codable, Equatable, Sendable {
     init(
         byteOffset: UInt64,
         threadID: String? = nil,
+        sessionIdentity: CodexLocalSessionIdentity? = nil,
+        fileSize: UInt64? = nil,
+        modificationTime: Date? = nil,
+        fileResourceIdentifier: String? = nil,
         completedTurnIDs: Set<String> = [],
         identityIsAmbiguous: Bool = false
     ) {
         self.byteOffset = byteOffset
         self.threadID = threadID
+        self.sessionIdentity = sessionIdentity
+        self.fileSize = fileSize
+        self.modificationTime = modificationTime
+        self.fileResourceIdentifier = fileResourceIdentifier
         self.completedTurnIDs = completedTurnIDs
         self.identityIsAmbiguous = identityIsAmbiguous
     }
@@ -573,17 +596,22 @@ private struct CodexLocalUsageCursor: Codable, Equatable, Sendable {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         byteOffset = try values.decode(UInt64.self, forKey: .byteOffset)
         threadID = try values.decodeIfPresent(String.self, forKey: .threadID)
+        sessionIdentity = try values.decodeIfPresent(CodexLocalSessionIdentity.self, forKey: .sessionIdentity)
+        fileSize = try values.decodeIfPresent(UInt64.self, forKey: .fileSize)
+        modificationTime = try values.decodeIfPresent(Date.self, forKey: .modificationTime)
+        fileResourceIdentifier = try values.decodeIfPresent(String.self, forKey: .fileResourceIdentifier)
         completedTurnIDs = try values.decodeIfPresent(Set<String>.self, forKey: .completedTurnIDs) ?? []
         identityIsAmbiguous = try values.decodeIfPresent(Bool.self, forKey: .identityIsAmbiguous) ?? false
     }
 }
 
-private struct CodexLocalUsageScanResult: Sendable {
+struct CodexLocalUsageScanResult: Sendable {
     let events: [(profileID: UUID?, record: CodexLocalTokenUsageRecord)]
     let turnCompletions: [(profileID: UUID?, record: CodexLocalTurnCompletionRecord)]
     let turnActivities: [CodexLocalTurnActivityEvent]
     let cursors: [String: CodexLocalUsageCursor]
     let seededPaths: Set<String>
+    let sessionIdentityReadCount: Int
 }
 
 /// Bounded reconciliation metadata emitted by the existing rollout scan. It
@@ -606,6 +634,7 @@ final class CodexLocalUsageObserver {
     typealias TurnCompletionHandler = (UUID?, CodexLocalTurnCompletionRecord) -> Void
     typealias TurnActivityHandler = (CodexLocalTurnActivityEvent) -> Void
     typealias ActiveExecutionReconciliationHandler = (CodexLocalActiveExecutionReconciliation) -> Void
+    typealias SessionIdentityReader = @Sendable (URL) -> CodexLocalSessionIdentity?
 
     private let cursorURL: URL
     private var roots: [CodexLocalUsageObservationRoot] = []
@@ -618,6 +647,7 @@ final class CodexLocalUsageObserver {
     private var turnCompletionHandler: TurnCompletionHandler?
     private var turnActivityHandler: TurnActivityHandler?
     private var activeExecutionReconciliationHandler: ActiveExecutionReconciliationHandler?
+    private let sessionIdentityReader: SessionIdentityReader
     private var hasStarted = false
     private var rootsGeneration: UInt64 = 0
     private var lifecycleGeneration: UInt64 = 0
@@ -628,13 +658,15 @@ final class CodexLocalUsageObserver {
         handler: ObservationHandler? = nil,
         turnCompletionHandler: TurnCompletionHandler? = nil,
         turnActivityHandler: TurnActivityHandler? = nil,
-        activeExecutionReconciliationHandler: ActiveExecutionReconciliationHandler? = nil
+        activeExecutionReconciliationHandler: ActiveExecutionReconciliationHandler? = nil,
+        sessionIdentityReader: @escaping SessionIdentityReader = { CodexLocalUsageObserver.sessionIdentity(for: $0) }
     ) {
         self.cursorURL = cursorURL
         self.handler = handler
         self.turnCompletionHandler = turnCompletionHandler
         self.turnActivityHandler = turnActivityHandler
         self.activeExecutionReconciliationHandler = activeExecutionReconciliationHandler
+        self.sessionIdentityReader = sessionIdentityReader
         loadCursors()
     }
 
@@ -763,8 +795,14 @@ final class CodexLocalUsageObserver {
         let lifecycleGeneration = lifecycleGeneration
         let observationEpoch = observationEpoch
         let scanGeneration = scanGeneration
-        Task.detached(priority: .utility) { [roots, cursors, seededPaths, rootsGeneration, lifecycleGeneration, observationEpoch, scanGeneration] in
-            let result = Self.scanRoots(roots, cursors: cursors, seededPaths: seededPaths)
+        let sessionIdentityReader = self.sessionIdentityReader
+        Task.detached(priority: .utility) { [roots, cursors, seededPaths, rootsGeneration, lifecycleGeneration, observationEpoch, scanGeneration, sessionIdentityReader] in
+            let result = Self.scanRoots(
+                roots,
+                cursors: cursors,
+                seededPaths: seededPaths,
+                sessionIdentityReader: sessionIdentityReader
+            )
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 guard self.scanGeneration == scanGeneration else { return }
@@ -810,10 +848,11 @@ final class CodexLocalUsageObserver {
         }
     }
 
-    private nonisolated static func scanRoots(
+    nonisolated static func scanRoots(
         _ roots: [CodexLocalUsageObservationRoot],
         cursors: [String: CodexLocalUsageCursor],
-        seededPaths: Set<String>
+        seededPaths: Set<String>,
+        sessionIdentityReader: @escaping SessionIdentityReader = { CodexLocalUsageObserver.sessionIdentity(for: $0) }
     ) -> CodexLocalUsageScanResult {
         let fileManager = FileManager.default
         var updatedCursors = cursors
@@ -822,6 +861,7 @@ final class CodexLocalUsageObserver {
         var turnCompletions: [(profileID: UUID?, record: CodexLocalTurnCompletionRecord)] = []
         var turnActivities: [CodexLocalTurnActivityEvent] = []
         var seenPaths = Set<String>()
+        var sessionIdentityReadCount = 0
 
         for root in roots {
             for directoryName in ["sessions.local", "sessions"] {
@@ -836,38 +876,61 @@ final class CodexLocalUsageObserver {
                     guard fileURL.pathExtension == "jsonl",
                           fileURL.lastPathComponent.hasPrefix("rollout-"),
                           seenPaths.insert(fileURL.path).inserted,
-                          let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                          let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey, .fileResourceIdentifierKey]),
                           values.isRegularFile == true,
                           let fileSize = values.fileSize,
                           fileSize >= 0 else { continue }
 
                     let path = fileURL.path
-                    let headIdentity = Self.sessionIdentity(for: fileURL)
+                    let size = UInt64(fileSize)
+                    let modificationTime = values.contentModificationDate
+                    let fileResourceIdentifier = values.fileResourceIdentifier.map { String(describing: $0) }
+                    var cursor = updatedCursors[path]
+                    let metadataUnchanged = cursor?.fileSize != nil
+                        && cursor?.fileSize == size
+                        && cursor?.modificationTime == modificationTime
+                        && cursor?.fileResourceIdentifier == fileResourceIdentifier
+                    let headIdentity: CodexLocalSessionIdentity?
+                    if metadataUnchanged, let cursor {
+                        // A nil identity is also a resolved result. Keeping
+                        // that distinction prevents an unproven but stable
+                        // rollout from paying the head-read cost forever.
+                        headIdentity = cursor.sessionIdentity
+                    } else {
+                        sessionIdentityReadCount += 1
+                        headIdentity = sessionIdentityReader(fileURL)
+                    }
                     // A rollout is bound to its first session_meta identity.
                     // Any later identity change makes the entire file
                     // ambiguous; subsequent events may still be observed for
                     // liveness, but can never receive Repo/Chat provenance.
                     var canonicalIdentity = headIdentity
-                    var cursor = updatedCursors[path]
                     var identityIsAmbiguous = cursor?.identityIsAmbiguous ?? false
                     if let headIdentity,
                        let cursorThreadID = cursor?.threadID,
                        cursorThreadID != headIdentity.threadID {
                         identityIsAmbiguous = true
                     }
-                    let size = UInt64(fileSize)
                     if cursor == nil {
                         // Existing rollouts are seeded at EOF; a rollout created
                         // after observation began is a live source and may be
                         // consumed from its beginning.
                         cursor = CodexLocalUsageCursor(
                             byteOffset: updatedSeededPaths.contains(path) ? size : 0,
-                            threadID: updatedSeededPaths.contains(path) ? Self.threadIdentity(for: fileURL) : nil
+                            threadID: updatedSeededPaths.contains(path) ? (canonicalIdentity?.threadID ?? Self.threadIdentity(for: fileURL)) : nil,
+                            sessionIdentity: canonicalIdentity,
+                            fileSize: size,
+                            modificationTime: modificationTime,
+                            fileResourceIdentifier: fileResourceIdentifier
                         )
                         updatedCursors[path] = cursor
                         updatedSeededPaths.insert(path)
                         if cursor?.byteOffset == size { continue }
                     }
+                    cursor?.sessionIdentity = canonicalIdentity
+                    cursor?.fileSize = size
+                    cursor?.modificationTime = modificationTime
+                    cursor?.fileResourceIdentifier = fileResourceIdentifier
                     cursor?.identityIsAmbiguous = identityIsAmbiguous
                     if cursor?.threadID == nil {
                         cursor?.threadID = Self.threadIdentity(for: fileURL)
@@ -879,7 +942,11 @@ final class CodexLocalUsageObserver {
                         // observe future appends.
                         updatedCursors[path] = CodexLocalUsageCursor(
                             byteOffset: size,
-                            threadID: Self.threadIdentity(for: fileURL)
+                            threadID: canonicalIdentity?.threadID ?? Self.threadIdentity(for: fileURL),
+                            sessionIdentity: canonicalIdentity,
+                            fileSize: size,
+                            modificationTime: modificationTime,
+                            fileResourceIdentifier: fileResourceIdentifier
                         )
                         continue
                     }
@@ -1003,7 +1070,8 @@ final class CodexLocalUsageObserver {
             turnCompletions: turnCompletions,
             turnActivities: turnActivities,
             cursors: updatedCursors,
-            seededPaths: updatedSeededPaths
+            seededPaths: updatedSeededPaths,
+            sessionIdentityReadCount: sessionIdentityReadCount
         )
     }
 

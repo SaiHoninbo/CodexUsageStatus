@@ -46,6 +46,23 @@ private final class FailingMoveFileManager: FileManager {
     }
 }
 
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var valueStorage = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return valueStorage
+    }
+
+    func increment() {
+        lock.lock()
+        valueStorage += 1
+        lock.unlock()
+    }
+}
+
 @main
 struct CodexUsageStatusTests {
     static func main() async {
@@ -106,6 +123,7 @@ struct CodexUsageStatusTests {
             ("execution display truthfulness policy", testExecutionDisplayTruthfulnessPolicy),
             ("observer execution estimation", testObserverExecutionEstimation),
             ("bounded duration history scan", testBoundedDurationHistoryScan),
+            ("incremental observer identity scan", testIncrementalObserverIdentityScan),
             ("turn notification cadence policy", testTurnNotificationCadencePolicy),
             ("account profiles isolate email", testAccountProfilesIsolateEmail),
             ("account read disables refresh token", testAccountReadDisablesRefreshToken),
@@ -3312,6 +3330,91 @@ struct CodexUsageStatusTests {
             maxSamples: 10
         )
         try expect(samplesAfterMismatch.count == 1, "mismatched rollout identity cannot add a duration sample")
+    }
+
+    private static func testIncrementalObserverIdentityScan() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-observer-incremental-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let rolloutDirectory = base.appendingPathComponent("sessions.local", isDirectory: true)
+        try FileManager.default.createDirectory(at: rolloutDirectory, withIntermediateDirectories: true)
+
+        let rolloutA = rolloutDirectory.appendingPathComponent("rollout-a.jsonl")
+        let rolloutB = rolloutDirectory.appendingPathComponent("rollout-b.jsonl")
+        let rolloutC = rolloutDirectory.appendingPathComponent("rollout-c.jsonl")
+        let initialA = #"{"type":"session_meta","payload":{"id":"thread-a","cwd":"/tmp/RepoA","git":{"repository_url":"https://github.com/example/RepoA.git"}}}"# + "\n"
+        let initialB = [
+            #"{"type":"session_meta","payload":{"id":"thread-b","cwd":"/tmp/RepoB","git":{"repository_url":"https://github.com/example/RepoB.git"}}}"#,
+            #"{"timestamp":"2026-09-07T03:18:41.123Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-b","started_at":1788751121.123}}"#
+        ].joined(separator: "\n") + "\n"
+        let initialC = #"{"timestamp":"2026-09-07T03:18:41.123Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-c","started_at":1788751121.123}}"# + "\n"
+        try Data(initialA.utf8).write(to: rolloutA)
+        try Data(initialB.utf8).write(to: rolloutB)
+        try Data(initialC.utf8).write(to: rolloutC)
+
+        let roots = [CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: base)]
+        let seededPaths: Set<String> = [rolloutA.path, rolloutB.path, rolloutC.path]
+        let readerCount = LockedCounter()
+        let reader: CodexLocalUsageObserver.SessionIdentityReader = { fileURL in
+            readerCount.increment()
+            guard let data = try? Data(contentsOf: fileURL) else { return nil }
+            for line in data.split(separator: 0x0A, omittingEmptySubsequences: false) {
+                if let identity = CodexLocalUsageArtifactParser.parseSessionIdentity(Data(line)) {
+                    return identity
+                }
+            }
+            return nil
+        }
+
+        let first = CodexLocalUsageObserver.scanRoots(
+            roots,
+            cursors: [:],
+            seededPaths: seededPaths,
+            sessionIdentityReader: reader
+        )
+        try expect(first.sessionIdentityReadCount == 3, "first scan reads each rollout head identity once")
+        try expect(readerCount.value == 3, "first scan invokes the identity reader once per rollout")
+        try expect(first.events.isEmpty, "initially seeded rollouts do not replay historical token events")
+
+        let second = CodexLocalUsageObserver.scanRoots(
+            roots,
+            cursors: first.cursors,
+            seededPaths: first.seededPaths,
+            sessionIdentityReader: reader
+        )
+        try expect(second.sessionIdentityReadCount == 0, "unchanged caught-up rollouts bypass session identity reads")
+        try expect(readerCount.value == 3, "unchanged corpus does not reopen or reparse rollout heads")
+        try expect(second.events.isEmpty, "unchanged scans do not replay historical token events")
+        try expect(second.turnActivities.isEmpty, "unchanged scans do not replay historical activity events")
+
+        let appendedToken = #"{"timestamp":"2026-09-07T03:19:41.123Z","type":"token_usage_record","payload":{"thread_id":"thread-a","turn_id":"turn-a","usage":{"total_tokens":3},"turn_token_usage":{"total_tokens":3},"thread_token_usage":{"total_tokens":3}}}"# + "\n"
+        let appendHandle = try FileHandle(forWritingTo: rolloutA)
+        try appendHandle.seekToEnd()
+        try appendHandle.write(contentsOf: Data(appendedToken.utf8))
+        try appendHandle.close()
+
+        let third = CodexLocalUsageObserver.scanRoots(
+            roots,
+            cursors: second.cursors,
+            seededPaths: second.seededPaths,
+            sessionIdentityReader: reader
+        )
+        try expect(third.sessionIdentityReadCount == 1, "only the changed rollout pays the identity read cost")
+        try expect(readerCount.value == 4, "an unchanged sibling rollout remains on the cached identity path")
+        try expect(third.events.count == 1, "changed rollout consumes only its newly appended token event")
+        try expect(third.events.first?.record.threadID == "thread-a", "incremental scan preserves the changed rollout identity")
+
+        let replacementB = #"{"type":"session_meta","payload":{"id":"thread-b-replaced","cwd":"/tmp/New","git":{"repository_url":"https://github.com/example/New.git"}}}"# + "\n"
+        try Data(replacementB.utf8).write(to: rolloutB, options: .atomic)
+        let fourth = CodexLocalUsageObserver.scanRoots(
+            roots,
+            cursors: third.cursors,
+            seededPaths: third.seededPaths,
+            sessionIdentityReader: reader
+        )
+        try expect(fourth.sessionIdentityReadCount == 1, "a replaced or truncated rollout invalidates the cached identity")
+        try expect(fourth.events.isEmpty, "replacement reanchors at EOF instead of replaying historical content")
+        print("PERF incremental observer identity reads: first=\(first.sessionIdentityReadCount), unchanged=\(second.sessionIdentityReadCount), changed=\(third.sessionIdentityReadCount), replaced=\(fourth.sessionIdentityReadCount)")
     }
 
     private static func testTurnNotificationContentPolicy() throws {
