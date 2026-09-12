@@ -268,9 +268,10 @@ enum CodexExecutionProjectionPolicy {
     }
 
     /// A terminal event with a complete key removes the exact row. If the
-    /// terminal's repository identity is incomplete, it may retire one and
-    /// only one matching physical Turn. Ambiguous partial matches are left
-    /// untouched so identity safety wins over eager cleanup.
+    /// exact key differs only because the active row was admitted before
+    /// repository metadata was proven, it may retire one and only one
+    /// matching physical Turn. Ambiguous partial matches are left untouched
+    /// so identity safety wins over eager cleanup.
     static func terminalMatchIndices(
         for event: CodexLocalTurnActivityEvent,
         in executions: [CodexExecutionProjection]
@@ -278,8 +279,19 @@ enum CodexExecutionProjectionPolicy {
         let exactKey = key(for: event)
         let exactMatches = executions.indices.filter { executions[$0].key == exactKey }
         if !exactMatches.isEmpty { return exactMatches }
-        guard event.sessionIdentity?.repositoryIdentityDigest == nil else { return [] }
-        let partial = partialMatches(for: event, in: executions)
+        // A Turn may have been admitted from an early token/start event before
+        // the rollout's session metadata exposed its repository digest.  A
+        // later terminal event can therefore carry a complete digest while
+        // the active projection still has a nil one.  Do not use this fallback
+        // to retire a row that already has a different proven digest: the
+        // physical tuple alone cannot override that stronger identity claim.
+        let partial = partialMatches(for: event, in: executions).filter { index in
+            guard let terminalDigest = event.sessionIdentity?.repositoryIdentityDigest else {
+                return true
+            }
+            return executions[index].key.repositoryIdentityDigest == nil
+                || executions[index].key.repositoryIdentityDigest == terminalDigest
+        }
         return partial.count == 1 ? partial : []
     }
 

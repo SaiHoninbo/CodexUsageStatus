@@ -2858,6 +2858,48 @@ struct CodexUsageStatusTests {
             "exact terminal identity retires the matching execution"
         )
 
+        let unprovenProjection = CodexExecutionProjection(
+            key: CodexExecutionKey(
+                profileID: nil,
+                normalizedPhysicalRootPath: root.standardizedFileURL.resolvingSymlinksInPath().path,
+                threadID: "thread-reconcile",
+                turnID: "turn-reconcile",
+                repositoryIdentityDigest: nil
+            ),
+            repositoryDisplayName: nil,
+            workspaceDisplayName: "project-worktree",
+            chatName: nil,
+            startedAt: startedAt,
+            tokenTotal: nil,
+            plan: nil,
+            lastObservedAt: startedAt
+        )
+        try expect(
+            CodexExecutionProjectionPolicy.terminalMatchIndices(for: exactTerminal, in: [unprovenProjection]) == [0],
+            "a complete terminal identity retires a unique early unproven projection"
+        )
+
+        let conflictingProjection = CodexExecutionProjection(
+            key: CodexExecutionKey(
+                profileID: nil,
+                normalizedPhysicalRootPath: root.standardizedFileURL.resolvingSymlinksInPath().path,
+                threadID: "thread-reconcile",
+                turnID: "turn-reconcile",
+                repositoryIdentityDigest: "repo-other"
+            ),
+            repositoryDisplayName: "project",
+            workspaceDisplayName: "project-worktree",
+            chatName: "Chat conflict",
+            startedAt: startedAt,
+            tokenTotal: nil,
+            plan: nil,
+            lastObservedAt: startedAt
+        )
+        try expect(
+            CodexExecutionProjectionPolicy.terminalMatchIndices(for: exactTerminal, in: [conflictingProjection]).isEmpty,
+            "a complete terminal identity cannot retire a conflicting proven digest"
+        )
+
         let partialTerminal = CodexLocalTurnActivityEvent(
             profileID: nil,
             physicalRootURL: root,
