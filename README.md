@@ -133,9 +133,9 @@ verification. Local, candidate, and public-release artifacts use the same
 ad-hoc validation path:
 
 ```bash
-./script/validate_release_artifact.sh outputs/CodexUsageStatus.app.zip 2.4.93
+./script/validate_release_artifact.sh outputs/CodexUsageStatus.app.zip 2.4.94
 # Public GitHub Release validation:
-./script/validate_release_artifact.sh --public-release outputs/CodexUsageStatus.app.zip 2.4.93
+./script/validate_release_artifact.sh --public-release outputs/CodexUsageStatus.app.zip 2.4.94
 ```
 
 The ZIP must pass this validator before it is uploaded to a GitHub Release.
