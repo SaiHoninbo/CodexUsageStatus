@@ -133,6 +133,7 @@ struct CodexUsageStatusTests {
             ("update version comparison", testUpdateVersionComparison),
             ("automatic update check policy", testAutomaticUpdateCheckPolicy),
             ("update state presentation", testUpdateStatePresentation),
+            ("update replacement waits for old process", testUpdateReplacementWaitsForOldProcess),
             ("update authority and packaging policy", testUpdateAuthorityAndPackagingPolicy),
             ("release signing policy", testReleaseSigningPolicy),
             ("release artifact validation", testReleaseArtifactValidation),
@@ -4499,6 +4500,26 @@ struct CodexUsageStatusTests {
         try expect(!AppUpdateState.error("network").isBusy, "error state is terminal")
     }
 
+    private static func testUpdateReplacementWaitsForOldProcess() throws {
+        let script = AppUpdateInstaller.replacementScript(
+            oldPath: "/Applications/CodexUsageStatus.app",
+            newPath: "/tmp/update/extracted/CodexUsageStatus.app",
+            backupPath: "/Applications/CodexUsageStatus.backup",
+            rootPath: "/tmp/update"
+        )
+        try expect(script.contains("APP_PID=$PPID"), "replacement captures the old app PID")
+        try expect(script.contains("kill -0 \"$APP_PID\""), "replacement probes old process liveness")
+        try expect(script.contains("WAIT_DEADLINE=$(($(date +%s) + 30))"), "replacement wait is bounded")
+        guard let waitRange = script.range(of: "while kill -0"),
+              let moveRange = script.range(of: "mv \"$OLD\" \"$BACKUP\""),
+              let openRange = script.range(of: "/usr/bin/open -n \"$OLD\"") else {
+            throw HarnessError.assertion("replacement script is missing its hand-off phases")
+        }
+        try expect(waitRange.lowerBound < moveRange.lowerBound, "replacement waits before moving the old bundle")
+        try expect(moveRange.lowerBound < openRange.lowerBound, "replacement opens the new bundle only after replacement")
+        try expect(script.contains("then exit 1; fi"), "replacement fails closed when the old process does not exit")
+    }
+
     private static func testUpdateAuthorityAndPackagingPolicy() throws {
         try expect(
             AppUpdateReleasePolicy.latestReleaseAPIURL.absoluteString ==
@@ -4575,13 +4596,13 @@ struct CodexUsageStatusTests {
 
         let artifactURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("outputs/CodexUsageStatus.app.zip")
-        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, "2.4.94"])
+        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, "2.4.95"])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 
-        let publicStatus = try runToolStatus("/bin/bash", [validatorURL.path, "--public-release", artifactURL.path, "2.4.94"])
+        let publicStatus = try runToolStatus("/bin/bash", [validatorURL.path, "--public-release", artifactURL.path, "2.4.95"])
         try expect(publicStatus == 0, "ad-hoc artifact is accepted by the public GitHub release gate")
 
-        let notarizeStatus = try runToolStatus("/bin/bash", [validatorURL.path, "--notarize", artifactURL.path, "2.4.94"])
+        let notarizeStatus = try runToolStatus("/bin/bash", [validatorURL.path, "--notarize", artifactURL.path, "2.4.95"])
         try expect(notarizeStatus != 0, "retired notarization mode is rejected")
 
         let malformedStatus = try runToolStatus("/bin/bash", [validatorURL.path, "/dev/null"])

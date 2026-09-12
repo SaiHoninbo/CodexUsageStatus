@@ -132,9 +132,9 @@ evidence。只把 ZIP 提交到 `main` 並不會自動建立 App 內的 Release 
 ad-hoc 驗證：
 
 ```bash
-./script/validate_release_artifact.sh outputs/CodexUsageStatus.app.zip 2.4.94
+./script/validate_release_artifact.sh outputs/CodexUsageStatus.app.zip 2.4.95
 # 正式 GitHub Release 驗證：
-./script/validate_release_artifact.sh --public-release outputs/CodexUsageStatus.app.zip 2.4.94
+./script/validate_release_artifact.sh --public-release outputs/CodexUsageStatus.app.zip 2.4.95
 ```
 
 ZIP 必須先通過這個 validator，才能上傳 GitHub Release。

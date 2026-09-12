@@ -195,7 +195,8 @@ final class AppUpdateService: NSObject {
     var currentVersion: String { AppVersion.current }
 
     /// GitHub Release checks have no separate updater startup phase. The
-    /// hook preserves UsageViewModel's deferred startup sequencing.
+    /// hook remains available so UsageViewModel can keep updater lifecycle
+    /// ownership without introducing another background worker.
     func start() {}
 
     func check(completion: ((AppUpdateState) -> Void)? = nil) {
@@ -279,8 +280,9 @@ final class AppUpdateService: NSObject {
 
     /// Downloads the fixed official release asset, validates the bundle, and
     /// schedules a one-shot replacement of the currently running app. The
-    /// replacement helper moves the old bundle aside before installing the
-    /// new one, so a failed move restores the old app instead of deleting it.
+    /// replacement helper waits for this process to terminate, then moves
+    /// the old bundle aside before installing the new one, so a failed move
+    /// restores the old app instead of deleting it or launching two copies.
     func install(_ release: AppUpdateRelease) {
         guard case .available(let available) = state,
               available.version == release.version,
@@ -375,7 +377,7 @@ final class AppUpdateService: NSObject {
     }
 }
 
-private enum AppUpdateInstaller {
+enum AppUpdateInstaller {
     struct Plan {
         let rootURL: URL
         let newBundleURL: URL
@@ -424,23 +426,12 @@ private enum AppUpdateInstaller {
 
     static func schedule(plan: Plan) throws {
         let scriptURL = plan.rootURL.appendingPathComponent("replace-and-relaunch.sh")
-        let script = """
-        #!/bin/sh
-        set -eu
-        OLD=\(shellQuote(plan.currentBundleURL.path))
-        NEW=\(shellQuote(plan.newBundleURL.path))
-        BACKUP=\(shellQuote(plan.currentBundleURL.deletingLastPathComponent().appendingPathComponent(plan.backupName).path))
-        ROOT=\(shellQuote(plan.rootURL.path))
-        sleep 1
-        if [ ! -d \"$NEW\" ]; then exit 1; fi
-        mv \"$OLD\" \"$BACKUP\"
-        if ! mv \"$NEW\" \"$OLD\"; then
-            mv \"$BACKUP\" \"$OLD\" || true
-            exit 1
-        fi
-        /usr/bin/open -n \"$OLD\" || true
-        (sleep 10; /bin/rm -rf \"$BACKUP\" \"$ROOT\") >/dev/null 2>&1 &
-        """
+        let script = replacementScript(
+            oldPath: plan.currentBundleURL.path,
+            newPath: plan.newBundleURL.path,
+            backupPath: plan.currentBundleURL.deletingLastPathComponent().appendingPathComponent(plan.backupName).path,
+            rootPath: plan.rootURL.path
+        )
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
 
@@ -450,6 +441,47 @@ private enum AppUpdateInstaller {
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try process.run()
+    }
+
+    /// Generates the one-shot replacement script separately from process
+    /// launching so the termination hand-off remains deterministic and
+    /// reviewable. The parent PID is the currently running app because the
+    /// script is spawned directly by `AppUpdateService.install`.
+    static func replacementScript(
+        oldPath: String,
+        newPath: String,
+        backupPath: String,
+        rootPath: String
+    ) -> String {
+        """
+        #!/bin/sh
+        set -eu
+        OLD=\(shellQuote(oldPath))
+        NEW=\(shellQuote(newPath))
+        BACKUP=\(shellQuote(backupPath))
+        ROOT=\(shellQuote(rootPath))
+        APP_PID=$PPID
+        WAIT_DEADLINE=$(($(date +%s) + 30))
+        sleep 1
+        if [ ! -d \"$NEW\" ]; then exit 1; fi
+        # NSApp.terminate(nil) is asynchronous: AppDelegate first flushes
+        # pending writes and only then replies to AppKit. Wait for the exact
+        # old process to disappear before replacing or reopening the bundle;
+        # otherwise `open -n` can leave the old and new menu-bar instances
+        # alive together. A bounded wait fails closed and leaves the old app
+        # untouched if termination cannot be observed.
+        while kill -0 \"$APP_PID\" 2>/dev/null; do
+            if [ \"$(date +%s)\" -ge \"$WAIT_DEADLINE\" ]; then exit 1; fi
+            sleep 0.2
+        done
+        mv \"$OLD\" \"$BACKUP\"
+        if ! mv \"$NEW\" \"$OLD\"; then
+            mv \"$BACKUP\" \"$OLD\" || true
+            exit 1
+        fi
+        /usr/bin/open -n \"$OLD\" || true
+        (sleep 10; /bin/rm -rf \"$BACKUP\" \"$ROOT\") >/dev/null 2>&1 &
+        """
     }
 
     private static func isSafeArchiveEntry(_ entry: String) -> Bool {

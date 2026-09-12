@@ -406,8 +406,12 @@ final class UsageViewModel: ObservableObject {
         loginItemManager.refresh()
         loginItemManager.registerIfNeeded()
         startDisplayTimer()
-        // Update checks are deliberately deferred; they are network work and
-        // must never delay the first interactive status-item frame.
+        // Start the existing bounded update cadence as soon as the model is
+        // alive. The request is asynchronous and must not wait for the
+        // slower local-store hydration path; otherwise a delayed profile or
+        // history read can suppress the first automatic release prompt.
+        startUpdateCheckTimer()
+        checkForUpdatesIfNeeded()
         startupTask?.cancel()
         startupTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -438,9 +442,6 @@ final class UsageViewModel: ObservableObject {
             }
             guard !self.isStopping else { return }
             self.finishStartupAfterLocalStores()
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            guard !Task.isCancelled, !self.isStopping else { return }
-            self.checkForUpdatesIfNeeded()
         }
     }
 
@@ -457,7 +458,6 @@ final class UsageViewModel: ObservableObject {
             switchToProfile(profile)
             defaultClientEnabled = !profile.isManaged
         }
-        startUpdateCheckTimer()
         if let profile = currentProfile, profile.isManaged {
             defaultClientEnabled = false
             ensureManagedWorker(for: profile)
