@@ -630,6 +630,12 @@ struct CodexLocalActiveExecutionReconciliation: Equatable, Sendable {
 /// old conversation cannot be imported as new local usage on first launch.
 @MainActor
 final class CodexLocalUsageObserver {
+#if CODEX_USAGE_TESTING
+    /// Test-only evidence that the unchanged rollout fast path never opens a
+    /// rollout. This is compiled out of production builds.
+    nonisolated(unsafe) static var testFileHandleOpenCount = 0
+#endif
+
     typealias ObservationHandler = (UUID?, CodexLocalTokenUsageRecord) -> Void
     typealias TurnCompletionHandler = (UUID?, CodexLocalTurnCompletionRecord) -> Void
     typealias TurnActivityHandler = (CodexLocalTurnActivityEvent) -> Void
@@ -890,6 +896,17 @@ final class CodexLocalUsageObserver {
                         && cursor?.fileSize == size
                         && cursor?.modificationTime == modificationTime
                         && cursor?.fileResourceIdentifier == fileResourceIdentifier
+
+                    // A metadata-stable rollout that is already caught up has
+                    // no new bytes to observe. Exit before identity work or
+                    // any FileHandle open/read. Keep the partial-line case
+                    // below: when byteOffset has not reached EOF, the file
+                    // still needs one incremental read even if its metadata
+                    // has not changed since the previous scan.
+                    if metadataUnchanged, let cursor, cursor.byteOffset == size {
+                        continue
+                    }
+
                     let headIdentity: CodexLocalSessionIdentity?
                     if metadataUnchanged, let cursor {
                         // A nil identity is also a resolved result. Keeping
@@ -951,6 +968,9 @@ final class CodexLocalUsageObserver {
                         continue
                     }
                     let offset = startingOffset
+#if CODEX_USAGE_TESTING
+                    testFileHandleOpenCount += 1
+#endif
                     guard let handle = try? FileHandle(forReadingFrom: fileURL) else { continue }
                     defer { try? handle.close() }
                     do {

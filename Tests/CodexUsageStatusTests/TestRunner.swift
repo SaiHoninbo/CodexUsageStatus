@@ -3367,6 +3367,9 @@ struct CodexUsageStatusTests {
             return nil
         }
 
+#if CODEX_USAGE_TESTING
+        CodexLocalUsageObserver.testFileHandleOpenCount = 0
+#endif
         let first = CodexLocalUsageObserver.scanRoots(
             roots,
             cursors: [:],
@@ -3376,6 +3379,9 @@ struct CodexUsageStatusTests {
         try expect(first.sessionIdentityReadCount == 3, "first scan reads each rollout head identity once")
         try expect(readerCount.value == 3, "first scan invokes the identity reader once per rollout")
         try expect(first.events.isEmpty, "initially seeded rollouts do not replay historical token events")
+#if CODEX_USAGE_TESTING
+        let firstFileHandleOpenCount = CodexLocalUsageObserver.testFileHandleOpenCount
+#endif
 
         let second = CodexLocalUsageObserver.scanRoots(
             roots,
@@ -3387,6 +3393,12 @@ struct CodexUsageStatusTests {
         try expect(readerCount.value == 3, "unchanged corpus does not reopen or reparse rollout heads")
         try expect(second.events.isEmpty, "unchanged scans do not replay historical token events")
         try expect(second.turnActivities.isEmpty, "unchanged scans do not replay historical activity events")
+#if CODEX_USAGE_TESTING
+        try expect(
+            CodexLocalUsageObserver.testFileHandleOpenCount == firstFileHandleOpenCount,
+            "unchanged caught-up rollouts do not open rollout handles"
+        )
+#endif
 
         let appendedToken = #"{"timestamp":"2026-09-07T03:19:41.123Z","type":"token_usage_record","payload":{"thread_id":"thread-a","turn_id":"turn-a","usage":{"total_tokens":3},"turn_token_usage":{"total_tokens":3},"thread_token_usage":{"total_tokens":3}}}"# + "\n"
         let appendHandle = try FileHandle(forWritingTo: rolloutA)
@@ -3404,6 +3416,12 @@ struct CodexUsageStatusTests {
         try expect(readerCount.value == 4, "an unchanged sibling rollout remains on the cached identity path")
         try expect(third.events.count == 1, "changed rollout consumes only its newly appended token event")
         try expect(third.events.first?.record.threadID == "thread-a", "incremental scan preserves the changed rollout identity")
+#if CODEX_USAGE_TESTING
+        try expect(
+            CodexLocalUsageObserver.testFileHandleOpenCount == firstFileHandleOpenCount + 1,
+            "only the changed rollout opens a rollout handle"
+        )
+#endif
 
         let replacementB = #"{"type":"session_meta","payload":{"id":"thread-b-replaced","cwd":"/tmp/New","git":{"repository_url":"https://github.com/example/New.git"}}}"# + "\n"
         try Data(replacementB.utf8).write(to: rolloutB, options: .atomic)

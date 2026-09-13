@@ -6,6 +6,7 @@ BUILD_DIR="$ROOT_DIR/.build/core-tests"
 mkdir -p "$BUILD_DIR"
 
 swiftc -parse-as-library \
+  -D CODEX_USAGE_TESTING \
   -module-cache-path "$BUILD_DIR/module-cache" \
   "$ROOT_DIR/Sources/CodexUsageStatus/Models.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/JSONRPC.swift" \
