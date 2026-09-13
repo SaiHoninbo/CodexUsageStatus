@@ -432,28 +432,131 @@ enum CodexLocalSessionIndex {
         }
     }
 
+    private struct CacheEntry {
+        let fileSize: Int64?
+        let modificationTime: Date?
+        let fileResourceIdentifier: String?
+        let names: [String: String?]
+        let isComplete: Bool
+        var lastAccess: UInt64
+    }
+
+    private static let cacheLock = NSLock()
+    private static var cache: [String: CacheEntry] = [:]
+    private static var accessCounter: UInt64 = 0
+    private static let maximumCacheEntries = 32
+    private static var fullReadCountStorage = 0
+
+    static var fullReadCount: Int {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return fullReadCountStorage
+    }
+
+#if CODEX_USAGE_TESTING
+    nonisolated(unsafe) static var testFullReadCount = 0
+
+    static func resetTestCache() {
+        cacheLock.lock()
+        cache.removeAll()
+        accessCounter = 0
+        fullReadCountStorage = 0
+        testFullReadCount = 0
+        cacheLock.unlock()
+    }
+#endif
+
     static func threadName(for threadID: String, in codexHomeURL: URL) -> String? {
         guard !threadID.isEmpty else { return nil }
         let indexURL = codexHomeURL.appendingPathComponent("session_index.jsonl")
-        guard let data = try? Data(contentsOf: indexURL) else { return nil }
+        let metadata = try? indexURL.resourceValues(forKeys: [
+            .isRegularFileKey,
+            .fileSizeKey,
+            .contentModificationDateKey,
+            .fileResourceIdentifierKey
+        ])
+        guard metadata?.isRegularFile == true else {
+            cacheLock.lock()
+            cache.removeValue(forKey: indexURL.path)
+            cacheLock.unlock()
+            return nil
+        }
 
-        // The index is append-only and the latest matching row wins. Scanning
-        // from the end avoids returning an obsolete name after a rename.
-        for line in data.split(separator: 0x0A, omittingEmptySubsequences: true).reversed() {
+        let fileSize = metadata?.fileSize.map(Int64.init)
+        let modificationTime = metadata?.contentModificationDate
+        let fileResourceIdentifier = metadata?.fileResourceIdentifier.map { String(describing: $0) }
+        let path = indexURL.path
+
+        cacheLock.lock()
+        if var cached = cache[path],
+           cached.fileSize == fileSize,
+           cached.modificationTime == modificationTime,
+           cached.fileResourceIdentifier == fileResourceIdentifier,
+           cached.isComplete || cached.names.keys.contains(threadID) {
+            accessCounter &+= 1
+            cached.lastAccess = accessCounter
+            cache[path] = cached
+            let hasThread = cached.names.keys.contains(threadID)
+            let name = hasThread ? cached.names[threadID]! : nil
+            cacheLock.unlock()
+            return name
+        }
+        cacheLock.unlock()
+
+        guard let data = try? Data(contentsOf: indexURL) else { return nil }
+        var names: [String: String?] = [:]
+        for line in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
             guard let entry = try? JSONDecoder().decode(Entry.self, from: Data(line)),
-                  entry.id == threadID else { continue }
-            // A matching row with no usable name is authoritative evidence
-            // that the current title is unavailable. Do not resurrect an
-            // older title from an earlier row for the same thread.
-            guard let rawName = entry.threadName else { return nil }
+                  let id = entry.id,
+                  !id.isEmpty else { continue }
+            // The index is append-only. Assigning in file order means the
+            // latest row remains authoritative, including an empty title.
+            guard let rawName = entry.threadName else {
+                // `nil` is a meaningful cached value here. `updateValue`
+                // stores Optional.none as the dictionary value, whereas
+                // `names[id] = nil` would remove the key and resurrect an
+                // older title on a later lookup.
+                names.updateValue(nil, forKey: id)
+                continue
+            }
             let name = rawName
                 .components(separatedBy: .whitespacesAndNewlines)
                 .filter { !$0.isEmpty }
                 .joined(separator: " ")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            return name.isEmpty ? nil : name
+            names[id] = name.isEmpty ? nil : name
         }
-        return nil
+
+        cacheLock.lock()
+        accessCounter &+= 1
+#if CODEX_USAGE_TESTING
+        testFullReadCount += 1
+#endif
+        fullReadCountStorage += 1
+        let isComplete = names.count <= 4_096
+        var retainedNames = names
+        if !isComplete {
+            retainedNames = [:]
+            if names.keys.contains(threadID) {
+                retainedNames.updateValue(names[threadID]!, forKey: threadID)
+            }
+        }
+        cache[path] = CacheEntry(
+            fileSize: fileSize,
+            modificationTime: modificationTime,
+            fileResourceIdentifier: fileResourceIdentifier,
+            names: retainedNames,
+            isComplete: isComplete,
+            lastAccess: accessCounter
+        )
+        if cache.count > maximumCacheEntries,
+           let leastRecentlyUsed = cache.min(by: { $0.value.lastAccess < $1.value.lastAccess })?.key {
+            cache.removeValue(forKey: leastRecentlyUsed)
+        }
+        let hasThread = names.keys.contains(threadID)
+        let name = hasThread ? names[threadID]! : nil
+        cacheLock.unlock()
+        return name
     }
 }
 
@@ -611,7 +714,28 @@ struct CodexLocalUsageScanResult: Sendable {
     let turnActivities: [CodexLocalTurnActivityEvent]
     let cursors: [String: CodexLocalUsageCursor]
     let seededPaths: Set<String>
+    let knownRolloutPaths: Set<String>
     let sessionIdentityReadCount: Int
+    let metrics: CodexLocalUsageScanMetrics
+}
+
+struct CodexLocalUsageScanMetrics: Equatable, Sendable {
+    let directoryEnumerationCount: Int
+    let rolloutMetadataReadCount: Int
+    let rolloutContentFileHandleOpenCount: Int
+    let sessionIndexFullReadCount: Int
+}
+
+enum CodexLocalUsageDiscoveryProbeEvent: Sendable {
+    case afterRootPreflight
+    case beforeNamespace
+    case afterNamespace
+    case beforeRootFinalize
+}
+
+struct CodexLocalUsageDiscoveryRootIdentity: Equatable, Sendable {
+    let resourceIdentifier: String
+    let creationDate: Date?
 }
 
 /// Bounded reconciliation metadata emitted by the existing rollout scan. It
@@ -634,6 +758,7 @@ final class CodexLocalUsageObserver {
     /// Test-only evidence that the unchanged rollout fast path never opens a
     /// rollout. This is compiled out of production builds.
     nonisolated(unsafe) static var testFileHandleOpenCount = 0
+    nonisolated(unsafe) static var testCursorPersistRequestCount = 0
 #endif
 
     typealias ObservationHandler = (UUID?, CodexLocalTokenUsageRecord) -> Void
@@ -646,8 +771,10 @@ final class CodexLocalUsageObserver {
     private var roots: [CodexLocalUsageObservationRoot] = []
     private var cursors: [String: CodexLocalUsageCursor] = [:]
     private var seededPaths: Set<String> = []
+    private var knownRolloutPaths: Set<String> = []
     private var timer: Timer?
     private var scanInFlight = false
+    private var scanTick: UInt64 = 0
     private var scanGeneration: UInt64 = 0
     private var handler: ObservationHandler?
     private var turnCompletionHandler: TurnCompletionHandler?
@@ -705,6 +832,7 @@ final class CodexLocalUsageObserver {
         // ledger. Newly appended lines are still consumed on the next scan.
         let newlyAddedRoots = roots.filter { !previousRootPaths.contains($0.codexHomeURL.path) }
         let paths = Self.rolloutPaths(in: newlyAddedRoots)
+        knownRolloutPaths.formUnion(paths)
         var didAddCursor = false
         for path in paths where !seededPaths.contains(path) {
             seededPaths.insert(path)
@@ -743,6 +871,8 @@ final class CodexLocalUsageObserver {
             )
         )
         seededPaths = Self.rolloutPaths(in: roots)
+        knownRolloutPaths = seededPaths
+        scanTick = 0
         scan()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -780,34 +910,60 @@ final class CodexLocalUsageObserver {
               let decoded = try? JSONDecoder().decode([String: CodexLocalUsageCursor].self, from: data) else {
             return
         }
-        cursors = decoded
+        var normalized: [String: CodexLocalUsageCursor] = [:]
+        for (path, cursor) in decoded {
+            let canonical = Self.canonicalPath(path)
+            if let existing = normalized[canonical] {
+                normalized[canonical] = Self.preferredCursor(existing, cursor)
+            } else {
+                normalized[canonical] = cursor
+            }
+        }
+        cursors = normalized
     }
 
     private func persistCursors() {
-        guard let data = try? JSONEncoder().encode(cursors) else { return }
-        let directory = cursorURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try? data.write(to: cursorURL, options: .atomic)
+#if CODEX_USAGE_TESTING
+        Self.testCursorPersistRequestCount += 1
+#endif
+        let snapshot = cursors
+        // Encoding is performed by the persistence actor, and the actual
+        // atomic write remains on its detached utility task. The observer's
+        // MainActor only publishes the newest in-memory cursor snapshot.
+        Task {
+            await PersistenceWriteCoordinator.shared.enqueueJSON(
+                url: cursorURL,
+                value: snapshot
+            )
+        }
     }
 
     private func scan() {
         guard !scanInFlight, !roots.isEmpty else { return }
         scanInFlight = true
         scanGeneration &+= 1
+        scanTick &+= 1
         let roots = roots
         let cursors = cursors
         let seededPaths = seededPaths
+        let knownRolloutPaths = knownRolloutPaths
+        // start()/setRoots() already seed the current known paths. The first
+        // poll can therefore use the cheap known-path path; recursive
+        // discovery runs on the bounded cadence and still finds later files.
+        let shouldDiscoverNewRollouts = scanTick % 15 == 0
         let rootsGeneration = rootsGeneration
         let lifecycleGeneration = lifecycleGeneration
         let observationEpoch = observationEpoch
         let scanGeneration = scanGeneration
         let sessionIdentityReader = self.sessionIdentityReader
-        Task.detached(priority: .utility) { [roots, cursors, seededPaths, rootsGeneration, lifecycleGeneration, observationEpoch, scanGeneration, sessionIdentityReader] in
+        Task.detached(priority: .utility) { [roots, cursors, seededPaths, knownRolloutPaths, shouldDiscoverNewRollouts, rootsGeneration, lifecycleGeneration, observationEpoch, scanGeneration, sessionIdentityReader] in
             let result = Self.scanRoots(
                 roots,
                 cursors: cursors,
                 seededPaths: seededPaths,
-                sessionIdentityReader: sessionIdentityReader
+                sessionIdentityReader: sessionIdentityReader,
+                knownRolloutPaths: knownRolloutPaths,
+                discoverNewRollouts: shouldDiscoverNewRollouts
             )
             await MainActor.run { [weak self] in
                 guard let self else { return }
@@ -832,6 +988,7 @@ final class CodexLocalUsageObserver {
                 let cursorsChanged = self.cursors != result.cursors
                 self.cursors = result.cursors
                 self.seededPaths = result.seededPaths
+                self.knownRolloutPaths = result.knownRolloutPaths
                 if cursorsChanged { self.persistCursors() }
                 for event in result.events {
                     self.handler?(event.profileID, event.record)
@@ -858,44 +1015,147 @@ final class CodexLocalUsageObserver {
         _ roots: [CodexLocalUsageObservationRoot],
         cursors: [String: CodexLocalUsageCursor],
         seededPaths: Set<String>,
-        sessionIdentityReader: @escaping SessionIdentityReader = { CodexLocalUsageObserver.sessionIdentity(for: $0) }
+        sessionIdentityReader: @escaping SessionIdentityReader = { CodexLocalUsageObserver.sessionIdentity(for: $0) },
+        knownRolloutPaths: Set<String>? = nil,
+        discoverNewRollouts: Bool = true,
+        discoveryProbe: @escaping @Sendable (CodexLocalUsageDiscoveryProbeEvent, URL) -> Void = { _, _ in },
+        discoveryFailureInjector: @escaping @Sendable (URL) -> Bool = { _ in false },
+        discoveryRootIdentityReader: @escaping @Sendable (URL) -> CodexLocalUsageDiscoveryRootIdentity? = { CodexLocalUsageObserver.discoveryRootIdentity(for: $0) }
     ) -> CodexLocalUsageScanResult {
         let fileManager = FileManager.default
-        var updatedCursors = cursors
-        var updatedSeededPaths = seededPaths
+        func canonicalPath(_ path: String) -> String {
+            URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+        }
+        var updatedCursors: [String: CodexLocalUsageCursor] = [:]
+        for (path, cursor) in cursors {
+            // Multiple historical aliases can resolve to one physical path
+            // (for example /var versus /private/var). Merge aliases with a
+            // deterministic cursor preference instead of trapping on a
+            // duplicate uniqueKeysWithValues key.
+            let canonical = canonicalPath(path)
+            if let existing = updatedCursors[canonical] {
+                updatedCursors[canonical] = Self.preferredCursor(existing, cursor)
+            } else {
+                updatedCursors[canonical] = cursor
+            }
+        }
+        var updatedSeededPaths = Set(seededPaths.map(canonicalPath))
+        var updatedKnownRolloutPaths = Set((knownRolloutPaths ?? []).map(canonicalPath))
         var events: [(profileID: UUID?, record: CodexLocalTokenUsageRecord)] = []
         var turnCompletions: [(profileID: UUID?, record: CodexLocalTurnCompletionRecord)] = []
         var turnActivities: [CodexLocalTurnActivityEvent] = []
         var seenPaths = Set<String>()
         var sessionIdentityReadCount = 0
+        var directoryEnumerationCount = 0
+        var rolloutMetadataReadCount = 0
+        var rolloutContentFileHandleOpenCount = 0
+        let sessionIndexReadsBefore = CodexLocalSessionIndex.fullReadCount
+        var discoveredPaths = Set<String>()
+        var successfulRootPaths = Set<String>()
 
-        for root in roots {
-            for directoryName in ["sessions.local", "sessions"] {
-                let directory = root.codexHomeURL.appendingPathComponent(directoryName, isDirectory: true)
-                guard let enumerator = fileManager.enumerator(
-                    at: directory,
-                    includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
-                    options: [.skipsHiddenFiles]
-                ) else { continue }
+        func isRolloutFile(_ url: URL) -> Bool {
+            url.pathExtension == "jsonl" && url.lastPathComponent.hasPrefix("rollout-")
+        }
 
-                for case let fileURL as URL in enumerator {
-                    guard fileURL.pathExtension == "jsonl",
-                          fileURL.lastPathComponent.hasPrefix("rollout-"),
-                          seenPaths.insert(fileURL.path).inserted,
-                          let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey, .fileResourceIdentifierKey]),
-                          values.isRegularFile == true,
-                          let fileSize = values.fileSize,
-                          fileSize >= 0 else { continue }
+        if discoverNewRollouts {
+            for root in roots {
+                let rootURL = root.codexHomeURL
+                let preflightIdentity = discoveryRootIdentityReader(rootURL)
+                var rootDiscoverySucceeded = preflightIdentity != nil
+                guard rootDiscoverySucceeded else { continue }
+                discoveryProbe(.afterRootPreflight, rootURL)
 
-                    let path = fileURL.path
-                    let size = UInt64(fileSize)
-                    let modificationTime = values.contentModificationDate
-                    let fileResourceIdentifier = values.fileResourceIdentifier.map { String(describing: $0) }
-                    var cursor = updatedCursors[path]
-                    let metadataUnchanged = cursor?.fileSize != nil
-                        && cursor?.fileSize == size
-                        && cursor?.modificationTime == modificationTime
-                        && cursor?.fileResourceIdentifier == fileResourceIdentifier
+                for directoryName in ["sessions.local", "sessions"] {
+                    guard rootDiscoverySucceeded,
+                          discoveryRootIdentityReader(rootURL) == preflightIdentity else {
+                        rootDiscoverySucceeded = false
+                        break
+                    }
+                    let directory = rootURL.appendingPathComponent(directoryName, isDirectory: true)
+                    discoveryProbe(.beforeNamespace, directory)
+                    // These two namespaces are optional. A missing one is an
+                    // empty namespace only while the root identity remains
+                    // stable before and after that observation.
+                    guard fileManager.fileExists(atPath: directory.path) else {
+                        discoveryProbe(.afterNamespace, directory)
+                        if discoveryRootIdentityReader(rootURL) != preflightIdentity {
+                            rootDiscoverySucceeded = false
+                        }
+                        continue
+                    }
+                    guard discoveryRootIdentityReader(directory) != nil,
+                          !discoveryFailureInjector(directory) else {
+                        rootDiscoverySucceeded = false
+                        break
+                    }
+                    var enumerationHadError = false
+                    guard let enumerator = fileManager.enumerator(
+                        at: directory,
+                        includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
+                        options: [.skipsHiddenFiles],
+                        errorHandler: { _, _ in
+                            enumerationHadError = true
+                            return false
+                        }
+                    ) else {
+                        rootDiscoverySucceeded = false
+                        break
+                    }
+                    directoryEnumerationCount += 1
+                    for case let fileURL as URL in enumerator where isRolloutFile(fileURL) {
+                        discoveredPaths.insert(canonicalPath(fileURL.path))
+                    }
+                    discoveryProbe(.afterNamespace, directory)
+                    if enumerationHadError
+                        || discoveryRootIdentityReader(rootURL) != preflightIdentity {
+                        rootDiscoverySucceeded = false
+                        break
+                    }
+                }
+                discoveryProbe(.beforeRootFinalize, rootURL)
+                if rootDiscoverySucceeded,
+                   discoveryRootIdentityReader(rootURL) == preflightIdentity {
+                    successfulRootPaths.insert(canonicalPath(rootURL.path))
+                }
+            }
+            updatedKnownRolloutPaths.formUnion(discoveredPaths)
+        }
+
+        // Once a path has been discovered, regular 2-second polls stat only
+        // those known rollouts. Full recursive discovery is bounded to every
+        // 15th poll, so newly-created rollouts are still found without paying
+        // the directory walk on every timer tick.
+        updatedKnownRolloutPaths.formUnion(cursors.keys.map(canonicalPath))
+        updatedKnownRolloutPaths.formUnion(seededPaths.map(canonicalPath))
+        let candidatePaths = updatedKnownRolloutPaths
+            .filter { path in
+                roots.contains { root in
+                    let rootPath = canonicalPath(root.codexHomeURL.path)
+                    return path == rootPath || path.hasPrefix(rootPath + "/")
+                }
+            }
+            .sorted()
+        for path in candidatePaths {
+            let fileURL = URL(fileURLWithPath: path)
+            guard isRolloutFile(fileURL), seenPaths.insert(path).inserted else { continue }
+            guard let root = roots.first(where: { root in
+                let rootPath = canonicalPath(root.codexHomeURL.path)
+                return path == rootPath || path.hasPrefix(rootPath + "/")
+            }) else { continue }
+            rolloutMetadataReadCount += 1
+            guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey, .fileResourceIdentifierKey]),
+                  values.isRegularFile == true,
+                  let fileSize = values.fileSize,
+                  fileSize >= 0 else { continue }
+
+            let size = UInt64(fileSize)
+            let modificationTime = values.contentModificationDate
+            let fileResourceIdentifier = values.fileResourceIdentifier.map { String(describing: $0) }
+            var cursor = updatedCursors[path]
+            let metadataUnchanged = cursor?.fileSize != nil
+                && cursor?.fileSize == size
+                && cursor?.modificationTime == modificationTime
+                && cursor?.fileResourceIdentifier == fileResourceIdentifier
 
                     // A metadata-stable rollout that is already caught up has
                     // no new bytes to observe. Exit before identity work or
@@ -903,77 +1163,78 @@ final class CodexLocalUsageObserver {
                     // below: when byteOffset has not reached EOF, the file
                     // still needs one incremental read even if its metadata
                     // has not changed since the previous scan.
-                    if metadataUnchanged, let cursor, cursor.byteOffset == size {
-                        continue
-                    }
+            if metadataUnchanged, let cursor, cursor.byteOffset == size {
+                continue
+            }
 
-                    let headIdentity: CodexLocalSessionIdentity?
-                    if metadataUnchanged, let cursor {
+            let headIdentity: CodexLocalSessionIdentity?
+            if metadataUnchanged, let cursor {
                         // A nil identity is also a resolved result. Keeping
                         // that distinction prevents an unproven but stable
                         // rollout from paying the head-read cost forever.
                         headIdentity = cursor.sessionIdentity
-                    } else {
-                        sessionIdentityReadCount += 1
-                        headIdentity = sessionIdentityReader(fileURL)
-                    }
+            } else {
+                sessionIdentityReadCount += 1
+                headIdentity = sessionIdentityReader(fileURL)
+            }
                     // A rollout is bound to its first session_meta identity.
                     // Any later identity change makes the entire file
                     // ambiguous; subsequent events may still be observed for
                     // liveness, but can never receive Repo/Chat provenance.
-                    var canonicalIdentity = headIdentity
-                    var identityIsAmbiguous = cursor?.identityIsAmbiguous ?? false
-                    if let headIdentity,
-                       let cursorThreadID = cursor?.threadID,
-                       cursorThreadID != headIdentity.threadID {
-                        identityIsAmbiguous = true
-                    }
-                    if cursor == nil {
+            var canonicalIdentity = headIdentity
+            var identityIsAmbiguous = cursor?.identityIsAmbiguous ?? false
+            if let headIdentity,
+               let cursorThreadID = cursor?.threadID,
+               cursorThreadID != headIdentity.threadID {
+                identityIsAmbiguous = true
+            }
+            if cursor == nil {
                         // Existing rollouts are seeded at EOF; a rollout created
                         // after observation began is a live source and may be
                         // consumed from its beginning.
-                        cursor = CodexLocalUsageCursor(
+                cursor = CodexLocalUsageCursor(
                             byteOffset: updatedSeededPaths.contains(path) ? size : 0,
                             threadID: updatedSeededPaths.contains(path) ? (canonicalIdentity?.threadID ?? Self.threadIdentity(for: fileURL)) : nil,
                             sessionIdentity: canonicalIdentity,
                             fileSize: size,
                             modificationTime: modificationTime,
                             fileResourceIdentifier: fileResourceIdentifier
-                        )
-                        updatedCursors[path] = cursor
-                        updatedSeededPaths.insert(path)
-                        if cursor?.byteOffset == size { continue }
-                    }
-                    cursor?.sessionIdentity = canonicalIdentity
-                    cursor?.fileSize = size
-                    cursor?.modificationTime = modificationTime
-                    cursor?.fileResourceIdentifier = fileResourceIdentifier
-                    cursor?.identityIsAmbiguous = identityIsAmbiguous
-                    if cursor?.threadID == nil {
-                        cursor?.threadID = Self.threadIdentity(for: fileURL)
-                    }
-                    guard let startingOffset = cursor?.byteOffset else { continue }
-                    guard startingOffset <= size else {
+                )
+                updatedCursors[path] = cursor!
+                updatedSeededPaths.insert(path)
+                if cursor?.byteOffset == size { continue }
+            }
+            cursor?.sessionIdentity = canonicalIdentity
+            cursor?.fileSize = size
+            cursor?.modificationTime = modificationTime
+            cursor?.fileResourceIdentifier = fileResourceIdentifier
+            cursor?.identityIsAmbiguous = identityIsAmbiguous
+            if cursor?.threadID == nil {
+                cursor?.threadID = Self.threadIdentity(for: fileURL)
+            }
+            guard let startingOffset = cursor?.byteOffset else { continue }
+            guard startingOffset <= size else {
                         // A truncated/replaced rollout is not a reason to
                         // replay its old contents. Re-anchor at EOF and only
                         // observe future appends.
-                        updatedCursors[path] = CodexLocalUsageCursor(
+                updatedCursors[path] = CodexLocalUsageCursor(
                             byteOffset: size,
                             threadID: canonicalIdentity?.threadID ?? Self.threadIdentity(for: fileURL),
                             sessionIdentity: canonicalIdentity,
                             fileSize: size,
                             modificationTime: modificationTime,
                             fileResourceIdentifier: fileResourceIdentifier
-                        )
-                        continue
-                    }
-                    let offset = startingOffset
+                )
+                continue
+            }
+            let offset = startingOffset
 #if CODEX_USAGE_TESTING
-                    testFileHandleOpenCount += 1
+            testFileHandleOpenCount += 1
 #endif
-                    guard let handle = try? FileHandle(forReadingFrom: fileURL) else { continue }
-                    defer { try? handle.close() }
-                    do {
+            rolloutContentFileHandleOpenCount += 1
+            guard let handle = try? FileHandle(forReadingFrom: fileURL) else { continue }
+            defer { try? handle.close() }
+            do {
                         try handle.seek(toOffset: offset)
                         let data = try handle.readToEnd() ?? Data()
                         let endsWithNewline = data.last == 0x0A
@@ -1079,10 +1340,20 @@ final class CodexLocalUsageObserver {
                         cursor?.byteOffset = offset + UInt64(consumed)
                         cursor?.identityIsAmbiguous = identityIsAmbiguous
                         updatedCursors[path] = cursor!
-                    } catch {
-                        continue
-                    }
-                }
+            } catch {
+                continue
+            }
+        }
+
+        if discoverNewRollouts && successfulRootPaths.count == roots.count {
+            let stalePaths = updatedCursors.keys
+                .filter { !discoveredPaths.contains($0) }
+                .sorted()
+                .prefix(256)
+            for stalePath in stalePaths {
+                updatedCursors.removeValue(forKey: stalePath)
+                updatedSeededPaths.remove(stalePath)
+                updatedKnownRolloutPaths.remove(stalePath)
             }
         }
         return CodexLocalUsageScanResult(
@@ -1091,7 +1362,14 @@ final class CodexLocalUsageObserver {
             turnActivities: turnActivities,
             cursors: updatedCursors,
             seededPaths: updatedSeededPaths,
-            sessionIdentityReadCount: sessionIdentityReadCount
+            knownRolloutPaths: updatedKnownRolloutPaths,
+            sessionIdentityReadCount: sessionIdentityReadCount,
+            metrics: CodexLocalUsageScanMetrics(
+                directoryEnumerationCount: directoryEnumerationCount,
+                rolloutMetadataReadCount: rolloutMetadataReadCount,
+                rolloutContentFileHandleOpenCount: rolloutContentFileHandleOpenCount,
+                sessionIndexFullReadCount: CodexLocalSessionIndex.fullReadCount - sessionIndexReadsBefore
+            )
         )
     }
 
@@ -1105,11 +1383,55 @@ final class CodexLocalUsageObserver {
                 let directory = root.codexHomeURL.appendingPathComponent(directoryName, isDirectory: true)
                 guard let enumerator = fileManager.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey]) else { continue }
                 for case let fileURL as URL in enumerator where fileURL.pathExtension == "jsonl" && fileURL.lastPathComponent.hasPrefix("rollout-") {
-                    paths.insert(fileURL.path)
+                    paths.insert(canonicalPath(fileURL.path))
                 }
             }
         }
         return paths
+    }
+
+    private nonisolated static func canonicalPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    private nonisolated static func discoveryRootIdentity(for url: URL) -> CodexLocalUsageDiscoveryRootIdentity? {
+        guard FileManager.default.fileExists(atPath: url.path),
+              let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileResourceIdentifierKey, .creationDateKey]),
+              values.isDirectory == true,
+              let identifier = values.fileResourceIdentifier else { return nil }
+        return CodexLocalUsageDiscoveryRootIdentity(
+            resourceIdentifier: String(describing: identifier),
+            creationDate: values.creationDate
+        )
+    }
+
+    private nonisolated static func preferredCursor(
+        _ lhs: CodexLocalUsageCursor,
+        _ rhs: CodexLocalUsageCursor
+    ) -> CodexLocalUsageCursor {
+        let lhsModification = lhs.modificationTime?.timeIntervalSince1970 ?? -.greatestFiniteMagnitude
+        let rhsModification = rhs.modificationTime?.timeIntervalSince1970 ?? -.greatestFiniteMagnitude
+        if lhsModification != rhsModification { return lhsModification > rhsModification ? lhs : rhs }
+        if lhs.byteOffset != rhs.byteOffset { return lhs.byteOffset > rhs.byteOffset ? lhs : rhs }
+        let lhsSize = lhs.fileSize ?? 0
+        let rhsSize = rhs.fileSize ?? 0
+        if lhsSize != rhsSize { return lhsSize > rhsSize ? lhs : rhs }
+        if lhs.identityIsAmbiguous != rhs.identityIsAmbiguous {
+            return lhs.identityIsAmbiguous ? lhs : rhs
+        }
+        let lhsTieBreak = [
+            lhs.fileResourceIdentifier ?? "",
+            lhs.threadID ?? "",
+            lhs.sessionIdentity?.threadID ?? "",
+            lhs.completedTurnIDs.sorted().joined(separator: "\u{1F}")
+        ].joined(separator: "\u{1E}")
+        let rhsTieBreak = [
+            rhs.fileResourceIdentifier ?? "",
+            rhs.threadID ?? "",
+            rhs.sessionIdentity?.threadID ?? "",
+            rhs.completedTurnIDs.sorted().joined(separator: "\u{1F}")
+        ].joined(separator: "\u{1E}")
+        return lhsTieBreak >= rhsTieBreak ? lhs : rhs
     }
 
     private nonisolated static func threadIdentity(for fileURL: URL) -> String? {

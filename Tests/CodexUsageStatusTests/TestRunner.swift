@@ -63,6 +63,48 @@ private final class LockedCounter: @unchecked Sendable {
     }
 }
 
+private final class OneShotMutation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var didFire = false
+    private let action: () -> Void
+
+    init(action: @escaping () -> Void) {
+        self.action = action
+    }
+
+    func fire() {
+        lock.lock()
+        guard !didFire else {
+            lock.unlock()
+            return
+        }
+        didFire = true
+        lock.unlock()
+        action()
+    }
+}
+
+private final class ToggleIdentity: @unchecked Sendable {
+    private let lock = NSLock()
+    private var switched = false
+
+    func switchIdentity() {
+        lock.lock()
+        switched = true
+        lock.unlock()
+    }
+
+    func identity(for _: URL) -> CodexLocalUsageDiscoveryRootIdentity {
+        lock.lock()
+        let current = switched
+        lock.unlock()
+        return CodexLocalUsageDiscoveryRootIdentity(
+            resourceIdentifier: current ? "replacement-root" : "original-root",
+            creationDate: nil
+        )
+    }
+}
+
 @main
 struct CodexUsageStatusTests {
     static func main() async {
@@ -124,6 +166,9 @@ struct CodexUsageStatusTests {
             ("observer execution estimation", testObserverExecutionEstimation),
             ("bounded duration history scan", testBoundedDurationHistoryScan),
             ("incremental observer identity scan", testIncrementalObserverIdentityScan),
+            ("observer residual I/O metrics and discovery", testObserverResidualIOMetricsAndDiscovery),
+            ("session index bounded cache", testSessionIndexBoundedCache),
+            ("observer discovery epoch prune guards", testObserverDiscoveryEpochPruneGuards),
             ("turn notification cadence policy", testTurnNotificationCadencePolicy),
             ("account profiles isolate email", testAccountProfilesIsolateEmail),
             ("account read disables refresh token", testAccountReadDisablesRefreshToken),
@@ -194,7 +239,14 @@ struct CodexUsageStatusTests {
             failures += 1
             print("FAIL persistence write coordinator: \(error)")
         }
-        print("\(tests.count + 3 - failures)/\(tests.count + 3) tests passed")
+        do {
+            try await testObserverCursorPersistenceIsAsync()
+            print("PASS observer cursor persistence is async")
+        } catch {
+            failures += 1
+            print("FAIL observer cursor persistence is async: \(error)")
+        }
+        print("\(tests.count + 4 - failures)/\(tests.count + 4) tests passed")
         if failures > 0 { exit(1) }
     }
 
@@ -3436,6 +3488,320 @@ struct CodexUsageStatusTests {
         print("PERF incremental observer identity reads: first=\(first.sessionIdentityReadCount), unchanged=\(second.sessionIdentityReadCount), changed=\(third.sessionIdentityReadCount), replaced=\(fourth.sessionIdentityReadCount)")
     }
 
+    private static func testObserverResidualIOMetricsAndDiscovery() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-observer-residual-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let localDirectory = base.appendingPathComponent("sessions.local", isDirectory: true)
+        let sessionsDirectory = base.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: localDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: sessionsDirectory, withIntermediateDirectories: true)
+
+        let rolloutA = localDirectory.appendingPathComponent("rollout-a.jsonl")
+        let sessionMetaA = #"{"type":"session_meta","payload":{"id":"thread-a","cwd":"/tmp/RepoA"}}"# + "\n"
+        try Data(sessionMetaA.utf8).write(to: rolloutA)
+        let root = CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: base)
+
+        let first = CodexLocalUsageObserver.scanRoots(
+            [root],
+            cursors: [:],
+            seededPaths: [rolloutA.path]
+        )
+        try expect(first.metrics.directoryEnumerationCount == 2, "initial discovery enumerates both rollout roots")
+        try expect(first.metrics.rolloutContentFileHandleOpenCount == 0, "seeded historical rollout does not open content")
+
+        let second = CodexLocalUsageObserver.scanRoots(
+            [root],
+            cursors: first.cursors,
+            seededPaths: first.seededPaths,
+            knownRolloutPaths: first.knownRolloutPaths,
+            discoverNewRollouts: false
+        )
+        try expect(second.metrics.directoryEnumerationCount == 0, "known-path polling skips recursive enumeration")
+        try expect(second.metrics.rolloutMetadataReadCount == 1, "known-path polling checks only rollout metadata")
+        try expect(second.metrics.rolloutContentFileHandleOpenCount == 0, "unchanged polling does not open rollout content")
+
+        let token = #"{"timestamp":"2026-09-07T03:19:41.123Z","type":"token_usage_record","payload":{"thread_id":"thread-a","turn_id":"turn-a","usage":{"total_tokens":3},"turn_token_usage":{"total_tokens":3},"thread_token_usage":{"total_tokens":3}}}"# + "\n"
+        let appendHandle = try FileHandle(forWritingTo: rolloutA)
+        try appendHandle.seekToEnd()
+        try appendHandle.write(contentsOf: Data(token.utf8))
+        try appendHandle.close()
+        let third = CodexLocalUsageObserver.scanRoots(
+            [root],
+            cursors: second.cursors,
+            seededPaths: second.seededPaths,
+            knownRolloutPaths: second.knownRolloutPaths,
+            discoverNewRollouts: false
+        )
+        try expect(third.events.count == 1, "known changed rollout consumes appended token")
+        try expect(third.metrics.rolloutContentFileHandleOpenCount == 1, "changed rollout opens one incremental content handle")
+
+        let rolloutB = sessionsDirectory.appendingPathComponent("rollout-b.jsonl")
+        let sessionMetaB = #"{"type":"session_meta","payload":{"id":"thread-b","cwd":"/tmp/RepoB"}}"# + "\n" + token.replacingOccurrences(of: "thread-a", with: "thread-b")
+        try Data(sessionMetaB.utf8).write(to: rolloutB)
+        let noDiscovery = CodexLocalUsageObserver.scanRoots(
+            [root],
+            cursors: third.cursors,
+            seededPaths: third.seededPaths,
+            knownRolloutPaths: third.knownRolloutPaths,
+            discoverNewRollouts: false
+        )
+        try expect(noDiscovery.events.isEmpty, "non-discovery polling does not claim an unseen rollout")
+
+        let discovered = CodexLocalUsageObserver.scanRoots(
+            [root],
+            cursors: noDiscovery.cursors,
+            seededPaths: noDiscovery.seededPaths,
+            knownRolloutPaths: noDiscovery.knownRolloutPaths,
+            discoverNewRollouts: true
+        )
+        try expect(discovered.events.count == 1, "bounded discovery finds a newly-created rollout")
+        try expect(discovered.metrics.directoryEnumerationCount == 2, "bounded discovery enumerates roots when due")
+
+        try FileManager.default.removeItem(at: rolloutA)
+        // The `sessions` namespace is optional; its absence must not disable
+        // pruning for the still-readable `sessions.local` namespace.
+        try FileManager.default.removeItem(at: sessionsDirectory)
+        let pruned = CodexLocalUsageObserver.scanRoots(
+            [root],
+            cursors: discovered.cursors,
+            seededPaths: discovered.seededPaths,
+            knownRolloutPaths: discovered.knownRolloutPaths,
+            discoverNewRollouts: true
+        )
+        let canonicalA = rolloutA.standardizedFileURL.resolvingSymlinksInPath().path
+        try expect(pruned.cursors[canonicalA] == nil, "confirmed missing rollout cursor is pruned")
+        try expect(pruned.events.isEmpty, "cursor pruning does not replay historical content")
+        print("PERF residual observer discoveryDirs=\(first.metrics.directoryEnumerationCount), knownPollDirs=\(second.metrics.directoryEnumerationCount), knownPollMetadata=\(second.metrics.rolloutMetadataReadCount), changedContentHandles=\(third.metrics.rolloutContentFileHandleOpenCount)")
+    }
+
+    private static func testObserverDiscoveryEpochPruneGuards() throws {
+        struct Fixture {
+            let base: URL
+            let root: CodexLocalUsageObservationRoot
+            let cursors: [String: CodexLocalUsageCursor]
+            let seededPaths: Set<String>
+            let knownRolloutPaths: Set<String>
+            let cursorPath: String
+        }
+
+        func makeFixture(includeLocal: Bool = true, includeSessions: Bool = true) throws -> Fixture {
+            let base = FileManager.default.temporaryDirectory
+                .appendingPathComponent("codex-observer-epoch-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+            if includeLocal {
+                try FileManager.default.createDirectory(
+                    at: base.appendingPathComponent("sessions.local", isDirectory: true),
+                    withIntermediateDirectories: true
+                )
+            }
+            if includeSessions {
+                try FileManager.default.createDirectory(
+                    at: base.appendingPathComponent("sessions", isDirectory: true),
+                    withIntermediateDirectories: true
+                )
+            }
+            let directoryName = includeLocal ? "sessions.local" : "sessions"
+            let rollout = base
+                .appendingPathComponent(directoryName, isDirectory: true)
+                .appendingPathComponent("rollout-epoch.jsonl")
+            let sessionMeta = #"{"type":"session_meta","payload":{"id":"thread-epoch"}}"# + "\n"
+            try Data(sessionMeta.utf8).write(to: rollout)
+            let root = CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: base)
+            let first = CodexLocalUsageObserver.scanRoots(
+                [root],
+                cursors: [:],
+            seededPaths: [rollout.path]
+        )
+            let canonicalPath = rollout.standardizedFileURL.resolvingSymlinksInPath().path
+            try FileManager.default.removeItem(at: rollout)
+            return Fixture(
+                base: base,
+                root: root,
+                cursors: first.cursors,
+                seededPaths: first.seededPaths,
+                knownRolloutPaths: first.knownRolloutPaths,
+                cursorPath: canonicalPath
+            )
+        }
+
+        let stableBoth = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: stableBoth.base) }
+        let prunedBoth = CodexLocalUsageObserver.scanRoots(
+            [stableBoth.root],
+            cursors: stableBoth.cursors,
+            seededPaths: stableBoth.seededPaths,
+            knownRolloutPaths: stableBoth.knownRolloutPaths,
+            discoverNewRollouts: true
+        )
+        try expect(prunedBoth.cursors[stableBoth.cursorPath] == nil, "stable root with both namespaces permits pruning")
+
+        for (includeLocal, includeSessions, message) in [
+            (false, true, "stable root with missing sessions.local permits pruning"),
+            (true, false, "stable root with missing sessions permits pruning")
+        ] {
+            let fixture = try makeFixture(includeLocal: includeLocal, includeSessions: includeSessions)
+            defer { try? FileManager.default.removeItem(at: fixture.base) }
+            let result = CodexLocalUsageObserver.scanRoots(
+                [fixture.root],
+                cursors: fixture.cursors,
+                seededPaths: fixture.seededPaths,
+                knownRolloutPaths: fixture.knownRolloutPaths,
+                discoverNewRollouts: true
+            )
+            try expect(result.cursors[fixture.cursorPath] == nil, message)
+        }
+
+        let preflightFixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: preflightFixture.base) }
+        let removeBeforeNamespace = OneShotMutation {
+            try? FileManager.default.removeItem(at: preflightFixture.base)
+        }
+        let preflightProbe: @Sendable (CodexLocalUsageDiscoveryProbeEvent, URL) -> Void = { phase, _ in
+            if phase == .afterRootPreflight { removeBeforeNamespace.fire() }
+        }
+        let preflightResult = CodexLocalUsageObserver.scanRoots(
+            [preflightFixture.root],
+            cursors: preflightFixture.cursors,
+            seededPaths: preflightFixture.seededPaths,
+            knownRolloutPaths: preflightFixture.knownRolloutPaths,
+            discoverNewRollouts: true,
+            discoveryProbe: preflightProbe
+        )
+        try expect(preflightResult.cursors[preflightFixture.cursorPath] != nil, "root disappearing after preflight does not prune")
+
+        let betweenFixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: betweenFixture.base) }
+        let removeBetween = OneShotMutation { try? FileManager.default.removeItem(at: betweenFixture.base) }
+        let betweenProbe: @Sendable (CodexLocalUsageDiscoveryProbeEvent, URL) -> Void = { phase, _ in
+            if phase == .afterNamespace { removeBetween.fire() }
+        }
+        let betweenResult = CodexLocalUsageObserver.scanRoots(
+            [betweenFixture.root],
+            cursors: betweenFixture.cursors,
+            seededPaths: betweenFixture.seededPaths,
+            knownRolloutPaths: betweenFixture.knownRolloutPaths,
+            discoverNewRollouts: true,
+            discoveryProbe: betweenProbe
+        )
+        try expect(betweenResult.cursors[betweenFixture.cursorPath] != nil, "root disappearing between namespaces does not prune")
+
+        let identityFixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: identityFixture.base) }
+        let identityToggle = ToggleIdentity()
+        let replaceIdentity = OneShotMutation { identityToggle.switchIdentity() }
+        let identityProbe: @Sendable (CodexLocalUsageDiscoveryProbeEvent, URL) -> Void = { phase, _ in
+            if phase == .afterRootPreflight { replaceIdentity.fire() }
+        }
+        let identityResult = CodexLocalUsageObserver.scanRoots(
+            [identityFixture.root],
+            cursors: identityFixture.cursors,
+            seededPaths: identityFixture.seededPaths,
+            knownRolloutPaths: identityFixture.knownRolloutPaths,
+            discoverNewRollouts: true,
+            discoveryProbe: identityProbe,
+            discoveryRootIdentityReader: { identityToggle.identity(for: $0) }
+        )
+        try expect(identityResult.cursors[identityFixture.cursorPath] != nil, "root identity change does not prune")
+
+        let errorFixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: errorFixture.base) }
+        let errorResult = CodexLocalUsageObserver.scanRoots(
+            [errorFixture.root],
+            cursors: errorFixture.cursors,
+            seededPaths: errorFixture.seededPaths,
+            knownRolloutPaths: errorFixture.knownRolloutPaths,
+            discoverNewRollouts: true,
+            discoveryFailureInjector: { $0.lastPathComponent == "sessions.local" }
+        )
+        try expect(errorResult.cursors[errorFixture.cursorPath] != nil, "nested enumeration error does not prune")
+
+        let recoveredBase = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-observer-recovered-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: recoveredBase) }
+        try FileManager.default.createDirectory(at: recoveredBase.appendingPathComponent("sessions.local"), withIntermediateDirectories: true)
+        let recoveredRoot = CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: recoveredBase)
+        let recoveredRollout = recoveredBase.appendingPathComponent("sessions.local/rollout-recovered.jsonl")
+        try Data(#"{"type":"session_meta","payload":{"id":"thread-recovered"}}"#.utf8).write(to: recoveredRollout)
+        let recoveredFirst = CodexLocalUsageObserver.scanRoots([recoveredRoot], cursors: [:], seededPaths: [recoveredRollout.path])
+        try FileManager.default.removeItem(at: recoveredRollout)
+        let failedRecovery = CodexLocalUsageObserver.scanRoots(
+            [recoveredRoot],
+            cursors: recoveredFirst.cursors,
+            seededPaths: recoveredFirst.seededPaths,
+            knownRolloutPaths: recoveredFirst.knownRolloutPaths,
+            discoverNewRollouts: true,
+            discoveryFailureInjector: { _ in true }
+        )
+        try expect(failedRecovery.cursors.values.count == 1, "failed discovery keeps cursor for later recovery")
+        let healthyRecovery = CodexLocalUsageObserver.scanRoots(
+            [recoveredRoot],
+            cursors: failedRecovery.cursors,
+            seededPaths: failedRecovery.seededPaths,
+            knownRolloutPaths: failedRecovery.knownRolloutPaths,
+            discoverNewRollouts: true
+        )
+        try expect(healthyRecovery.cursors.isEmpty, "healthy discovery may prune after transient recovery")
+    }
+
+    private static func testSessionIndexBoundedCache() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-session-index-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let indexURL = base.appendingPathComponent("session_index.jsonl")
+#if CODEX_USAGE_TESTING
+        CodexLocalSessionIndex.resetTestCache()
+#endif
+        let initial = #"{"id":"thread-cache","thread_name":"  First   title  "}"# + "\n"
+        try Data(initial.utf8).write(to: indexURL)
+        try expect(
+            CodexLocalSessionIndex.threadName(for: "thread-cache", in: base) == "First title",
+            "session index cache normalizes the latest title"
+        )
+        try expect(
+            CodexLocalSessionIndex.threadName(for: "thread-cache", in: base) == "First title",
+            "repeated session index lookup returns the cached title"
+        )
+#if CODEX_USAGE_TESTING
+        try expect(CodexLocalSessionIndex.testFullReadCount == 1, "repeated lookup performs one full index read")
+#endif
+        let renamed = initial + #"{"id":"thread-cache","thread_name":"Renamed"}"# + "\n"
+        try Data(renamed.utf8).write(to: indexURL, options: .atomic)
+        try expect(
+            CodexLocalSessionIndex.threadName(for: "thread-cache", in: base) == "Renamed",
+            "index metadata change invalidates the cached title"
+        )
+#if CODEX_USAGE_TESTING
+        try expect(CodexLocalSessionIndex.testFullReadCount == 2, "index change causes one additional full read")
+#endif
+        let unavailable = renamed + #"{"id":"thread-cache","thread_name":""}"# + "\n"
+        try Data(unavailable.utf8).write(to: indexURL, options: .atomic)
+        try expect(
+            CodexLocalSessionIndex.threadName(for: "thread-cache", in: base) == nil,
+            "latest empty title remains authoritative and does not resurrect the old name"
+        )
+#if CODEX_USAGE_TESTING
+        try expect(CodexLocalSessionIndex.testFullReadCount == 3, "second index change causes one additional full read")
+#endif
+        let missingName = unavailable + #"{"id":"thread-cache"}"# + "\n"
+        try Data(missingName.utf8).write(to: indexURL, options: .atomic)
+        try expect(
+            CodexLocalSessionIndex.threadName(for: "thread-cache", in: base) == nil,
+            "latest missing title remains authoritative and does not resurrect the old name"
+        )
+        let nullName = missingName + #"{"id":"thread-cache","thread_name":null}"# + "\n"
+        try Data(nullName.utf8).write(to: indexURL, options: .atomic)
+        try expect(
+            CodexLocalSessionIndex.threadName(for: "thread-cache", in: base) == nil,
+            "latest null title remains authoritative and does not resurrect the old name"
+        )
+#if CODEX_USAGE_TESTING
+        try expect(CodexLocalSessionIndex.testFullReadCount == 5, "missing and null title rows each invalidate the cache")
+#endif
+        print("PERF session index full reads: first=1, cached=0, afterRename=1, afterEmptyRename=1")
+    }
+
     private static func testTurnNotificationContentPolicy() throws {
         try expect(
             TurnNotificationContentPolicy.title(state: .completed, programName: "Build release") == "程序完成：Build release",
@@ -4995,6 +5361,44 @@ struct CodexUsageStatusTests {
         await PersistenceWriteCoordinator.shared.enqueue(url: file, data: nil)
         await PersistenceWriteCoordinator.shared.flush(timeoutNanoseconds: 2_000_000_000)
         try expect(!FileManager.default.fileExists(atPath: file.path), "nil payload removes file")
+    }
+
+    private static func testObserverCursorPersistenceIsAsync() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-observer-cursor-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = root.appendingPathComponent("sessions.local", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let rollout = sessions.appendingPathComponent("rollout-cursor.jsonl")
+        let content = #"{"type":"session_meta","payload":{"id":"thread-cursor"}}"# + "\n"
+        try Data(content.utf8).write(to: rollout)
+        let cursorURL = root.appendingPathComponent("state/cursors.json")
+
+        await PersistenceWriteCoordinator.shared.flush(timeoutNanoseconds: 2_000_000_000)
+#if CODEX_USAGE_TESTING
+        CodexLocalUsageObserver.testCursorPersistRequestCount = 0
+        PersistenceFileManager.resetTestCounters()
+#endif
+        let observer = await MainActor.run {
+            let observer = CodexLocalUsageObserver(cursorURL: cursorURL)
+            observer.start()
+            return observer
+        }
+        await MainActor.run {
+            observer.setRoots([CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: root)])
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await PersistenceWriteCoordinator.shared.flush(timeoutNanoseconds: 2_000_000_000)
+        let persisted = try Data(contentsOf: cursorURL)
+        let decoded = try JSONDecoder().decode([String: CodexLocalUsageCursor].self, from: persisted)
+        try expect(!decoded.isEmpty, "observer cursor snapshot is persisted")
+#if CODEX_USAGE_TESTING
+        try expect(CodexLocalUsageObserver.testCursorPersistRequestCount == 1, "cursor persistence is requested once")
+        try expect(PersistenceFileManager.testMainActorDiskWriteCount == 0, "MainActor performs no cursor disk write")
+        try expect(PersistenceFileManager.testDiskWriteCount >= 1, "persistence coordinator performs the disk write")
+#endif
+        print("PERF cursor persistence: requests=1, mainActorDiskWrites=0, coordinatorDiskWrites=\(PersistenceFileManager.testDiskWriteCount)")
+        await MainActor.run { observer.stop() }
     }
 
 

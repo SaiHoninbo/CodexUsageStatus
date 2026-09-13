@@ -25,6 +25,17 @@ actor PersistenceWriteCoordinator {
         startIfNeeded(key: key)
     }
 
+    /// Encodes on this actor instead of the caller's actor, then uses the
+    /// same keyed newest-write-wins queue as other local persistence.
+    func enqueueJSON<Value: Encodable & Sendable>(
+        url: URL,
+        value: Value,
+        fileManager: FileManager = .default
+    ) {
+        guard let data = try? JSONEncoder().encode(value) else { return }
+        enqueue(url: url, data: data, fileManager: fileManager)
+    }
+
     /// Waits briefly for queued writes to finish. The timeout is deliberately
     /// bounded so app termination can never wait on disk indefinitely.
     func flush(timeoutNanoseconds: UInt64 = TerminationFlushPolicy.timeoutNanoseconds) async {
@@ -55,9 +66,28 @@ actor PersistenceWriteCoordinator {
 struct PersistenceFileManager: @unchecked Sendable {
     let fileManager: FileManager
 
+#if CODEX_USAGE_TESTING
+    private static let testCounterLock = NSLock()
+    nonisolated(unsafe) static var testDiskWriteCount = 0
+    nonisolated(unsafe) static var testMainActorDiskWriteCount = 0
+
+    static func resetTestCounters() {
+        testCounterLock.lock()
+        testDiskWriteCount = 0
+        testMainActorDiskWriteCount = 0
+        testCounterLock.unlock()
+    }
+#endif
+
     init(_ fileManager: FileManager = .default) { self.fileManager = fileManager }
 
     func write(data: Data?, to url: URL) {
+#if CODEX_USAGE_TESTING
+        Self.testCounterLock.lock()
+        Self.testDiskWriteCount += 1
+        if Thread.isMainThread { Self.testMainActorDiskWriteCount += 1 }
+        Self.testCounterLock.unlock()
+#endif
         do {
             let directory = url.deletingLastPathComponent()
             try fileManager.createDirectory(
