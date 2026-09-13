@@ -167,6 +167,7 @@ struct CodexUsageStatusTests {
             ("bounded duration history scan", testBoundedDurationHistoryScan),
             ("incremental observer identity scan", testIncrementalObserverIdentityScan),
             ("observer residual I/O metrics and discovery", testObserverResidualIOMetricsAndDiscovery),
+            ("observer bounded fast poll scaling", testObserverBoundedFastPollScaling),
             ("session index bounded cache", testSessionIndexBoundedCache),
             ("observer discovery epoch prune guards", testObserverDiscoveryEpochPruneGuards),
             ("turn notification cadence policy", testTurnNotificationCadencePolicy),
@@ -3578,6 +3579,93 @@ struct CodexUsageStatusTests {
         try expect(pruned.cursors[canonicalA] == nil, "confirmed missing rollout cursor is pruned")
         try expect(pruned.events.isEmpty, "cursor pruning does not replay historical content")
         print("PERF residual observer discoveryDirs=\(first.metrics.directoryEnumerationCount), knownPollDirs=\(second.metrics.directoryEnumerationCount), knownPollMetadata=\(second.metrics.rolloutMetadataReadCount), changedContentHandles=\(third.metrics.rolloutContentFileHandleOpenCount)")
+    }
+
+    private static func testObserverBoundedFastPollScaling() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-observer-fast-poll-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let directory = base.appendingPathComponent("sessions.local", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let root = CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: base)
+        let sessionMeta = #"{"type":"session_meta","payload":{"id":"thread-scaling"}}"# + "\n"
+        var paths = Set<String>()
+        var cursors: [String: CodexLocalUsageCursor] = [:]
+        var activePath = ""
+        for index in 0..<128 {
+            let url = directory.appendingPathComponent("rollout-\(index).jsonl")
+            try Data(sessionMeta.utf8).write(to: url)
+            let canonical = url.standardizedFileURL.resolvingSymlinksInPath().path
+            paths.insert(canonical)
+            let size = UInt64(sessionMeta.utf8.count)
+            let values = try url.resourceValues(forKeys: [.contentModificationDateKey, .fileResourceIdentifierKey])
+            cursors[canonical] = CodexLocalUsageCursor(
+                byteOffset: size,
+                threadID: "thread-scaling",
+                fileSize: size,
+                modificationTime: values.contentModificationDate,
+                fileResourceIdentifier: values.fileResourceIdentifier.map { String(describing: $0) }
+            )
+            if index == 0 { activePath = canonical }
+        }
+
+        let first = CodexLocalUsageObserver.scanRoots(
+            [root],
+            cursors: cursors,
+            seededPaths: paths,
+            knownRolloutPaths: paths,
+            discoverNewRollouts: false,
+            fastPollPaths: [activePath]
+        )
+        try expect(first.metrics.rolloutMetadataReadCount == 1, "regular polling metadata stays bounded with 100+ historical rollouts")
+        try expect(first.metrics.rolloutContentFileHandleOpenCount == 0, "unchanged active rollout stays closed")
+        try expect(first.fastPollPaths.count == 1, "fast polling retains only the active bound")
+
+        let token = #"{"timestamp":"2026-09-07T03:19:41.123Z","type":"token_usage_record","payload":{"thread_id":"thread-scaling","turn_id":"turn-scaling","usage":{"total_tokens":3},"turn_token_usage":{"total_tokens":3},"thread_token_usage":{"total_tokens":3}}}"# + "\n"
+        let appendHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: activePath))
+        try appendHandle.seekToEnd()
+        try appendHandle.write(contentsOf: Data(token.utf8))
+        try appendHandle.close()
+        let changed = CodexLocalUsageObserver.scanRoots(
+            [root],
+            cursors: first.cursors,
+            seededPaths: first.seededPaths,
+            knownRolloutPaths: first.knownRolloutPaths,
+            discoverNewRollouts: false,
+            fastPollPaths: first.fastPollPaths
+        )
+        try expect(changed.metrics.rolloutMetadataReadCount == 1, "changed fast-poll path uses one metadata probe")
+        try expect(changed.metrics.rolloutContentFileHandleOpenCount == 1, "changed fast-poll path reads incrementally")
+
+        let resumedPath = paths.sorted().last(where: { $0 != activePath })!
+        let resumedHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: resumedPath))
+        try resumedHandle.seekToEnd()
+        try resumedHandle.write(contentsOf: Data(token.utf8))
+        try resumedHandle.close()
+        let discovered = CodexLocalUsageObserver.scanRoots(
+            [root],
+            cursors: changed.cursors,
+            seededPaths: changed.seededPaths,
+            knownRolloutPaths: changed.knownRolloutPaths,
+            discoverNewRollouts: true,
+            fastPollPaths: changed.fastPollPaths
+        )
+        try expect(discovered.fastPollPaths.contains(resumedPath), "bounded discovery promotes a resumed historical rollout")
+        try expect(discovered.fastPollPaths.count <= CodexLocalUsageObserver.regularPollPathLimit, "fast poll set remains explicitly bounded")
+
+        let resumedRegular = CodexLocalUsageObserver.scanRoots(
+            [root],
+            cursors: discovered.cursors,
+            seededPaths: discovered.seededPaths,
+            knownRolloutPaths: discovered.knownRolloutPaths,
+            discoverNewRollouts: false,
+            fastPollPaths: discovered.fastPollPaths
+        )
+        try expect(
+            resumedRegular.metrics.rolloutMetadataReadCount <= CodexLocalUsageObserver.regularPollPathLimit,
+            "regular metadata probes remain bounded after promotion"
+        )
+        print("PERF bounded fast poll historical=\(paths.count), regularMetadata=\(first.metrics.rolloutMetadataReadCount), resumedFastSet=\(discovered.fastPollPaths.count)")
     }
 
     private static func testObserverDiscoveryEpochPruneGuards() throws {

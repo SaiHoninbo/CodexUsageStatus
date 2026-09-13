@@ -715,6 +715,7 @@ struct CodexLocalUsageScanResult: Sendable {
     let cursors: [String: CodexLocalUsageCursor]
     let seededPaths: Set<String>
     let knownRolloutPaths: Set<String>
+    let fastPollPaths: Set<String>
     let sessionIdentityReadCount: Int
     let metrics: CodexLocalUsageScanMetrics
 }
@@ -754,6 +755,10 @@ struct CodexLocalActiveExecutionReconciliation: Equatable, Sendable {
 /// old conversation cannot be imported as new local usage on first launch.
 @MainActor
 final class CodexLocalUsageObserver {
+    /// Regular polls only inspect this many rollout files. Cold historical
+    /// paths remain in `knownRolloutPaths` and are revisited by bounded
+    /// discovery, where they can be promoted again when they change.
+    nonisolated static let regularPollPathLimit = 32
 #if CODEX_USAGE_TESTING
     /// Test-only evidence that the unchanged rollout fast path never opens a
     /// rollout. This is compiled out of production builds.
@@ -772,6 +777,7 @@ final class CodexLocalUsageObserver {
     private var cursors: [String: CodexLocalUsageCursor] = [:]
     private var seededPaths: Set<String> = []
     private var knownRolloutPaths: Set<String> = []
+    private var fastPollPaths: Set<String> = []
     private var timer: Timer?
     private var scanInFlight = false
     private var scanTick: UInt64 = 0
@@ -833,6 +839,7 @@ final class CodexLocalUsageObserver {
         let newlyAddedRoots = roots.filter { !previousRootPaths.contains($0.codexHomeURL.path) }
         let paths = Self.rolloutPaths(in: newlyAddedRoots)
         knownRolloutPaths.formUnion(paths)
+        fastPollPaths = Self.initialFastPollPaths(fastPollPaths.union(paths), cursors: cursors)
         var didAddCursor = false
         for path in paths where !seededPaths.contains(path) {
             seededPaths.insert(path)
@@ -872,6 +879,7 @@ final class CodexLocalUsageObserver {
         )
         seededPaths = Self.rolloutPaths(in: roots)
         knownRolloutPaths = seededPaths
+        fastPollPaths = Self.initialFastPollPaths(seededPaths, cursors: cursors)
         scanTick = 0
         scan()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
@@ -947,6 +955,7 @@ final class CodexLocalUsageObserver {
         let cursors = cursors
         let seededPaths = seededPaths
         let knownRolloutPaths = knownRolloutPaths
+        let fastPollPaths = fastPollPaths
         // start()/setRoots() already seed the current known paths. The first
         // poll can therefore use the cheap known-path path; recursive
         // discovery runs on the bounded cadence and still finds later files.
@@ -956,14 +965,16 @@ final class CodexLocalUsageObserver {
         let observationEpoch = observationEpoch
         let scanGeneration = scanGeneration
         let sessionIdentityReader = self.sessionIdentityReader
-        Task.detached(priority: .utility) { [roots, cursors, seededPaths, knownRolloutPaths, shouldDiscoverNewRollouts, rootsGeneration, lifecycleGeneration, observationEpoch, scanGeneration, sessionIdentityReader] in
+        Task.detached(priority: .utility) { [roots, cursors, seededPaths, knownRolloutPaths, fastPollPaths, shouldDiscoverNewRollouts, rootsGeneration, lifecycleGeneration, observationEpoch, scanGeneration, sessionIdentityReader] in
             let result = Self.scanRoots(
                 roots,
                 cursors: cursors,
                 seededPaths: seededPaths,
                 sessionIdentityReader: sessionIdentityReader,
                 knownRolloutPaths: knownRolloutPaths,
-                discoverNewRollouts: shouldDiscoverNewRollouts
+                discoverNewRollouts: shouldDiscoverNewRollouts,
+                fastPollPaths: fastPollPaths,
+                statePathsAreCanonical: true
             )
             await MainActor.run { [weak self] in
                 guard let self else { return }
@@ -989,6 +1000,7 @@ final class CodexLocalUsageObserver {
                 self.cursors = result.cursors
                 self.seededPaths = result.seededPaths
                 self.knownRolloutPaths = result.knownRolloutPaths
+                self.fastPollPaths = result.fastPollPaths
                 if cursorsChanged { self.persistCursors() }
                 for event in result.events {
                     self.handler?(event.profileID, event.record)
@@ -1020,27 +1032,40 @@ final class CodexLocalUsageObserver {
         discoverNewRollouts: Bool = true,
         discoveryProbe: @escaping @Sendable (CodexLocalUsageDiscoveryProbeEvent, URL) -> Void = { _, _ in },
         discoveryFailureInjector: @escaping @Sendable (URL) -> Bool = { _ in false },
-        discoveryRootIdentityReader: @escaping @Sendable (URL) -> CodexLocalUsageDiscoveryRootIdentity? = { CodexLocalUsageObserver.discoveryRootIdentity(for: $0) }
+        discoveryRootIdentityReader: @escaping @Sendable (URL) -> CodexLocalUsageDiscoveryRootIdentity? = { CodexLocalUsageObserver.discoveryRootIdentity(for: $0) },
+        fastPollPaths: Set<String>? = nil,
+        statePathsAreCanonical: Bool = false
     ) -> CodexLocalUsageScanResult {
         let fileManager = FileManager.default
         func canonicalPath(_ path: String) -> String {
             URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
         }
+        let canonicalRootPaths = roots.map { canonicalPath($0.codexHomeURL.path) }
+        let rootByCanonicalPath = Dictionary(zip(canonicalRootPaths, roots), uniquingKeysWith: { first, _ in first })
         var updatedCursors: [String: CodexLocalUsageCursor] = [:]
-        for (path, cursor) in cursors {
-            // Multiple historical aliases can resolve to one physical path
-            // (for example /var versus /private/var). Merge aliases with a
-            // deterministic cursor preference instead of trapping on a
-            // duplicate uniqueKeysWithValues key.
-            let canonical = canonicalPath(path)
-            if let existing = updatedCursors[canonical] {
-                updatedCursors[canonical] = Self.preferredCursor(existing, cursor)
-            } else {
-                updatedCursors[canonical] = cursor
+        if statePathsAreCanonical {
+            updatedCursors = cursors
+        } else {
+            for (path, cursor) in cursors {
+                // Multiple historical aliases can resolve to one physical path
+                // (for example /var versus /private/var). Merge aliases with a
+                // deterministic cursor preference instead of trapping on a
+                // duplicate uniqueKeysWithValues key.
+                let canonical = canonicalPath(path)
+                if let existing = updatedCursors[canonical] {
+                    updatedCursors[canonical] = Self.preferredCursor(existing, cursor)
+                } else {
+                    updatedCursors[canonical] = cursor
+                }
             }
         }
-        var updatedSeededPaths = Set(seededPaths.map(canonicalPath))
-        var updatedKnownRolloutPaths = Set((knownRolloutPaths ?? []).map(canonicalPath))
+        var updatedSeededPaths = statePathsAreCanonical ? seededPaths : Set(seededPaths.map(canonicalPath))
+        var updatedKnownRolloutPaths = statePathsAreCanonical
+            ? (knownRolloutPaths ?? [])
+            : Set((knownRolloutPaths ?? []).map(canonicalPath))
+        var updatedFastPollPaths = statePathsAreCanonical
+            ? (fastPollPaths ?? updatedKnownRolloutPaths)
+            : Set((fastPollPaths ?? updatedKnownRolloutPaths).map(canonicalPath))
         var events: [(profileID: UUID?, record: CodexLocalTokenUsageRecord)] = []
         var turnCompletions: [(profileID: UUID?, record: CodexLocalTurnCompletionRecord)] = []
         var turnActivities: [CodexLocalTurnActivityEvent] = []
@@ -1125,23 +1150,22 @@ final class CodexLocalUsageObserver {
         // those known rollouts. Full recursive discovery is bounded to every
         // 15th poll, so newly-created rollouts are still found without paying
         // the directory walk on every timer tick.
-        updatedKnownRolloutPaths.formUnion(cursors.keys.map(canonicalPath))
-        updatedKnownRolloutPaths.formUnion(seededPaths.map(canonicalPath))
-        let candidatePaths = updatedKnownRolloutPaths
+        updatedKnownRolloutPaths.formUnion(updatedCursors.keys)
+        updatedKnownRolloutPaths.formUnion(updatedSeededPaths)
+        let pollPaths = discoverNewRollouts ? updatedKnownRolloutPaths : updatedFastPollPaths
+        let candidatePaths = pollPaths
             .filter { path in
-                roots.contains { root in
-                    let rootPath = canonicalPath(root.codexHomeURL.path)
-                    return path == rootPath || path.hasPrefix(rootPath + "/")
+                canonicalRootPaths.contains { rootPath in
+                    path == rootPath || path.hasPrefix(rootPath + "/")
                 }
             }
             .sorted()
+        var promotedFastPollPaths = Set<String>()
         for path in candidatePaths {
             let fileURL = URL(fileURLWithPath: path)
             guard isRolloutFile(fileURL), seenPaths.insert(path).inserted else { continue }
-            guard let root = roots.first(where: { root in
-                let rootPath = canonicalPath(root.codexHomeURL.path)
-                return path == rootPath || path.hasPrefix(rootPath + "/")
-            }) else { continue }
+            guard let rootPath = canonicalRootPaths.first(where: { path == $0 || path.hasPrefix($0 + "/") }),
+                  let root = rootByCanonicalPath[rootPath] else { continue }
             rolloutMetadataReadCount += 1
             guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey, .fileResourceIdentifierKey]),
                   values.isRegularFile == true,
@@ -1156,6 +1180,10 @@ final class CodexLocalUsageObserver {
                 && cursor?.fileSize == size
                 && cursor?.modificationTime == modificationTime
                 && cursor?.fileResourceIdentifier == fileResourceIdentifier
+
+            if discoverNewRollouts && (!metadataUnchanged || !updatedFastPollPaths.contains(path)) {
+                promotedFastPollPaths.insert(path)
+            }
 
                     // A metadata-stable rollout that is already caught up has
                     // no new bytes to observe. Exit before identity work or
@@ -1354,8 +1382,11 @@ final class CodexLocalUsageObserver {
                 updatedCursors.removeValue(forKey: stalePath)
                 updatedSeededPaths.remove(stalePath)
                 updatedKnownRolloutPaths.remove(stalePath)
+                updatedFastPollPaths.remove(stalePath)
             }
         }
+        updatedFastPollPaths.formUnion(promotedFastPollPaths)
+        updatedFastPollPaths = Self.boundedFastPollPaths(updatedFastPollPaths, cursors: updatedCursors)
         return CodexLocalUsageScanResult(
             events: events,
             turnCompletions: turnCompletions,
@@ -1363,6 +1394,7 @@ final class CodexLocalUsageObserver {
             cursors: updatedCursors,
             seededPaths: updatedSeededPaths,
             knownRolloutPaths: updatedKnownRolloutPaths,
+            fastPollPaths: updatedFastPollPaths,
             sessionIdentityReadCount: sessionIdentityReadCount,
             metrics: CodexLocalUsageScanMetrics(
                 directoryEnumerationCount: directoryEnumerationCount,
@@ -1388,6 +1420,45 @@ final class CodexLocalUsageObserver {
             }
         }
         return paths
+    }
+
+    private nonisolated static func boundedFastPollPaths(
+        _ paths: Set<String>,
+        cursors: [String: CodexLocalUsageCursor]
+    ) -> Set<String> {
+        guard paths.count > regularPollPathLimit else { return paths }
+        return Set(
+            paths
+                .sorted { lhs, rhs in
+                    let lhsDate = cursors[lhs]?.modificationTime ?? .distantPast
+                    let rhsDate = cursors[rhs]?.modificationTime ?? .distantPast
+                    if lhsDate != rhsDate { return lhsDate > rhsDate }
+                    return lhs < rhs
+                }
+                .prefix(regularPollPathLimit)
+        )
+    }
+
+    private nonisolated static func initialFastPollPaths(
+        _ paths: Set<String>,
+        cursors: [String: CodexLocalUsageCursor]
+    ) -> Set<String> {
+        guard paths.count > regularPollPathLimit else { return paths }
+        let fileManager = FileManager.default
+        return Set(
+            paths
+                .sorted { lhs, rhs in
+                    let lhsDate = cursors[lhs]?.modificationTime
+                        ?? (try? fileManager.attributesOfItem(atPath: lhs)[.modificationDate] as? Date)
+                        ?? .distantPast
+                    let rhsDate = cursors[rhs]?.modificationTime
+                        ?? (try? fileManager.attributesOfItem(atPath: rhs)[.modificationDate] as? Date)
+                        ?? .distantPast
+                    if lhsDate != rhsDate { return lhsDate > rhsDate }
+                    return lhs < rhs
+                }
+                .prefix(regularPollPathLimit)
+        )
     }
 
     private nonisolated static func canonicalPath(_ path: String) -> String {
