@@ -136,6 +136,73 @@ enum AppUpdateReleasePolicy {
 enum AppUpdatePresentationPolicy {
     static let installButtonTitle = "下載並覆蓋"
     static let releaseButtonTitle = "查看 Release"
+    /// The replacement helper is bounded independently from AppKit's
+    /// termination callback. If termination cannot complete, the running
+    /// process gets a recoverable error instead of an endless spinner.
+    static let installHandoffTimeout: TimeInterval = 45
+}
+
+/// Small, private-to-the-app hand-off receipt written by the replacement
+/// helper. It is deliberately a line-oriented file so the shell helper can
+/// update it atomically without depending on a JSON encoder or another
+/// process. A failed receipt is surfaced on the next launch, while a recent
+/// installing receipt for the current version is treated as a successful
+/// relaunch race and allowed to settle to `succeeded`.
+struct AppUpdateReplacementReceipt: Equatable {
+    enum Status: String, Equatable {
+        case installing
+        case succeeded
+        case failed
+    }
+
+    let status: Status
+    let step: String
+    let message: String
+    let releaseVersion: String?
+    let updatedAt: Date?
+
+    static func parse(_ data: Data) -> Self? {
+        let fields = String(decoding: data, as: UTF8.self)
+            .split(whereSeparator: \.isNewline)
+            .reduce(into: [String: String]()) { result, line in
+                let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                guard parts.count == 2 else { return }
+                result[String(parts[0])] = String(parts[1])
+            }
+        guard let rawStatus = fields["status"], let status = Status(rawValue: rawStatus) else { return nil }
+        let updatedAt = fields["updatedAt"].flatMap { TimeInterval($0) }.map(Date.init(timeIntervalSince1970:))
+        return Self(
+            status: status,
+            step: fields["step"] ?? "unknown",
+            message: fields["message"] ?? "",
+            releaseVersion: fields["releaseVersion"],
+            updatedAt: updatedAt
+        )
+    }
+
+    var displayMessage: String {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "更新替換流程未完成（\(step)）。" : trimmed
+    }
+}
+
+enum AppUpdateReplacementReceiptStore {
+    static let receiptFileName = "update-replacement-receipt.txt"
+    static let logFileName = "update-replacement.log"
+
+    static func defaultReceiptURL(fileManager: FileManager = .default) -> URL {
+        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fileManager.temporaryDirectory
+        return base
+            .appendingPathComponent("com.openai.codex-usage-status", isDirectory: true)
+            .appendingPathComponent(receiptFileName)
+    }
+
+    static func defaultLogURL(fileManager: FileManager = .default) -> URL {
+        defaultReceiptURL(fileManager: fileManager)
+            .deletingLastPathComponent()
+            .appendingPathComponent(logFileName)
+    }
 }
 
 /// Keeps automatic GitHub checks responsive to a newly published release
@@ -179,25 +246,59 @@ final class AppUpdateService: NSObject {
     private let repositoryURL = AppUpdateReleasePolicy.officialReleasesURL
     private let session: URLSession
     private let checkTimeout: TimeInterval
+    private let replacementReceiptURL: URL
     private(set) var state: AppUpdateState = .idle
     private var checkTask: URLSessionDataTask?
     private var downloadTask: URLSessionDownloadTask?
     private var checkTimeoutTimer: Timer?
     private var checkGeneration: UInt64 = 0
     private var checkCompletion: ((AppUpdateState) -> Void)?
+    private var installHandoffTimer: Timer?
 
-    init(session: URLSession = .shared, checkTimeout: TimeInterval = 20) {
+    init(
+        session: URLSession = .shared,
+        checkTimeout: TimeInterval = 20,
+        replacementReceiptURL: URL = AppUpdateReplacementReceiptStore.defaultReceiptURL()
+    ) {
         self.session = session
         self.checkTimeout = max(0.1, checkTimeout)
+        self.replacementReceiptURL = replacementReceiptURL
         super.init()
     }
 
     var currentVersion: String { AppVersion.current }
 
-    /// GitHub Release checks have no separate updater startup phase. The
-    /// hook remains available so UsageViewModel can keep updater lifecycle
-    /// ownership without introducing another background worker.
-    func start() {}
+    /// Recover a helper failure (or an interrupted hand-off) from the last
+    /// process launch. This keeps the UI truthful even though a successful
+    /// update terminates the old app before the helper finishes.
+    func start() {
+        guard let data = try? Data(contentsOf: replacementReceiptURL),
+              let receipt = AppUpdateReplacementReceipt.parse(data) else { return }
+        switch receipt.status {
+        case .succeeded:
+            // The successful receipt is only a hand-off marker. Remove it
+            // after the new process has observed it so a later launch cannot
+            // mistake an old result for a current failure.
+            try? FileManager.default.removeItem(at: replacementReceiptURL)
+        case .failed:
+            finishInstall(.error("更新失敗：\(receipt.displayMessage)"))
+        case .installing:
+            // The new process can start just before the helper writes the
+            // final receipt. A recent receipt matching the current version is
+            // that harmless race; an older or stale receipt means the
+            // hand-off did not finish and must be actionable.
+            if receipt.releaseVersion == currentVersion,
+               let updatedAt = receipt.updatedAt,
+               Date().timeIntervalSince(updatedAt) < AppUpdatePresentationPolicy.installHandoffTimeout {
+                return
+            }
+            guard receipt.releaseVersion == currentVersion else {
+                finishInstall(.error("更新未完成：\(receipt.displayMessage)"))
+                return
+            }
+            finishInstall(.error("更新未完成：\(receipt.displayMessage)"))
+        }
+    }
 
     func check(completion: ((AppUpdateState) -> Void)? = nil) {
         invalidateCheck(notify: false)
@@ -327,6 +428,7 @@ final class AppUpdateService: NSObject {
                     self.state = .installing(activeRelease)
                     self.onStateChange?(self.state)
                     try AppUpdateInstaller.schedule(plan: plan)
+                    self.scheduleInstallHandoffTimeout(for: activeRelease)
                     NSApp.terminate(nil)
                 } catch let error as AppUpdateError {
                     self.finishInstall(.error(error.localizedDescription))
@@ -372,8 +474,31 @@ final class AppUpdateService: NSObject {
     }
 
     private func finishInstall(_ newState: AppUpdateState) {
+        installHandoffTimer?.invalidate()
+        installHandoffTimer = nil
         state = newState
         onStateChange?(newState)
+    }
+
+    private func scheduleInstallHandoffTimeout(for release: AppUpdateRelease) {
+        installHandoffTimer?.invalidate()
+        let timer = Timer(timeInterval: AppUpdatePresentationPolicy.installHandoffTimeout, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      case .installing(let activeRelease) = self.state,
+                      activeRelease.version == release.version else { return }
+                let suffix: String
+                if let data = try? Data(contentsOf: self.replacementReceiptURL),
+                   let receipt = AppUpdateReplacementReceipt.parse(data) {
+                    suffix = receipt.displayMessage
+                } else {
+                    suffix = "替換 helper 未在期限內完成。"
+                }
+                self.finishInstall(.error("更新未完成：\(suffix)"))
+            }
+        }
+        installHandoffTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 }
 
@@ -383,6 +508,9 @@ enum AppUpdateInstaller {
         let newBundleURL: URL
         let currentBundleURL: URL
         let backupName: String
+        let receiptURL: URL
+        let logURL: URL
+        let releaseVersion: String
     }
 
     static func prepare(
@@ -420,7 +548,10 @@ enum AppUpdateInstaller {
             rootURL: rootURL,
             newBundleURL: newBundleURL,
             currentBundleURL: currentBundleURL,
-            backupName: "CodexUsageStatus.backup-\(UUID().uuidString)"
+            backupName: "CodexUsageStatus.backup-\(UUID().uuidString)",
+            receiptURL: AppUpdateReplacementReceiptStore.defaultReceiptURL(),
+            logURL: AppUpdateReplacementReceiptStore.defaultLogURL(),
+            releaseVersion: release.version
         )
     }
 
@@ -430,16 +561,29 @@ enum AppUpdateInstaller {
             oldPath: plan.currentBundleURL.path,
             newPath: plan.newBundleURL.path,
             backupPath: plan.currentBundleURL.deletingLastPathComponent().appendingPathComponent(plan.backupName).path,
-            rootPath: plan.rootURL.path
+            rootPath: plan.rootURL.path,
+            receiptPath: plan.receiptURL.path,
+            logPath: plan.logURL.path,
+            releaseVersion: plan.releaseVersion
         )
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
+        try FileManager.default.createDirectory(
+            at: plan.receiptURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        if !FileManager.default.fileExists(atPath: plan.logURL.path) {
+            FileManager.default.createFile(atPath: plan.logURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
         process.arguments = [scriptURL.path]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+        let logHandle = try FileHandle(forWritingTo: plan.logURL)
+        try logHandle.seekToEnd()
+        process.standardOutput = logHandle
+        process.standardError = logHandle
         try process.run()
     }
 
@@ -451,35 +595,102 @@ enum AppUpdateInstaller {
         oldPath: String,
         newPath: String,
         backupPath: String,
-        rootPath: String
+        rootPath: String,
+        receiptPath: String? = nil,
+        logPath: String? = nil,
+        releaseVersion: String = "unknown"
     ) -> String {
-        """
+        let resolvedReceiptPath = receiptPath ?? URL(fileURLWithPath: rootPath).appendingPathComponent(AppUpdateReplacementReceiptStore.receiptFileName).path
+        let resolvedLogPath = logPath ?? URL(fileURLWithPath: rootPath).appendingPathComponent(AppUpdateReplacementReceiptStore.logFileName).path
+        return """
         #!/bin/sh
         set -eu
         OLD=\(shellQuote(oldPath))
         NEW=\(shellQuote(newPath))
         BACKUP=\(shellQuote(backupPath))
         ROOT=\(shellQuote(rootPath))
+        RECEIPT=\(shellQuote(resolvedReceiptPath))
+        LOG=\(shellQuote(resolvedLogPath))
+        RELEASE_VERSION=\(shellQuote(releaseVersion))
         APP_PID=$PPID
         WAIT_DEADLINE=$(($(date +%s) + 30))
+        mkdir -p "$(dirname "$RECEIPT")"
+        touch "$LOG"
+        exec >> "$LOG" 2>&1
+        write_receipt() {
+            STATUS="$1"
+            STEP="$2"
+            MESSAGE="$3"
+            RECEIPT_TMP="$RECEIPT.tmp.$$"
+            {
+                printf 'status=%s\\n' "$STATUS"
+                printf 'step=%s\\n' "$STEP"
+                printf 'message=%s\\n' "$MESSAGE"
+                printf 'releaseVersion=%s\\n' "$RELEASE_VERSION"
+                printf 'updatedAt=%s\\n' "$(date +%s)"
+            } > "$RECEIPT_TMP"
+            mv "$RECEIPT_TMP" "$RECEIPT"
+        }
+        fail() {
+            write_receipt failed "$1" "$2"
+            exit 1
+        }
+        restore_old() {
+            FAILED_NEW="$ROOT/CodexUsageStatus.failed-$$"
+            if [ ! -d "$OLD" ] || [ ! -d "$BACKUP" ]; then return 1; fi
+            if ! mv "$OLD" "$FAILED_NEW"; then return 1; fi
+            if ! mv "$BACKUP" "$OLD"; then
+                mv "$FAILED_NEW" "$OLD" || true
+                return 1
+            fi
+            return 0
+        }
+        write_receipt installing helper_started "Replacement helper started."
         sleep 1
-        if [ ! -d \"$NEW\" ]; then exit 1; fi
+        if [ ! -d \"$NEW\" ]; then fail new_bundle_missing "The downloaded bundle is missing."; fi
         # NSApp.terminate(nil) is asynchronous: AppDelegate first flushes
         # pending writes and only then replies to AppKit. Wait for the exact
         # old process to disappear before replacing or reopening the bundle;
         # otherwise `open -n` can leave the old and new menu-bar instances
         # alive together. A bounded wait fails closed and leaves the old app
         # untouched if termination cannot be observed.
+        write_receipt installing waiting_for_old_process "Waiting for the previous app to exit."
         while kill -0 \"$APP_PID\" 2>/dev/null; do
-            if [ \"$(date +%s)\" -ge \"$WAIT_DEADLINE\" ]; then exit 1; fi
+            if [ \"$(date +%s)\" -ge \"$WAIT_DEADLINE\" ]; then fail old_process_timeout "The previous app did not exit before the replacement deadline."; fi
             sleep 0.2
         done
-        mv \"$OLD\" \"$BACKUP\"
+        write_receipt installing backing_up_old_bundle "Backing up the current app bundle."
+        if ! mv \"$OLD\" \"$BACKUP\"; then fail backup_failed "The current app bundle could not be backed up."; fi
+        write_receipt installing replacing_bundle "Installing the downloaded app bundle."
         if ! mv \"$NEW\" \"$OLD\"; then
-            mv \"$BACKUP\" \"$OLD\" || true
-            exit 1
+            if mv \"$BACKUP\" \"$OLD\"; then
+                fail replacement_failed "The new app bundle could not be installed; the previous version was restored."
+            fi
+            fail rollback_failed "The new app bundle and its backup could not be restored safely."
         fi
-        /usr/bin/open -n \"$OLD\" || true
+        write_receipt installing relaunching "Launching the updated app."
+        if ! /usr/bin/open -n \"$OLD\"; then
+            if restore_old; then
+                fail relaunch_failed "The updated app could not be launched; the previous version was restored."
+            fi
+            fail relaunch_rollback_failed "The updated app could not be launched and the previous version could not be restored safely."
+        fi
+        LAUNCH_DEADLINE=$(($(date +%s) + 15))
+        LAUNCHED=0
+        while [ "$(date +%s)" -lt "$LAUNCH_DEADLINE" ]; do
+            if /bin/ps ax -o command= | /usr/bin/grep -F "$OLD/Contents/MacOS/CodexUsageStatus" | /usr/bin/grep -v grep >/dev/null 2>&1; then
+                LAUNCHED=1
+                break
+            fi
+            sleep 0.2
+        done
+        if [ "$LAUNCHED" -ne 1 ]; then
+            if restore_old; then
+                fail relaunch_failed "The updated app did not appear after launch was requested; the previous version was restored."
+            fi
+            fail relaunch_rollback_failed "The updated app did not appear and the previous version could not be restored safely."
+        fi
+        write_receipt succeeded completed "Update completed successfully."
         (sleep 10; /bin/rm -rf \"$BACKUP\" \"$ROOT\") >/dev/null 2>&1 &
         """
     }

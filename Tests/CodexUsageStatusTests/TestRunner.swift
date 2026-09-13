@@ -4535,7 +4535,17 @@ struct CodexUsageStatusTests {
         }
         try expect(waitRange.lowerBound < moveRange.lowerBound, "replacement waits before moving the old bundle")
         try expect(moveRange.lowerBound < openRange.lowerBound, "replacement opens the new bundle only after replacement")
-        try expect(script.contains("then exit 1; fi"), "replacement fails closed when the old process does not exit")
+        try expect(script.contains("old_process_timeout"), "replacement fails closed when the old process does not exit")
+        try expect(script.contains("write_receipt"), "replacement writes a bounded hand-off receipt")
+        try expect(script.contains("relaunch_failed"), "replacement reports relaunch failure explicitly")
+        try expect(script.contains("restore_old"), "replacement restores the previous bundle when relaunch fails")
+        try expect(script.contains("exec >> \"$LOG\" 2>&1"), "replacement retains helper diagnostics in a log")
+
+        let receipt = AppUpdateReplacementReceipt.parse(Data("status=failed\nstep=old_process_timeout\nmessage=previous app did not exit\nreleaseVersion=2.5.0\nupdatedAt=2000\n".utf8))
+        try expect(receipt?.status == .failed, "replacement failure receipt parses its status")
+        try expect(receipt?.step == "old_process_timeout", "replacement failure receipt preserves its step")
+        try expect(receipt?.releaseVersion == "2.5.0", "replacement failure receipt preserves its target version")
+        try expect(receipt?.displayMessage == "previous app did not exit", "replacement failure receipt preserves its factual message")
     }
 
     private static func testUpdateAuthorityAndPackagingPolicy() throws {
@@ -4614,10 +4624,11 @@ struct CodexUsageStatusTests {
 
         let artifactURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("outputs/CodexUsageStatus.app.zip")
-        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, "2.4.95"])
+        let expectedArtifactVersion = "2.4.96"
+        let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, expectedArtifactVersion])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 
-        let publicStatus = try runToolStatus("/bin/bash", [validatorURL.path, "--public-release", artifactURL.path, "2.4.95"])
+        let publicStatus = try runToolStatus("/bin/bash", [validatorURL.path, "--public-release", artifactURL.path, expectedArtifactVersion])
         try expect(publicStatus == 0, "ad-hoc artifact is accepted by the public GitHub release gate")
 
         let notarizeStatus = try runToolStatus("/bin/bash", [validatorURL.path, "--notarize", artifactURL.path, "2.4.95"])

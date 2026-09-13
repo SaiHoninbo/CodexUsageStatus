@@ -876,49 +876,45 @@ extension UsagePopoverView {
         isFastest: Bool,
         isSelected: Bool
     ) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                HStack(spacing: 6) {
-                    Text(credit.title ?? "Reset credit \(index + 1)")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(HUDColorPalette.primaryText)
-                        .lineLimit(1)
-                    if isFastest {
-                        Text("最快到期")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(HUDColorPalette.verificationAction)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(HUDColorPalette.verificationAction.opacity(0.14), in: Capsule())
-                    }
-                }
-                Spacer(minLength: 6)
-                Text(HUDResetCreditCountdownPolicy.text(
-                    expiresAt: credit.expiresAt,
-                    now: model.currentDate
-                ))
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(resetCreditCountdownColor(credit.expiresAt))
-                .monospacedDigit()
-                .lineLimit(1)
-            }
-            Text("Bucket：\(credit.resetType ?? "未知") · 到期：\(creditDate(credit.expiresAt))")
-                .font(.caption2)
-                .foregroundStyle(HUDColorPalette.secondaryText)
-            if let description = credit.description, !description.isEmpty {
-                Text(description)
-                    .font(.caption2)
-                    .foregroundStyle(HUDColorPalette.tertiaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .overlay(alignment: .leading) {
+        HStack(alignment: .top, spacing: 8) {
             Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(isSelected ? HUDColorPalette.verificationAction : HUDColorPalette.tertiaryText)
+                .frame(width: 18, alignment: .center)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    HStack(spacing: 6) {
+                        Text(credit.title ?? "Reset credit \(index + 1)")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(HUDColorPalette.primaryText)
+                            .lineLimit(1)
+                        if isFastest {
+                            Text("最快到期")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(HUDColorPalette.verificationAction)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(HUDColorPalette.verificationAction.opacity(0.14), in: Capsule())
+                        }
+                    }
+                    Spacer(minLength: 6)
+                    Text(HUDResetCreditCountdownPolicy.text(
+                        expiresAt: credit.expiresAt,
+                        now: model.currentDate
+                    ))
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(resetCreditCountdownColor(credit.expiresAt))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                }
+                Text("Bucket：\(resetCreditBucketName(credit.resetType)) · 到期：\(creditDate(credit.expiresAt))")
+                    .font(.caption2)
+                    .foregroundStyle(HUDColorPalette.secondaryText)
+            }
         }
-        .padding(.leading, 18)
         .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             isSelected ? HUDColorPalette.verificationAction.opacity(0.10) : Color.clear,
             in: RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -930,5 +926,31 @@ extension UsagePopoverView {
         return TimeInterval(expiresAt) <= model.currentDate.timeIntervalSince1970
             ? HUDColorPalette.warning
             : HUDColorPalette.verificationAction
+    }
+
+    private func resetCreditBucketName(_ rawValue: String?) -> String {
+        guard let rawValue else { return "未知配額" }
+        let normalized = rawValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "-", with: "_")
+        guard !normalized.isEmpty else { return "未知配額" }
+
+        switch normalized {
+        case "primary", "main", "five_hour", "5_hour", "5h", "fivehour":
+            return "5 小時配額"
+        case "secondary", "weekly", "seven_day", "7_day", "7d", "sevenday":
+            return "每週配額"
+        case "monthly", "thirty_day", "30_day", "30d", "thirtyday":
+            return "每月配額"
+        case "gpt_reserve_weekly", "gptreserveweekly":
+            return "GPT Reserve 每週配額"
+        default:
+            let fallback = normalized
+                .split(separator: "_", omittingEmptySubsequences: true)
+                .map(String.init)
+                .joined(separator: " ")
+            return fallback.isEmpty ? "未知配額" : fallback
+        }
     }
 }
