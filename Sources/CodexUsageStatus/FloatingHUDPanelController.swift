@@ -282,6 +282,10 @@ final class FloatingHUDPanelController: NSObject {
         // cached geometry and never trigger a heavy system-window query.
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
+                // Re-read TCC on the existing bounded visibility fallback so
+                // granting/revoking Accessibility in System Settings updates
+                // the HUD badge and action gate without an app restart.
+                self?.model.refreshAccessibilityPermissionState()
                 self?.requestVisibilityRefresh()
             }
         }

@@ -59,6 +59,11 @@ struct HUDPresentation: Equatable {
     let isStale: Bool
     let isQuotaUpdating: Bool
     let isCodexFocused: Bool
+    /// Clipboard and prompt-shortcut actions require the current process to
+    /// be trusted by macOS Accessibility/TCC. This is live state, not a
+    /// persisted preference, so a Settings change or app update is reflected
+    /// on the next model refresh.
+    let isAccessibilityTrusted: Bool
     let quotaRowCount: Int
     /// The single account-information-row visibility decision shared by the
     /// SwiftUI tree and the AppKit panel geometry. A zero Reset Credit count
@@ -272,8 +277,12 @@ enum HUDResetCreditSelectionPolicy {
 }
 
 enum HUDPasteActionPolicy {
-    static func canStart(isInFlight: Bool, isCodexFocused: Bool) -> Bool {
-        !isInFlight && isCodexFocused
+    static func canStart(
+        isInFlight: Bool,
+        isCodexFocused: Bool,
+        isAccessibilityTrusted: Bool = true
+    ) -> Bool {
+        !isInFlight && isCodexFocused && isAccessibilityTrusted
     }
 }
 

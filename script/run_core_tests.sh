@@ -40,6 +40,7 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDContextMenuPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/UsagePopoverTab.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/AppVersion.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/AppSettings.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/PopoverPresentationPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/Popover/PopoverInteractionStyle.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/Popover/PopoverInteractionTrace.swift" \

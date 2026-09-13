@@ -166,6 +166,14 @@ extension UsagePopoverView {
 
     var settingsSectionContent: some View {
         VStack(alignment: .leading, spacing: 8) {
+            Toggle("播放提示音", isOn: Binding(
+                get: { model.notificationSoundEnabled },
+                set: { model.setNotificationSoundEnabled($0) }
+            ))
+            Text("這是 App 的全域音效開關；關閉後會靜音通知、Turn／更新提醒與 Token Reel，Token Reel 的個別偏好仍會保留。")
+                .font(.caption2)
+                .foregroundStyle(HUDColorPalette.tertiaryText)
+                .fixedSize(horizontal: false, vertical: true)
             Toggle("啟用用量通知", isOn: Binding(
                 get: { model.notificationsEnabled },
                 set: { model.setNotificationsEnabled($0) }
@@ -173,10 +181,6 @@ extension UsagePopoverView {
             Toggle("Primary／secondary 分開提醒", isOn: Binding(
                 get: { model.separateWindowNotifications },
                 set: { model.setSeparateWindowNotifications($0) }
-            ))
-            Toggle("播放提示音", isOn: Binding(
-                get: { model.notificationSoundEnabled },
-                set: { model.setNotificationSoundEnabled($0) }
             ))
             Toggle("Turn 完成通知", isOn: Binding(
                 get: { model.notifyOnTurnSuccess },
@@ -272,6 +276,7 @@ extension UsagePopoverView {
                 get: { model.tokenReelSoundEnabled },
                 set: { model.setTokenReelSoundEnabled($0) }
             ))
+            .disabled(!model.notificationSoundEnabled)
             Text("只有真正增加的 Token 才播放一次 Reel 音效；不會因啟動、切帳號或重新整理重播。")
                 .font(.caption2)
                 .foregroundStyle(HUDColorPalette.tertiaryText)
@@ -283,7 +288,7 @@ extension UsagePopoverView {
             }
                 .buttonStyle(.link)
                 .font(.caption)
-                .disabled(!model.tokenReelSoundEnabled)
+                .disabled(!model.notificationSoundEnabled || !model.tokenReelSoundEnabled)
             Button("重設 HUD 位置") {
                 acknowledgeAction("HUD 位置已重設", control: "settings.resetHUD")
                 PopoverInteractionTrace.started("settings.resetHUD")

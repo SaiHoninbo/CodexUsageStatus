@@ -54,7 +54,10 @@ enum HUDContextMenuPolicy {
         [.quit]
     ]
 
-    static func pasteActionsEnabled(isCodexFocused: Bool) -> Bool {
-        isCodexFocused
+    static func pasteActionsEnabled(
+        isCodexFocused: Bool,
+        isAccessibilityTrusted: Bool = true
+    ) -> Bool {
+        isCodexFocused && isAccessibilityTrusted
     }
 }

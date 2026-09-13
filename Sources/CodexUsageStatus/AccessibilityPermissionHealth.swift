@@ -33,3 +33,21 @@ enum AccessibilityPermissionPolicy {
         NSWorkspace.shared.open(url)
     }
 }
+
+/// macOS owns the TCC grant; the app cannot copy or forge that database entry
+/// during an update. The continuity contract is therefore to keep the same
+/// bundle identity and install path, preserve user settings in the stable
+/// defaults domain, and re-read live trust after every launch/foreground
+/// transition instead of persisting a stale "granted" bit.
+enum AccessibilityPermissionContinuityPolicy {
+    static let bundleIdentifier = AppSettingsSchema.stableBundleIdentifier
+    static let canonicalInstallPath = "/Applications/CodexUsageStatus.app"
+
+    static func preservesTCCIdentity(bundleIdentifier: String?, bundleURL: URL?) -> Bool {
+        guard bundleIdentifier == Self.bundleIdentifier,
+              let bundleURL else { return false }
+        return bundleURL.standardizedFileURL.path == canonicalInstallPath
+    }
+
+    static var requiresLiveRefreshAfterLaunch: Bool { true }
+}

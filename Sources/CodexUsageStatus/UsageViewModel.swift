@@ -183,6 +183,7 @@ final class UsageViewModel: ObservableObject {
 
     init() {
         RetiredFeatureCleanup.run()
+        AppSettingsSchema.migrate(defaults: defaults)
         let store = HistoryStore(loadOnInit: false, asynchronousPersistence: true)
         historyStore = store
         legacyHistoryURL = store.fileURL
@@ -204,7 +205,10 @@ final class UsageViewModel: ObservableObject {
         tokenActivityErrorMessage = activityStore.errorMessage
         notificationsEnabled = defaults.object(forKey: PreferenceKey.notificationsEnabled) as? Bool ?? true
         separateWindowNotifications = defaults.object(forKey: PreferenceKey.separateWindows) as? Bool ?? true
-        notificationSoundEnabled = defaults.object(forKey: PreferenceKey.soundEnabled) as? Bool ?? false
+        // "播放提示音" is the single app-wide sound master. The canonical
+        // key is versioned, while migration prioritizes the shipped legacy
+        // key so an existing OFF choice remains OFF after upgrade.
+        notificationSoundEnabled = GlobalSoundPreference.load(from: defaults)
         tokenReelSoundEnabled = TokenReelSoundPreference.load(from: defaults)
         accessibilityPermissionState = AccessibilityPermissionPolicy.current()
         notificationThresholds = Self.loadThresholds(from: defaults)
@@ -541,7 +545,7 @@ final class UsageViewModel: ObservableObject {
             guard let self else { return }
             self.updateState = state
             if case .available(let release) = state {
-                self.updateNotificationService.notifyIfNeeded(for: release, soundEnabled: self.notificationSoundEnabled)
+                self.updateNotificationService.notifyIfNeeded(for: release, soundEnabled: self.effectiveNotificationSoundEnabled)
             }
         }
         // Publish the service's immediate state as well.  This keeps every
@@ -844,7 +848,21 @@ final class UsageViewModel: ObservableObject {
 
     func setNotificationSoundEnabled(_ enabled: Bool) {
         notificationSoundEnabled = enabled
-        defaults.set(enabled, forKey: PreferenceKey.soundEnabled)
+        GlobalSoundPreference.persist(enabled, to: defaults)
+        if !enabled {
+            tokenReelAudioPlayer.cancel()
+        }
+    }
+
+    var effectiveNotificationSoundEnabled: Bool {
+        notificationSoundEnabled
+    }
+
+    var effectiveTokenReelSoundEnabled: Bool {
+        GlobalSoundPreference.effective(
+            masterEnabled: notificationSoundEnabled,
+            featureEnabled: tokenReelSoundEnabled
+        )
     }
 
     func setTokenReelSoundEnabled(_ enabled: Bool) {
@@ -856,7 +874,7 @@ final class UsageViewModel: ObservableObject {
     }
 
     func previewTokenReelSound() {
-        guard tokenReelSoundEnabled else { return }
+        guard effectiveTokenReelSoundEnabled else { return }
         tokenReelAudioPlayer.preview(reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
     }
 
@@ -1333,7 +1351,7 @@ final class UsageViewModel: ObservableObject {
             )
         )
         hudTokenActivityFeedback = feedback
-        if tokenActivitySoundGate.consume(feedback: feedback, enabled: tokenReelSoundEnabled) {
+        if tokenActivitySoundGate.consume(feedback: feedback, enabled: effectiveTokenReelSoundEnabled) {
             tokenReelAudioPlayer.play(
                 reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
             )
@@ -2091,7 +2109,7 @@ final class UsageViewModel: ObservableObject {
                 notifyOnLongRunning: notifyOnLongRunningTurn,
                 longRunningThresholdMinutes: longRunningThresholdMinutes,
                 showContentInNotifications: contentEnabled ?? (showTurnContentInNotifications && turnContentNotificationSupported),
-                soundEnabled: notificationSoundEnabled,
+                soundEnabled: effectiveNotificationSoundEnabled,
                 notifyOnPlanProgress: false
             )
         )
@@ -2107,7 +2125,7 @@ final class UsageViewModel: ObservableObject {
                 notifyOnLongRunning: false,
                 longRunningThresholdMinutes: longRunningThresholdMinutes,
                 showContentInNotifications: false,
-                soundEnabled: notificationSoundEnabled,
+                soundEnabled: effectiveNotificationSoundEnabled,
                 notifyOnPlanProgress: notificationsEnabled && notifyOnPlanProgress
             )
         )
@@ -2138,7 +2156,7 @@ final class UsageViewModel: ObservableObject {
             resetCreditMessage = "已切換到 \(selection.profile.displayName)"
             resetCreditOperationState = .idle
             if notifyOnAccountSwitch && didSwitch {
-                turnNotificationService.notifyAccountSwitch(profileID: selection.profile.id, displayName: selection.profile.displayName, soundEnabled: notificationSoundEnabled)
+                turnNotificationService.notifyAccountSwitch(profileID: selection.profile.id, displayName: selection.profile.displayName, soundEnabled: effectiveNotificationSoundEnabled)
             }
         }
         currentProfileID = selection.profile.id
@@ -2284,7 +2302,7 @@ final class UsageViewModel: ObservableObject {
             now: Date(),
             thresholds: notificationThresholds,
             separateWindows: separateWindowNotifications,
-            soundEnabled: notificationSoundEnabled,
+            soundEnabled: effectiveNotificationSoundEnabled,
             profileID: currentProfileID
         )
     }
@@ -2321,20 +2339,20 @@ final class UsageViewModel: ObservableObject {
                 now: Date(),
                 thresholds: notificationThresholds,
                 separateWindows: separateWindowNotifications,
-                soundEnabled: notificationSoundEnabled,
+                soundEnabled: effectiveNotificationSoundEnabled,
                 profileID: profileID
             )
             return
         }
 
-        notificationService.notifyRapidDrain(event: rapidDrainEvent, soundEnabled: notificationSoundEnabled) { [weak self] succeeded in
+        notificationService.notifyRapidDrain(event: rapidDrainEvent, soundEnabled: effectiveNotificationSoundEnabled) { [weak self] succeeded in
             guard let self else { return }
             self.notificationService.evaluate(
                 snapshot: snapshot,
                 now: Date(),
                 thresholds: self.notificationThresholds,
                 separateWindows: self.separateWindowNotifications,
-                soundEnabled: self.notificationSoundEnabled,
+                soundEnabled: self.effectiveNotificationSoundEnabled,
                 profileID: profileID,
                 coveredRapidDrainWindow: succeeded
                     ? RapidDrainCoveredWindow(

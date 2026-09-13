@@ -45,7 +45,7 @@ Most monitoring features do not require Accessibility permission. Enable Accessi
 - **Paste clipboard**: sends `⌘V` to the foreground Codex window.
 - **Paste and submit**: sends `⌘V`, waits for the paste to finish, then sends one Return/Enter.
 
-Open **System Settings → Privacy & Security → Accessibility** and enable `CodexUsageStatus.app` when paste/event posting is not trusted. Because releases use ad-hoc signing, macOS may treat a replacement as a new app identity and require authorization again; only follow the remediation when the app reports that permission is actually unavailable.
+Open **System Settings → Privacy & Security → Accessibility** and enable `CodexUsageStatus.app` when paste/event posting is not trusted. The HUD re-reads live Accessibility/TCC state whenever the app launches or returns to the foreground; it never persists a stale "granted" flag. Releases keep the stable `com.openai.codex-usage-status` bundle identifier and `/Applications/CodexUsageStatus.app` path so macOS can retain the grant across an in-place update. Because releases use ad-hoc signing, macOS may still require authorization again; only follow the remediation when the app reports that permission is actually unavailable.
 
 Notification permission is optional. Quota and token activity continue to work if notifications are denied.
 
@@ -60,6 +60,7 @@ Notification permission is optional. Quota and token activity continue to work i
 - Per-account quota and aggregate token activity views
 - HUD placement that follows the Codex window across displays
 - Clipboard-only and paste-and-submit controls
+- A master sound switch that gates notifications, Turn/update reminders, and Token Reel audio while preserving each feature's preference
 - A native right-click HUD menu for refresh, account scope, sync cadence, clipboard actions, update checks, and HUD reset
 - Update checks for new GitHub Releases
 - Optional Repo/Chat plan-progress notifications at the 25%, 50%, and 75% milestones (plan ratio only; no ETA or step text)

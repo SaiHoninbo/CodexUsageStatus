@@ -183,6 +183,8 @@ struct CodexUsageStatusTests {
             ("release signing policy", testReleaseSigningPolicy),
             ("release artifact validation", testReleaseArtifactValidation),
             ("accessibility permission policy", testAccessibilityPermissionPolicy),
+            ("accessibility permission continuity", testAccessibilityPermissionContinuity),
+            ("cross-version sound settings", testCrossVersionSoundSettings),
             ("HUD context menu policy", testHUDContextMenuPolicy),
             ("usage popover tabs and app version", testUsagePopoverTabsAndAppVersion),
             ("popover interaction hit targets", testPopoverInteractionHitTargets),
@@ -2205,6 +2207,7 @@ struct CodexUsageStatusTests {
             tokenValue: String = "4,829,524,138",
             profileIDOverride: UUID? = nil,
             reduceMotion: Bool = false,
+            isAccessibilityTrusted: Bool = true,
             tokenFeedback: TokenHeroUpdateFeedback? = nil
         ) -> HUDPresentation {
             let effectiveProfileID = profileIDOverride ?? profileID
@@ -2252,6 +2255,7 @@ struct CodexUsageStatusTests {
                 isStale: false,
                 isQuotaUpdating: false,
                 isCodexFocused: true,
+                isAccessibilityTrusted: isAccessibilityTrusted,
                 quotaRowCount: 2,
                 showsAccountInfoRow: false,
                 resetCreditCount: nil,
@@ -2281,6 +2285,7 @@ struct CodexUsageStatusTests {
         try expect(base != makePresentation(tokenValue: "4,829,524,139"), "token metric changes invalidate the HUD presentation")
         try expect(base != makePresentation(profileIDOverride: UUID()), "profile identity changes invalidate the HUD presentation")
         try expect(base != makePresentation(reduceMotion: true), "Reduce Motion changes invalidate pulse presentation")
+        try expect(base != makePresentation(isAccessibilityTrusted: false), "Accessibility trust changes invalidate action availability")
         let feedback = TokenHeroUpdateFeedback(
             generation: 1,
             previousTokens: 4_829_524_138,
@@ -4446,6 +4451,7 @@ struct CodexUsageStatusTests {
         try expect(actions.contains(.checkForUpdates) && actions.contains(.quit), "update and quit actions are present")
         try expect(HUDContextMenuPolicy.pasteActionsEnabled(isCodexFocused: true), "focused paste is enabled")
         try expect(!HUDContextMenuPolicy.pasteActionsEnabled(isCodexFocused: false), "unfocused paste is disabled")
+        try expect(!HUDContextMenuPolicy.pasteActionsEnabled(isCodexFocused: true, isAccessibilityTrusted: false), "untrusted Accessibility paste is disabled")
         try expect(HUDContextMenuPolicy.sections.last == [.quit], "quit is isolated at the bottom")
     }
 
@@ -4613,6 +4619,10 @@ struct CodexUsageStatusTests {
         try expect(
             !HUDPasteActionPolicy.canStart(isInFlight: false, isCodexFocused: false),
             "unfocused paste remains disabled"
+        )
+        try expect(
+            !HUDPasteActionPolicy.canStart(isInFlight: false, isCodexFocused: true, isAccessibilityTrusted: false),
+            "untrusted Accessibility paste cannot start"
         )
     }
 
@@ -5017,6 +5027,69 @@ struct CodexUsageStatusTests {
             AccessibilityPermissionPolicy.state(axTrusted: false, eventPostingAuthorized: false) == .notTrusted,
             "missing permissions are reported without mutation"
         )
+    }
+
+    private static func testAccessibilityPermissionContinuity() throws {
+        let canonicalURL = URL(fileURLWithPath: AccessibilityPermissionContinuityPolicy.canonicalInstallPath)
+        try expect(
+            AccessibilityPermissionContinuityPolicy.preservesTCCIdentity(
+                bundleIdentifier: AccessibilityPermissionContinuityPolicy.bundleIdentifier,
+                bundleURL: canonicalURL
+            ),
+            "canonical bundle identity and install path preserve TCC continuity"
+        )
+        try expect(
+            !AccessibilityPermissionContinuityPolicy.preservesTCCIdentity(
+                bundleIdentifier: "com.example.spoof",
+                bundleURL: canonicalURL
+            ),
+            "bundle identity changes cannot claim TCC continuity"
+        )
+        try expect(
+            !AccessibilityPermissionContinuityPolicy.preservesTCCIdentity(
+                bundleIdentifier: AccessibilityPermissionContinuityPolicy.bundleIdentifier,
+                bundleURL: URL(fileURLWithPath: "/tmp/CodexUsageStatus.app")
+            ),
+            "a different install path cannot claim TCC continuity"
+        )
+        try expect(
+            AccessibilityPermissionContinuityPolicy.requiresLiveRefreshAfterLaunch,
+            "permission continuity always re-reads live TCC state"
+        )
+    }
+
+    private static func testCrossVersionSoundSettings() throws {
+        let suiteName = "CrossVersionSoundSettingsTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        defaults.set(false, forKey: GlobalSoundPreference.legacyNotificationSoundKey)
+        defaults.set(true, forKey: "sound.enabled")
+        defaults.set(3, forKey: "ui.floatingHUD.scaleLevel")
+        defaults.set(true, forKey: "usage.notifications.enabled")
+        try expect(!GlobalSoundPreference.load(from: defaults), "legacy master sound key migrates to the canonical key")
+        try expect(
+            defaults.integer(forKey: AppSettingsSchema.versionKey) == AppSettingsSchema.currentVersion,
+            "settings schema version is recorded after migration"
+        )
+        try expect(
+            defaults.bool(forKey: GlobalSoundPreference.key) == false,
+            "migration preserves the user's disabled master sound choice"
+        )
+        try expect(defaults.integer(forKey: "ui.floatingHUD.scaleLevel") == 3, "migration preserves existing HUD settings")
+        try expect(defaults.bool(forKey: "usage.notifications.enabled"), "migration preserves existing notification settings")
+
+        GlobalSoundPreference.persist(true, to: defaults)
+        try expect(GlobalSoundPreference.load(from: defaults), "canonical master sound preference round trips")
+        try expect(GlobalSoundPreference.effective(masterEnabled: true, featureEnabled: true), "enabled master and feature produce sound")
+        try expect(!GlobalSoundPreference.effective(masterEnabled: false, featureEnabled: true), "disabled master gates an enabled feature")
+        try expect(!GlobalSoundPreference.effective(masterEnabled: true, featureEnabled: false), "disabled feature remains quiet")
+        try expect(AppSettingsSchema.stableBundleIdentifier == "com.openai.codex-usage-status", "settings domain identity remains bundle-stable across versions")
+
+        let freshSuite = "CrossVersionSoundDefaults-\(UUID().uuidString)"
+        let freshDefaults = UserDefaults(suiteName: freshSuite)!
+        defer { freshDefaults.removePersistentDomain(forName: freshSuite) }
+        try expect(!GlobalSoundPreference.load(from: freshDefaults), "new installations keep the historical safe default of sound OFF")
     }
 
     private static func testCodexPromptShortcuts() throws {

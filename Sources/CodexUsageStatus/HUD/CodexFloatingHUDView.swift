@@ -199,6 +199,7 @@ struct CodexFloatingHUDView: View {
             isStale: model.isStale,
             isQuotaUpdating: isQuotaUpdating,
             isCodexFocused: layoutState.isCodexFocused,
+            isAccessibilityTrusted: model.accessibilityPermissionState == .trusted,
             quotaRowCount: max(1, layoutState.quotaRowCount),
             showsAccountInfoRow: showsAccountInfoRow,
             resetCreditCount: resetCredit?.count,
@@ -652,15 +653,18 @@ struct CodexFloatingHUDView: View {
             action: {
                 guard HUDPasteActionPolicy.canStart(
                     isInFlight: isPasteInFlight,
-                    isCodexFocused: layoutState.isCodexFocused
+                    isCodexFocused: layoutState.isCodexFocused,
+                    isAccessibilityTrusted: presentation.isAccessibilityTrusted
                 ) else { return }
                 isPasteInFlight = true
                 pasteClipboard { _ in
                     isPasteInFlight = false
                 }
             },
-            isDisabled: presentation.isPasteInFlight || !presentation.isCodexFocused,
-            helpText: presentation.isCodexFocused ? "貼上剪貼簿內容" : "切換回 Codex 後可貼上",
+            isDisabled: presentation.isPasteInFlight || !presentation.isCodexFocused || !presentation.isAccessibilityTrusted,
+            helpText: !presentation.isAccessibilityTrusted
+                ? "允許輔助功能後可貼上"
+                : (presentation.isCodexFocused ? "貼上剪貼簿內容" : "切換回 Codex 後可貼上"),
             accessibilityLabel: "貼上剪貼簿內容",
             width: metrics.actionCardWidth,
             height: metrics.actionHeight,
@@ -675,16 +679,21 @@ struct CodexFloatingHUDView: View {
             systemImage: "paperplane.fill",
             iconSize: 12,
             action: {
-                guard !isPasteAndSubmitInFlight else { return }
+                guard !isPasteAndSubmitInFlight,
+                      layoutState.isCodexFocused,
+                      presentation.isAccessibilityTrusted,
+                      !ClipboardPasteService.isTemporaryOperationInFlight else { return }
                 isPasteAndSubmitInFlight = true
                 pasteAndSubmit { _ in
                     isPasteAndSubmitInFlight = false
                 }
             },
-            isDisabled: presentation.isPasteAndSubmitInFlight || !presentation.isCodexFocused,
-            helpText: presentation.isCodexFocused ? "貼上並送出" : "切換回 Codex 後可貼上並送出",
+            isDisabled: presentation.isPasteAndSubmitInFlight || !presentation.isCodexFocused || !presentation.isAccessibilityTrusted,
+            helpText: !presentation.isAccessibilityTrusted
+                ? "允許輔助功能後可貼上並送出"
+                : (presentation.isCodexFocused ? "貼上並送出" : "切換回 Codex 後可貼上並送出"),
             accessibilityLabel: "貼上並送出",
-            fillStyle: presentation.isCodexFocused
+            fillStyle: presentation.isCodexFocused && presentation.isAccessibilityTrusted
                 ? .filled(background: selectedHUDPalette.submitAction, foreground: selectedHUDPalette.filledActionForeground)
                 : .neutral,
             width: metrics.actionCardWidth,
@@ -716,10 +725,13 @@ struct CodexFloatingHUDView: View {
         let cardHeight = height ?? metrics.workflowActionHeight
         let isDisabled = presentation.isPromptShortcutInFlight
             || !presentation.isCodexFocused
+            || !presentation.isAccessibilityTrusted
             || presentation.clipboardOperationInFlight
-        let helpText = presentation.isCodexFocused
-            ? shortcut.helpText
-            : "切換回 Codex 後可使用「\(shortcut.rawValue)」"
+        let helpText = !presentation.isAccessibilityTrusted
+            ? "允許輔助功能後可使用「\(shortcut.rawValue)」"
+            : (presentation.isCodexFocused
+                ? shortcut.helpText
+                : "切換回 Codex 後可使用「\(shortcut.rawValue)」")
         return HUDActionCard(
             title: shortcut.rawValue,
             systemImage: shortcut == .commitAndPush ? "arrow.up.circle.fill" : (shortcut == .continueTask ? "play.fill" : (shortcut == .fullVerification ? "checkmark.circle.fill" : "wrench.and.screwdriver.fill")),
@@ -727,6 +739,7 @@ struct CodexFloatingHUDView: View {
             action: {
                 guard !isPromptShortcutInFlight,
                       layoutState.isCodexFocused,
+                      presentation.isAccessibilityTrusted,
                       !ClipboardPasteService.isTemporaryOperationInFlight else { return }
                 isPromptShortcutInFlight = true
                 promptShortcut(shortcut) { _ in
@@ -874,7 +887,8 @@ struct CodexFloatingHUDView: View {
             Button {
                 guard HUDPasteActionPolicy.canStart(
                     isInFlight: isPasteInFlight,
-                    isCodexFocused: layoutState.isCodexFocused
+                    isCodexFocused: layoutState.isCodexFocused,
+                    isAccessibilityTrusted: model.accessibilityPermissionState == .trusted
                 ) else { return }
                 isPasteInFlight = true
                 pasteClipboard { _ in
@@ -885,7 +899,10 @@ struct CodexFloatingHUDView: View {
             }
             .disabled(
                 isPasteInFlight
-                    || !HUDContextMenuPolicy.pasteActionsEnabled(isCodexFocused: layoutState.isCodexFocused)
+                    || !HUDContextMenuPolicy.pasteActionsEnabled(
+                        isCodexFocused: layoutState.isCodexFocused,
+                        isAccessibilityTrusted: model.accessibilityPermissionState == .trusted
+                    )
             )
 
             Button {
@@ -898,8 +915,11 @@ struct CodexFloatingHUDView: View {
                 Label("貼上並送出", systemImage: "paperplane.fill")
             }
             .disabled(
-                isPasteAndSubmitInFlight
-                    || !HUDContextMenuPolicy.pasteActionsEnabled(isCodexFocused: layoutState.isCodexFocused)
+                    isPasteAndSubmitInFlight
+                    || !HUDContextMenuPolicy.pasteActionsEnabled(
+                        isCodexFocused: layoutState.isCodexFocused,
+                        isAccessibilityTrusted: model.accessibilityPermissionState == .trusted
+                    )
             )
         }
 
