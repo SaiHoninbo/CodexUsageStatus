@@ -181,6 +181,7 @@ struct CodexUsageStatusTests {
             ("update version comparison", testUpdateVersionComparison),
             ("automatic update check policy", testAutomaticUpdateCheckPolicy),
             ("update state presentation", testUpdateStatePresentation),
+            ("update receipt observation policy", testUpdateReceiptObservationPolicy),
             ("update replacement waits for old process", testUpdateReplacementWaitsForOldProcess),
             ("update authority and packaging policy", testUpdateAuthorityAndPackagingPolicy),
             ("release signing policy", testReleaseSigningPolicy),
@@ -5061,6 +5062,118 @@ struct CodexUsageStatusTests {
         try expect(AppUpdateState.downloading(release).isBusy, "download state is busy")
         try expect(AppUpdateState.installing(release).isBusy, "install state is busy")
         try expect(!AppUpdateState.error("network").isBusy, "error state is terminal")
+    }
+
+    private static func testUpdateReceiptObservationPolicy() throws {
+        let baseline = Date(timeIntervalSince1970: 1_000)
+        let freshFailure = AppUpdateReplacementReceipt(
+            status: .failed,
+            step: "old_process_timeout",
+            message: "previous app did not exit",
+            releaseVersion: "2.5.0",
+            updatedAt: Date(timeIntervalSince1970: 1_001)
+        )
+        let staleFailure = AppUpdateReplacementReceipt(
+            status: .failed,
+            step: "old_process_timeout",
+            message: "stale attempt",
+            releaseVersion: "2.5.0",
+            updatedAt: baseline
+        )
+        let sameSecondFailure = AppUpdateReplacementReceipt(
+            status: .failed,
+            step: "old_process_timeout",
+            message: "previous app did not exit",
+            releaseVersion: "2.5.0",
+            updatedAt: baseline
+        )
+        let mismatchedFailure = AppUpdateReplacementReceipt(
+            status: .failed,
+            step: "old_process_timeout",
+            message: "other release",
+            releaseVersion: "2.4.99",
+            updatedAt: Date(timeIntervalSince1970: 1_002)
+        )
+        let succeeded = AppUpdateReplacementReceipt(
+            status: .succeeded,
+            step: "completed",
+            message: "done",
+            releaseVersion: "2.5.0",
+            updatedAt: Date(timeIntervalSince1970: 1_003)
+        )
+        let now = Date(timeIntervalSince1970: 1_004)
+        let baselineData = Data("status=failed\nstep=old_process_timeout\nmessage=stale\nreleaseVersion=2.5.0\nupdatedAt=1000\n".utf8)
+        let sameSecondFreshData = Data("status=installing\nstep=helper_started\nmessage=started\nreleaseVersion=2.5.0\nupdatedAt=1000\n".utf8)
+
+        try expect(
+            AppUpdateReceiptObservationPolicy.decision(
+                for: freshFailure,
+                activeReleaseVersion: "2.5.0",
+                baselineUpdatedAt: baseline,
+                now: now
+            ) == .failed("previous app did not exit"),
+            "fresh matching failed receipt projects to an actionable error"
+        )
+        try expect(
+            AppUpdateReceiptObservationPolicy.decision(
+                for: staleFailure,
+                activeReleaseVersion: "2.5.0",
+                baselineUpdatedAt: baseline,
+                now: now
+            ) == .continueObserving,
+            "stale failed receipt cannot override a newer attempt"
+        )
+        try expect(
+            AppUpdateReceiptObservationPolicy.decision(
+                for: mismatchedFailure,
+                activeReleaseVersion: "2.5.0",
+                baselineUpdatedAt: baseline,
+                now: now
+            ) == .continueObserving,
+            "mismatched release receipt fails closed"
+        )
+        try expect(
+            AppUpdateReceiptObservationPolicy.decision(
+                for: succeeded,
+                activeReleaseVersion: "2.5.0",
+                baselineUpdatedAt: baseline,
+                now: now
+            ) == .succeeded,
+            "matching succeeded receipt wins the install race without an error"
+        )
+        try expect(
+            AppUpdateReceiptObservationPolicy.decision(
+                for: sameSecondFailure,
+                receiptData: sameSecondFreshData,
+                activeReleaseVersion: "2.5.0",
+                baselineUpdatedAt: baseline,
+                baselineReceiptData: baselineData,
+                now: now
+            ) == .failed("previous app did not exit"),
+            "same-second receipt content change is treated as a fresh hand-off"
+        )
+        try expect(
+            AppUpdateReceiptObservationPolicy.decision(
+                for: staleFailure,
+                receiptData: baselineData,
+                activeReleaseVersion: "2.5.0",
+                baselineUpdatedAt: baseline,
+                baselineReceiptData: baselineData,
+                now: now
+            ) == .continueObserving,
+            "same-second unchanged receipt remains stale"
+        )
+        try expect(
+            AppUpdateReceiptObservationPolicy.decision(
+                for: nil,
+                activeReleaseVersion: "2.5.0",
+                baselineUpdatedAt: baseline,
+                now: now
+            ) == .continueObserving,
+            "missing receipt keeps installing state until the bounded policy expires"
+        )
+        try expect(AppUpdateReceiptObservationDecision.timedOut != .continueObserving, "bounded timeout is terminal")
+        try expect(!AppUpdateState.error("recovered failure").isBusy, "recovered failure exposes a retryable terminal state")
     }
 
     private static func testUpdateReplacementWaitsForOldProcess() throws {

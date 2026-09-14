@@ -142,6 +142,47 @@ enum AppUpdatePresentationPolicy {
     static let installHandoffTimeout: TimeInterval = 45
 }
 
+enum AppUpdateReceiptObservationDecision: Equatable {
+    case continueObserving
+    case failed(String)
+    case succeeded
+    case timedOut
+}
+
+enum AppUpdateReceiptObservationPolicy {
+    static func decision(
+        for receipt: AppUpdateReplacementReceipt?,
+        receiptData: Data? = nil,
+        activeReleaseVersion: String,
+        baselineUpdatedAt: Date?,
+        baselineReceiptData: Data? = nil,
+        now: Date
+    ) -> AppUpdateReceiptObservationDecision {
+        guard let receipt,
+              receipt.releaseVersion == activeReleaseVersion,
+              let updatedAt = receipt.updatedAt else {
+            return .continueObserving
+        }
+        if let baselineUpdatedAt {
+            let timestampIsNewer = updatedAt > baselineUpdatedAt
+            let sameSecondContentChanged = updatedAt == baselineUpdatedAt
+                && receiptData != nil
+                && receiptData != baselineReceiptData
+            if !timestampIsNewer && !sameSecondContentChanged {
+                return .continueObserving
+            }
+        }
+        switch receipt.status {
+        case .installing:
+            return .continueObserving
+        case .failed:
+            return .failed(receipt.displayMessage)
+        case .succeeded:
+            return .succeeded
+        }
+    }
+}
+
 /// Small, private-to-the-app hand-off receipt written by the replacement
 /// helper. It is deliberately a line-oriented file so the shell helper can
 /// update it atomically without depending on a JSON encoder or another
@@ -253,7 +294,12 @@ final class AppUpdateService: NSObject {
     private var checkTimeoutTimer: Timer?
     private var checkGeneration: UInt64 = 0
     private var checkCompletion: ((AppUpdateState) -> Void)?
-    private var installHandoffTimer: Timer?
+    private let receiptObservationQueue = DispatchQueue(
+        label: "com.openai.codex-usage-status.update-receipt-observer",
+        qos: .utility
+    )
+    private var receiptObservationTimer: DispatchSourceTimer?
+    private var receiptObservationGeneration: UInt64 = 0
 
     init(
         session: URLSession = .shared,
@@ -420,6 +466,10 @@ final class AppUpdateService: NSObject {
                     return
                 }
                 do {
+                    let baselineReceiptData = self.readReplacementReceiptData()
+                    let baselineUpdatedAt = baselineReceiptData
+                        .flatMap(AppUpdateReplacementReceipt.parse)
+                        .flatMap(\.updatedAt)
                     let plan = try AppUpdateInstaller.prepare(
                         archiveURL: location,
                         release: activeRelease,
@@ -428,7 +478,11 @@ final class AppUpdateService: NSObject {
                     self.state = .installing(activeRelease)
                     self.onStateChange?(self.state)
                     try AppUpdateInstaller.schedule(plan: plan)
-                    self.scheduleInstallHandoffTimeout(for: activeRelease)
+                    self.startReceiptObservation(
+                        for: activeRelease,
+                        baselineUpdatedAt: baselineUpdatedAt,
+                        baselineReceiptData: baselineReceiptData
+                    )
                     NSApp.terminate(nil)
                 } catch let error as AppUpdateError {
                     self.finishInstall(.error(error.localizedDescription))
@@ -474,31 +528,90 @@ final class AppUpdateService: NSObject {
     }
 
     private func finishInstall(_ newState: AppUpdateState) {
-        installHandoffTimer?.invalidate()
-        installHandoffTimer = nil
+        stopReceiptObservation()
         state = newState
         onStateChange?(newState)
     }
 
-    private func scheduleInstallHandoffTimeout(for release: AppUpdateRelease) {
-        installHandoffTimer?.invalidate()
-        let timer = Timer(timeInterval: AppUpdatePresentationPolicy.installHandoffTimeout, repeats: false) { [weak self] _ in
+    private func readReplacementReceipt() -> AppUpdateReplacementReceipt? {
+        guard let data = readReplacementReceiptData() else { return nil }
+        return AppUpdateReplacementReceipt.parse(data)
+    }
+
+    private func readReplacementReceiptData() -> Data? {
+        try? Data(contentsOf: replacementReceiptURL)
+    }
+
+    private func stopReceiptObservation() {
+        receiptObservationGeneration &+= 1
+        receiptObservationTimer?.setEventHandler {}
+        receiptObservationTimer?.cancel()
+        receiptObservationTimer = nil
+    }
+
+    private func startReceiptObservation(
+        for release: AppUpdateRelease,
+        baselineUpdatedAt: Date?,
+        baselineReceiptData: Data?
+    ) {
+        stopReceiptObservation()
+        receiptObservationGeneration &+= 1
+        let generation = receiptObservationGeneration
+        let receiptURL = replacementReceiptURL
+        let queue = receiptObservationQueue
+        let deadline = Date().addingTimeInterval(AppUpdatePresentationPolicy.installHandoffTimeout)
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(250), leeway: .milliseconds(100))
+        timer.setEventHandler { [weak self] in
+            let receiptData = try? Data(contentsOf: receiptURL)
+            let receipt = receiptData.flatMap(AppUpdateReplacementReceipt.parse)
+            let decision: AppUpdateReceiptObservationDecision
+            if Date() >= deadline {
+                decision = .timedOut
+            } else {
+                decision = AppUpdateReceiptObservationPolicy.decision(
+                    for: receipt,
+                    receiptData: receiptData,
+                    activeReleaseVersion: release.version,
+                    baselineUpdatedAt: baselineUpdatedAt,
+                    baselineReceiptData: baselineReceiptData,
+                    now: Date()
+                )
+            }
+            guard decision != .continueObserving else { return }
             Task { @MainActor [weak self] in
-                guard let self,
-                      case .installing(let activeRelease) = self.state,
-                      activeRelease.version == release.version else { return }
-                let suffix: String
-                if let data = try? Data(contentsOf: self.replacementReceiptURL),
-                   let receipt = AppUpdateReplacementReceipt.parse(data) {
-                    suffix = receipt.displayMessage
-                } else {
-                    suffix = "替換 helper 未在期限內完成。"
-                }
-                self.finishInstall(.error("更新未完成：\(suffix)"))
+                self?.handleReceiptObservation(
+                    decision,
+                    release: release,
+                    generation: generation
+                )
             }
         }
-        installHandoffTimer = timer
-        RunLoop.main.add(timer, forMode: .common)
+        receiptObservationTimer = timer
+        timer.resume()
+    }
+
+    private func handleReceiptObservation(
+        _ decision: AppUpdateReceiptObservationDecision,
+        release: AppUpdateRelease,
+        generation: UInt64
+    ) {
+        guard generation == receiptObservationGeneration,
+              case .installing(let activeRelease) = state,
+              activeRelease.version == release.version else { return }
+        switch decision {
+        case .continueObserving:
+            return
+        case .failed(let message):
+            finishInstall(.error("更新未完成：\(message)"))
+        case .succeeded:
+            // A successful receipt can race the old process' termination and
+            // the next launch. It must stop observation without turning a
+            // completed hand-off into an error.
+            stopReceiptObservation()
+        case .timedOut:
+            finishInstall(.error("更新未完成：替換 helper 未在期限內完成。"))
+        }
     }
 }
 
