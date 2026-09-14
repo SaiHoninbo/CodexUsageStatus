@@ -565,18 +565,24 @@ final class AppUpdateService: NSObject {
         timer.setEventHandler { [weak self] in
             let receiptData = try? Data(contentsOf: receiptURL)
             let receipt = receiptData.flatMap(AppUpdateReplacementReceipt.parse)
+            let observedDecision = AppUpdateReceiptObservationPolicy.decision(
+                for: receipt,
+                receiptData: receiptData,
+                activeReleaseVersion: release.version,
+                baselineUpdatedAt: baselineUpdatedAt,
+                baselineReceiptData: baselineReceiptData,
+                now: Date()
+            )
             let decision: AppUpdateReceiptObservationDecision
-            if Date() >= deadline {
+            switch observedDecision {
+            case .failed, .succeeded:
+                // A terminal receipt wins even when it lands on the timeout
+                // boundary; the bounded timeout only applies to observation.
+                decision = observedDecision
+            case .continueObserving:
+                decision = Date() >= deadline ? .timedOut : .continueObserving
+            case .timedOut:
                 decision = .timedOut
-            } else {
-                decision = AppUpdateReceiptObservationPolicy.decision(
-                    for: receipt,
-                    receiptData: receiptData,
-                    activeReleaseVersion: release.version,
-                    baselineUpdatedAt: baselineUpdatedAt,
-                    baselineReceiptData: baselineReceiptData,
-                    now: Date()
-                )
             }
             guard decision != .continueObserving else { return }
             Task { @MainActor [weak self] in
