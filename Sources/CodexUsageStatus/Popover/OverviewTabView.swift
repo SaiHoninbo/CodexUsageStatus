@@ -4,57 +4,23 @@ import SwiftUI
 /// Historical Token detail remains isolated in History.
 extension UsagePopoverView {
     private struct ExecutionGroup: Identifiable {
-        let id: CodexExecutionScopeKey
+        let id: CodexExecutionKey
         let title: String
         let isRepository: Bool
-        let executions: [CodexExecutionProjection]
+        let primary: CodexExecutionProjection
+        let children: [CodexExecutionProjection]
     }
 
     private var executionGroups: [ExecutionGroup] {
-        let candidates = Dictionary(grouping: model.activeExecutions, by: \.scopeKey).map { key, rawExecutions in
-            let executions = CodexExecutionProjectionPolicy.sorted(rawExecutions)
-            return (key: key, title: executions.first?.groupName ?? "工作區身份未證明", isRepository: executions.first?.isRepository == true, executions: executions)
-        }
-        let titleCounts = Dictionary(grouping: candidates, by: { $0.title }).mapValues(\.count)
-        var duplicateOrdinals: [String: Int] = [:]
-        return candidates.sorted { lhs, rhs in
-            if lhs.title != rhs.title {
-                return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
-            }
-            let leftKey = scopeSortKey(lhs.key)
-            let rightKey = scopeSortKey(rhs.key)
-            return leftKey.localizedStandardCompare(rightKey) == .orderedAscending
-        }.map { candidate in
-            guard titleCounts[candidate.title, default: 0] > 1 else {
-                return ExecutionGroup(id: candidate.key, title: candidate.title, isRepository: candidate.isRepository, executions: candidate.executions)
-            }
-
-            let ordinal = (duplicateOrdinals[candidate.title] ?? 0) + 1
-            duplicateOrdinals[candidate.title] = ordinal
-            let suffix: String
-            if let workspace = candidate.executions.first?.workspaceDisplayName,
-               !workspace.isEmpty,
-               workspace != candidate.title {
-                suffix = workspace
-            } else if let digest = candidate.key.repositoryIdentityDigest,
-                      !digest.isEmpty {
-                suffix = String(digest.prefix(8))
-            } else {
-                suffix = "工作區 \(ordinal)"
-            }
-            return ExecutionGroup(
-                id: candidate.key,
-                title: "\(candidate.title) · \(suffix)",
-                isRepository: candidate.isRepository,
-                executions: candidate.executions
+        CodexActiveWorkPresentationPolicy.groups(for: model.activeExecutions).map {
+            ExecutionGroup(
+                id: $0.id,
+                title: $0.primary.groupName,
+                isRepository: $0.primary.isRepository,
+                primary: $0.primary,
+                children: $0.children
             )
         }
-    }
-
-    /// Sorting uses the opaque scope identity only for deterministic ordering;
-    /// raw roots never reach the rendered title.
-    private func scopeSortKey(_ key: CodexExecutionScopeKey) -> String {
-        "\(key.profileID?.uuidString ?? "default")|\(key.normalizedPhysicalRootPath)|\(key.repositoryIdentityDigest ?? "")"
     }
 
     var overviewTab: some View {
@@ -99,14 +65,26 @@ extension UsagePopoverView {
                                 .foregroundStyle(HUDColorPalette.sevenDay)
                             Text(group.title)
                                 .font(.caption.weight(.semibold))
-                            if group.executions.count > 1 {
-                                Text("(\(group.executions.count))")
-                                    .font(.caption2.monospacedDigit())
-                                    .foregroundStyle(HUDColorPalette.tertiaryText)
+                            if !group.children.isEmpty {
+                                Button {
+                                    if expandedActiveWorkKeys.contains(group.id) {
+                                        expandedActiveWorkKeys.remove(group.id)
+                                    } else {
+                                        expandedActiveWorkKeys.insert(group.id)
+                                    }
+                                } label: {
+                                    Label("\(group.children.count) 個代理執行中", systemImage: expandedActiveWorkKeys.contains(group.id) ? "chevron.down" : "chevron.right")
+                                        .font(.caption2.weight(.medium))
+                                        .foregroundStyle(HUDColorPalette.secondaryText)
+                                }
+                                .buttonStyle(.plain)
                             }
                         }
-                        ForEach(group.executions) { execution in
-                            executionRow(execution)
+                        executionRow(group.primary)
+                        if expandedActiveWorkKeys.contains(group.id) {
+                            ForEach(group.children) { execution in
+                                executionRow(execution, isChild: true)
+                            }
                         }
                     }
                     .padding(.vertical, 2)
@@ -121,16 +99,21 @@ extension UsagePopoverView {
 
     @ViewBuilder
     private func executionRow(_ execution: CodexExecutionProjection) -> some View {
+        executionRow(execution, isChild: false)
+    }
+
+    @ViewBuilder
+    private func executionRow(_ execution: CodexExecutionProjection, isChild: Bool) -> some View {
         TimelineView(.periodic(from: .now, by: 1)) { timeline in
-            executionRowContent(execution, now: timeline.date)
+            executionRowContent(execution, now: timeline.date, isChild: isChild)
         }
     }
 
     @ViewBuilder
-    private func executionRowContent(_ execution: CodexExecutionProjection, now: Date) -> some View {
+    private func executionRowContent(_ execution: CodexExecutionProjection, now: Date, isChild: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
-                Image(systemName: "bubble.left.and.bubble.right")
+                Image(systemName: isChild ? "person.2" : "bubble.left.and.bubble.right")
                     .foregroundStyle(HUDColorPalette.secondaryText)
                 Text(execution.chatName ?? "Chat 名稱未取得")
                     .font(.caption.weight(.semibold))
@@ -204,7 +187,7 @@ extension UsagePopoverView {
             .font(.caption2)
             .foregroundStyle(HUDColorPalette.tertiaryText)
         }
-        .padding(.leading, 8)
+        .padding(.leading, isChild ? 26 : 8)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(execution.chatName ?? "Chat 名稱未取得")，執行中")
         .accessibilityValue(model.estimatedExecution(for: execution, now: now)?.accessibilityText ?? "本機耗時推估資料不足")

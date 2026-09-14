@@ -29,6 +29,7 @@ struct UsagePopoverView: View {
     @State var isSyncExpanded = false
     @State var isUpdateExpanded = false
     @State var isMetadataExpanded = false
+    @State var expandedActiveWorkKeys: Set<CodexExecutionKey> = []
     @State private var autoExpandedUpdateVersion: String?
     @State var actionAcknowledgement: String?
     @State var actionAcknowledgementToken = UUID()

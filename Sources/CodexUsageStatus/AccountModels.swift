@@ -187,6 +187,9 @@ struct CodexExecutionProjection: Identifiable, Equatable, Sendable {
     var tokenTotal: Int64?
     var plan: TurnPlanSnapshot?
     var lastObservedAt: Date
+    /// Presentation-only parent/agent attribution. It is never consulted by
+    /// execution identity, terminal matching, admission, or liveness.
+    var presentationLineage: CodexLocalSessionLineage? = nil
 
     var id: CodexExecutionKey { key }
     /// An absent scope is an explicitly unproven identity, not an unnamed
@@ -195,6 +198,74 @@ struct CodexExecutionProjection: Identifiable, Equatable, Sendable {
     var isRepository: Bool { repositoryDisplayName != nil }
     var scopeKey: CodexExecutionScopeKey {
         CodexExecutionProjectionPolicy.scopeKey(for: self)
+    }
+}
+
+struct CodexActiveWorkPresentationGroup: Identifiable, Equatable, Sendable {
+    let primary: CodexExecutionProjection
+    let children: [CodexExecutionProjection]
+
+    var id: CodexExecutionKey { primary.key }
+}
+
+enum CodexActiveWorkPresentationPolicy {
+    /// Groups only when a child explicitly names a parent execution that is
+    /// present in the same physical/profile scope. Orphans and unknown
+    /// lineage remain standalone; titles, timestamps, repository names, and
+    /// roots alone never imply a parent/child relationship.
+    static func groups(for executions: [CodexExecutionProjection]) -> [CodexActiveWorkPresentationGroup] {
+        let sorted = CodexExecutionProjectionPolicy.sorted(executions)
+        let byKey = Dictionary(uniqueKeysWithValues: sorted.map { ($0.key, $0) })
+        let primaries = sorted.filter { execution in
+            guard let lineage = execution.presentationLineage,
+                  lineage.isChildExecution else { return true }
+            return parent(for: execution, in: sorted) == nil
+        }
+
+        return primaries.map { primary in
+            let children = sorted.filter { child in
+                guard child.key != primary.key,
+                      let lineage = child.presentationLineage,
+                      lineage.isChildExecution,
+                      lineage.parentThreadID == primary.key.threadID,
+                      isCompatible(child, with: primary) else {
+                    return false
+                }
+                return byKey[child.key] != nil
+            }
+            return CodexActiveWorkPresentationGroup(
+                primary: primary,
+                children: CodexExecutionProjectionPolicy.sorted(children)
+            )
+        }
+    }
+
+    private static func parent(
+        for child: CodexExecutionProjection,
+        in executions: [CodexExecutionProjection]
+    ) -> CodexExecutionProjection? {
+        guard let lineage = child.presentationLineage,
+              lineage.isChildExecution,
+              let parentThreadID = lineage.parentThreadID else { return nil }
+        return executions.first {
+            $0.key.threadID == parentThreadID
+                && $0.key.profileID == child.key.profileID
+                && $0.key.normalizedPhysicalRootPath == child.key.normalizedPhysicalRootPath
+                && (child.key.repositoryIdentityDigest == nil
+                    || $0.key.repositoryIdentityDigest == nil
+                    || child.key.repositoryIdentityDigest == $0.key.repositoryIdentityDigest)
+        }
+    }
+
+    private static func isCompatible(
+        _ child: CodexExecutionProjection,
+        with parent: CodexExecutionProjection
+    ) -> Bool {
+        child.key.profileID == parent.key.profileID
+            && child.key.normalizedPhysicalRootPath == parent.key.normalizedPhysicalRootPath
+            && (child.key.repositoryIdentityDigest == nil
+                || parent.key.repositoryIdentityDigest == nil
+                || child.key.repositoryIdentityDigest == parent.key.repositoryIdentityDigest)
     }
 }
 

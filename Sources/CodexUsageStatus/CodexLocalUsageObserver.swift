@@ -53,6 +53,70 @@ struct CodexLocalTurnActivityEvent: Equatable, Sendable {
     /// Safe, metadata-only session identity derived from the rollout head.
     /// Raw paths and repository URLs are intentionally never exposed here.
     var sessionIdentity: CodexLocalSessionIdentity? = nil
+    /// Presentation-only lineage. This never participates in execution
+    /// identity, cursor persistence, admission, or terminal matching.
+    var presentationLineage: CodexLocalSessionLineage? = nil
+
+    // Presentation attribution is intentionally not part of event identity.
+    // A later session_meta line may enrich an already-observed execution, but
+    // that must never change lifecycle/token reconciliation semantics.
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.profileID == rhs.profileID
+            && lhs.physicalRootURL == rhs.physicalRootURL
+            && lhs.threadID == rhs.threadID
+            && lhs.turnID == rhs.turnID
+            && lhs.kind == rhs.kind
+            && lhs.startedAt == rhs.startedAt
+            && lhs.completedAt == rhs.completedAt
+            && lhs.durationSeconds == rhs.durationSeconds
+            && lhs.turnTokenTotal == rhs.turnTokenTotal
+            && lhs.observedAt == rhs.observedAt
+            && lhs.programName == rhs.programName
+            && lhs.sessionIdentity == rhs.sessionIdentity
+    }
+}
+
+enum CodexLocalSessionThreadSource: String, Equatable, Sendable {
+    case user
+    case subagent
+    case guardianReview
+    case agentCreatedThread
+    case unknown
+
+    static func parse(_ raw: String?) -> Self {
+        switch raw {
+        case "user": return .user
+        case "subagent": return .subagent
+        case "guardian_review", "guardianReview": return .guardianReview
+        case "agent_created_thread", "agentCreatedThread": return .agentCreatedThread
+        default: return .unknown
+        }
+    }
+}
+
+enum CodexLocalSessionRelationKind: String, Equatable, Sendable {
+    case threadSpawn
+    case guardian
+    case unknown
+}
+
+/// Ephemeral parent/agent attribution used only by the presentation layer.
+/// It is intentionally excluded from `CodexLocalSessionIdentity` and cursors.
+struct CodexLocalSessionLineage: Equatable, Sendable {
+    let parentThreadID: String?
+    let threadSource: CodexLocalSessionThreadSource
+    let relationKind: CodexLocalSessionRelationKind
+    let agentRole: String?
+
+    var isChildExecution: Bool {
+        parentThreadID != nil
+            && (threadSource == .subagent || threadSource == .guardianReview)
+    }
+}
+
+struct CodexLocalSessionMetadata: Sendable {
+    let identity: CodexLocalSessionIdentity?
+    let lineage: CodexLocalSessionLineage?
 }
 
 enum CodexLocalSessionIdentityKind: String, Codable, Equatable, Sendable {
@@ -228,11 +292,54 @@ enum CodexLocalUsageArtifactParser {
         let id: String?
         let cwd: String?
         let git: GitMetadata?
+        let parentThreadID: String?
+        let threadSource: String?
+        let source: SessionMetaSource?
+        let agentRole: String?
 
         enum CodingKeys: String, CodingKey {
             case id
             case cwd
             case git
+            case parentThreadID = "parent_thread_id"
+            case threadSource = "thread_source"
+            case source
+            case agentRole = "agent_role"
+        }
+
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            id = try values.decodeIfPresent(String.self, forKey: .id)
+            cwd = try values.decodeIfPresent(String.self, forKey: .cwd)
+            git = try values.decodeIfPresent(GitMetadata.self, forKey: .git)
+            parentThreadID = try values.decodeIfPresent(String.self, forKey: .parentThreadID)
+            threadSource = try values.decodeIfPresent(String.self, forKey: .threadSource)
+            source = try? values.decode(SessionMetaSource.self, forKey: .source)
+            agentRole = try values.decodeIfPresent(String.self, forKey: .agentRole)
+        }
+    }
+
+    private struct SessionMetaSource: Decodable {
+        let subagent: SessionMetaSubagent?
+    }
+
+    private struct SessionMetaSubagent: Decodable {
+        let other: String?
+        let threadSpawn: SessionMetaThreadSpawn?
+
+        enum CodingKeys: String, CodingKey {
+            case other
+            case threadSpawn = "thread_spawn"
+        }
+    }
+
+    private struct SessionMetaThreadSpawn: Decodable {
+        let parentThreadID: String?
+        let agentRole: String?
+
+        enum CodingKeys: String, CodingKey {
+            case parentThreadID = "parent_thread_id"
+            case agentRole = "agent_role"
         }
     }
 
@@ -287,7 +394,7 @@ enum CodexLocalUsageArtifactParser {
         parseSessionIdentity(data)?.threadID
     }
 
-    static func parseSessionIdentity(_ data: Data) -> CodexLocalSessionIdentity? {
+    static func parseSessionMetadata(_ data: Data) -> CodexLocalSessionMetadata? {
         guard let envelope = try? JSONDecoder().decode(SessionMetaEnvelope.self, from: data),
               envelope.type == "session_meta",
               let payload = envelope.payload,
@@ -298,13 +405,41 @@ enum CodexLocalUsageArtifactParser {
         let repository = Self.safeRepositoryName(from: payload.git?.repositoryURL)
         let repositoryIdentityDigest = Self.repositoryIdentityDigest(from: payload.git?.repositoryURL)
         let kind: CodexLocalSessionIdentityKind = repository != nil ? .repository : (workspace != nil ? .workspace : .unknown)
-        return CodexLocalSessionIdentity(
+        let identity = CodexLocalSessionIdentity(
             threadID: id,
             repositoryDisplayName: repository,
             workspaceDisplayName: workspace,
             kind: kind,
             repositoryIdentityDigest: repositoryIdentityDigest
         )
+        let nested = payload.source?.subagent
+        let source: CodexLocalSessionThreadSource = {
+            if let explicit = payload.threadSource {
+                return CodexLocalSessionThreadSource.parse(explicit)
+            }
+            if nested?.other == "guardian" { return .guardianReview }
+            if nested?.threadSpawn != nil { return .subagent }
+            return .unknown
+        }()
+        let relation: CodexLocalSessionRelationKind =
+            nested?.other == "guardian" ? .guardian : (nested?.threadSpawn != nil ? .threadSpawn : .unknown)
+        let parent = normalizedMetadataValue(payload.parentThreadID ?? nested?.threadSpawn?.parentThreadID, maxLength: 256)
+        let role = normalizedMetadataValue(payload.agentRole ?? nested?.threadSpawn?.agentRole, maxLength: 128)
+        let lineage: CodexLocalSessionLineage? = (parent != nil || source != .unknown || relation != .unknown)
+            ? CodexLocalSessionLineage(parentThreadID: parent, threadSource: source, relationKind: relation, agentRole: role)
+            : nil
+        return CodexLocalSessionMetadata(identity: identity, lineage: lineage)
+    }
+
+    static func parseSessionIdentity(_ data: Data) -> CodexLocalSessionIdentity? {
+        parseSessionMetadata(data)?.identity
+    }
+
+    private static func normalizedMetadataValue(_ value: String?, maxLength: Int) -> String? {
+        guard let value else { return nil }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return nil }
+        return String(normalized.prefix(maxLength))
     }
 
     private static func safeWorkspaceName(from raw: String?) -> String? {
@@ -771,6 +906,7 @@ final class CodexLocalUsageObserver {
     typealias TurnActivityHandler = (CodexLocalTurnActivityEvent) -> Void
     typealias ActiveExecutionReconciliationHandler = (CodexLocalActiveExecutionReconciliation) -> Void
     typealias SessionIdentityReader = @Sendable (URL) -> CodexLocalSessionIdentity?
+    typealias SessionMetadataReader = @Sendable (URL) -> CodexLocalSessionMetadata?
 
     private let cursorURL: URL
     private var roots: [CodexLocalUsageObservationRoot] = []
@@ -787,6 +923,7 @@ final class CodexLocalUsageObserver {
     private var turnActivityHandler: TurnActivityHandler?
     private var activeExecutionReconciliationHandler: ActiveExecutionReconciliationHandler?
     private let sessionIdentityReader: SessionIdentityReader
+    private let sessionMetadataReader: SessionMetadataReader
     private var hasStarted = false
     private var rootsGeneration: UInt64 = 0
     private var lifecycleGeneration: UInt64 = 0
@@ -798,14 +935,22 @@ final class CodexLocalUsageObserver {
         turnCompletionHandler: TurnCompletionHandler? = nil,
         turnActivityHandler: TurnActivityHandler? = nil,
         activeExecutionReconciliationHandler: ActiveExecutionReconciliationHandler? = nil,
-        sessionIdentityReader: @escaping SessionIdentityReader = { CodexLocalUsageObserver.sessionIdentity(for: $0) }
+        sessionIdentityReader: SessionIdentityReader? = nil,
+        sessionMetadataReader: SessionMetadataReader? = nil
     ) {
         self.cursorURL = cursorURL
         self.handler = handler
         self.turnCompletionHandler = turnCompletionHandler
         self.turnActivityHandler = turnActivityHandler
         self.activeExecutionReconciliationHandler = activeExecutionReconciliationHandler
-        self.sessionIdentityReader = sessionIdentityReader
+        let identityReader = sessionIdentityReader ?? { CodexLocalUsageObserver.sessionIdentity(for: $0) }
+        self.sessionIdentityReader = identityReader
+        self.sessionMetadataReader = sessionMetadataReader ?? {
+            if sessionIdentityReader == nil {
+                return CodexLocalUsageObserver.sessionMetadata(for: $0)
+            }
+            return CodexLocalSessionMetadata(identity: identityReader($0), lineage: nil)
+        }
         loadCursors()
     }
 
@@ -964,13 +1109,13 @@ final class CodexLocalUsageObserver {
         let lifecycleGeneration = lifecycleGeneration
         let observationEpoch = observationEpoch
         let scanGeneration = scanGeneration
-        let sessionIdentityReader = self.sessionIdentityReader
-        Task.detached(priority: .utility) { [roots, cursors, seededPaths, knownRolloutPaths, fastPollPaths, shouldDiscoverNewRollouts, rootsGeneration, lifecycleGeneration, observationEpoch, scanGeneration, sessionIdentityReader] in
+        let sessionMetadataReader = self.sessionMetadataReader
+        Task.detached(priority: .utility) { [roots, cursors, seededPaths, knownRolloutPaths, fastPollPaths, shouldDiscoverNewRollouts, rootsGeneration, lifecycleGeneration, observationEpoch, scanGeneration, sessionMetadataReader] in
             let result = Self.scanRoots(
                 roots,
                 cursors: cursors,
                 seededPaths: seededPaths,
-                sessionIdentityReader: sessionIdentityReader,
+                sessionMetadataReader: sessionMetadataReader,
                 knownRolloutPaths: knownRolloutPaths,
                 discoverNewRollouts: shouldDiscoverNewRollouts,
                 fastPollPaths: fastPollPaths,
@@ -1027,7 +1172,8 @@ final class CodexLocalUsageObserver {
         _ roots: [CodexLocalUsageObservationRoot],
         cursors: [String: CodexLocalUsageCursor],
         seededPaths: Set<String>,
-        sessionIdentityReader: @escaping SessionIdentityReader = { CodexLocalUsageObserver.sessionIdentity(for: $0) },
+        sessionIdentityReader: SessionIdentityReader? = nil,
+        sessionMetadataReader: SessionMetadataReader? = nil,
         knownRolloutPaths: Set<String>? = nil,
         discoverNewRollouts: Bool = true,
         discoveryProbe: @escaping @Sendable (CodexLocalUsageDiscoveryProbeEvent, URL) -> Void = { _, _ in },
@@ -1037,6 +1183,12 @@ final class CodexLocalUsageObserver {
         statePathsAreCanonical: Bool = false
     ) -> CodexLocalUsageScanResult {
         let fileManager = FileManager.default
+        let metadataReader: SessionMetadataReader = sessionMetadataReader ?? {
+            if let sessionIdentityReader {
+                return CodexLocalSessionMetadata(identity: sessionIdentityReader($0), lineage: nil)
+            }
+            return CodexLocalUsageObserver.sessionMetadata(for: $0)
+        }
         func canonicalPath(_ path: String) -> String {
             URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
         }
@@ -1195,21 +1347,23 @@ final class CodexLocalUsageObserver {
                 continue
             }
 
-            let headIdentity: CodexLocalSessionIdentity?
+            let headMetadata: CodexLocalSessionMetadata?
             if metadataUnchanged, let cursor {
                         // A nil identity is also a resolved result. Keeping
                         // that distinction prevents an unproven but stable
                         // rollout from paying the head-read cost forever.
-                        headIdentity = cursor.sessionIdentity
+                        headMetadata = CodexLocalSessionMetadata(identity: cursor.sessionIdentity, lineage: nil)
             } else {
                 sessionIdentityReadCount += 1
-                headIdentity = sessionIdentityReader(fileURL)
+                headMetadata = metadataReader(fileURL)
             }
+            let headIdentity = headMetadata?.identity
                     // A rollout is bound to its first session_meta identity.
                     // Any later identity change makes the entire file
                     // ambiguous; subsequent events may still be observed for
                     // liveness, but can never receive Repo/Chat provenance.
             var canonicalIdentity = headIdentity
+            var canonicalLineage = headMetadata?.lineage
             var identityIsAmbiguous = cursor?.identityIsAmbiguous ?? false
             if let headIdentity,
                let cursorThreadID = cursor?.threadID,
@@ -1277,13 +1431,18 @@ final class CodexLocalUsageObserver {
                             if let sessionThreadID = CodexLocalUsageArtifactParser.parseSessionThreadID(lineData) {
                                 threadID = sessionThreadID
                                 cursor?.threadID = sessionThreadID
-                                if let observedIdentity = CodexLocalUsageArtifactParser.parseSessionIdentity(lineData) {
+                                if let observedMetadata = CodexLocalUsageArtifactParser.parseSessionMetadata(lineData) {
+                                    let observedIdentity = observedMetadata.identity
                                     if let canonicalIdentity {
                                         if observedIdentity != canonicalIdentity {
                                             identityIsAmbiguous = true
                                         }
                                     } else {
                                         canonicalIdentity = observedIdentity
+                                        canonicalLineage = observedMetadata.lineage
+                                    }
+                                    if canonicalLineage == nil {
+                                        canonicalLineage = observedMetadata.lineage
                                     }
                                 }
                                 cursor?.identityIsAmbiguous = identityIsAmbiguous
@@ -1308,7 +1467,8 @@ final class CodexLocalUsageObserver {
                                     turnTokenTotal: record.turnTokenTotal,
                                     observedAt: record.observedAt,
                                     programName: provenIdentity == nil ? nil : CodexLocalSessionIndex.threadName(for: record.threadID, in: root.codexHomeURL),
-                                    sessionIdentity: provenIdentity
+                                    sessionIdentity: provenIdentity,
+                                    presentationLineage: canonicalLineage
                                 ))
                             }
                             if let activity = CodexLocalUsageArtifactParser.parseTurnActivity(lineData, threadID: threadID) {
@@ -1349,7 +1509,8 @@ final class CodexLocalUsageObserver {
                                     turnTokenTotal: nil,
                                     observedAt: activity.observedAt,
                                     programName: programName,
-                                    sessionIdentity: provenIdentity
+                                    sessionIdentity: provenIdentity,
+                                    presentationLineage: canonicalLineage
                                 ))
                             }
                             if let completion = CodexLocalUsageArtifactParser.parseTurnCompletion(
@@ -1518,12 +1679,16 @@ final class CodexLocalUsageObserver {
     }
 
     private nonisolated static func sessionIdentity(for fileURL: URL) -> CodexLocalSessionIdentity? {
+        sessionMetadata(for: fileURL)?.identity
+    }
+
+    private nonisolated static func sessionMetadata(for fileURL: URL) -> CodexLocalSessionMetadata? {
         guard let handle = try? FileHandle(forReadingFrom: fileURL) else { return nil }
         defer { try? handle.close() }
         guard let data = try? handle.read(upToCount: 128 * 1024) else { return nil }
         for line in data.split(separator: 0x0A, omittingEmptySubsequences: false) {
-            if let identity = CodexLocalUsageArtifactParser.parseSessionIdentity(Data(line)) {
-                return identity
+            if let metadata = CodexLocalUsageArtifactParser.parseSessionMetadata(Data(line)) {
+                return metadata
             }
         }
         return nil

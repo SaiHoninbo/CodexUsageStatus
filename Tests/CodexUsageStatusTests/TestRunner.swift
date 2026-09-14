@@ -131,6 +131,7 @@ struct CodexUsageStatusTests {
             ("token activity null fields", testTokenActivityNullFields),
             ("token activity presentation", testTokenActivityPresentation),
             ("local Codex usage artifact parser", testLocalCodexUsageArtifactParser),
+            ("session lineage presentation metadata", testSessionLineagePresentationMetadata),
             ("Repo Chat identity reconciliation", testRepoChatIdentityReconciliation),
             ("desktop activity authority", testDesktopActivityAuthority),
             ("local token usage ledger", testLocalTokenUsageLedger),
@@ -161,6 +162,7 @@ struct CodexUsageStatusTests {
             ("turn notification content policy", testTurnNotificationContentPolicy),
             ("turn plan notification policy", testTurnPlanNotificationPolicy),
             ("execution projection identity and ordering", testExecutionProjectionIdentityAndOrdering),
+            ("active work presentation grouping", testActiveWorkPresentationGrouping),
             ("active execution reconciliation policy", testActiveExecutionReconciliationPolicy),
             ("execution display truthfulness policy", testExecutionDisplayTruthfulnessPolicy),
             ("observer execution estimation", testObserverExecutionEstimation),
@@ -1503,6 +1505,42 @@ struct CodexUsageStatusTests {
             repositoryIdentityDigest: repoA.repositoryIdentityDigest
         )
         try expect(keyA != keyB, "simultaneous worktrees remain separate execution identities")
+    }
+
+    private static func testSessionLineagePresentationMetadata() throws {
+        let parent = Data(#"{"type":"session_meta","payload":{"id":"parent-thread","thread_source":"user","cwd":"/tmp/Usage","git":{"repository_url":"https://github.com/example/Usage.git"}}}"#.utf8)
+        let parentMetadata = try unwrap(
+            CodexLocalUsageArtifactParser.parseSessionMetadata(parent),
+            "top-level session metadata"
+        )
+        try expect(parentMetadata.lineage?.threadSource == .user, "top-level session source is preserved")
+        try expect(parentMetadata.lineage?.isChildExecution == false, "top-level session is not presented as a child")
+
+        let child = Data(#"{"type":"session_meta","payload":{"id":"child-thread","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-thread","agent_role":"verifier"}}},"cwd":"/tmp/Usage","git":{"repository_url":"https://github.com/example/Usage.git"}}}"#.utf8)
+        let childMetadata = try unwrap(
+            CodexLocalUsageArtifactParser.parseSessionMetadata(child),
+            "subagent session metadata"
+        )
+        try expect(childMetadata.lineage?.parentThreadID == "parent-thread", "subagent parent thread is read from explicit metadata")
+        try expect(childMetadata.lineage?.threadSource == .subagent, "subagent source is allowlisted")
+        try expect(childMetadata.lineage?.relationKind == .threadSpawn, "thread spawn relation is preserved")
+        try expect(childMetadata.lineage?.agentRole == "verifier", "bounded agent role is preserved")
+        try expect(childMetadata.lineage?.isChildExecution == true, "explicit subagent lineage is child execution")
+
+        let guardian = Data(#"{"type":"session_meta","payload":{"id":"guardian-thread","parent_thread_id":"parent-thread","thread_source":"guardian_review","source":{"subagent":{"other":"guardian"}},"cwd":"/tmp/Usage"}}"#.utf8)
+        let guardianMetadata = try unwrap(
+            CodexLocalUsageArtifactParser.parseSessionMetadata(guardian),
+            "guardian session metadata"
+        )
+        try expect(guardianMetadata.lineage?.relationKind == .guardian, "guardian relation is preserved")
+        try expect(guardianMetadata.lineage?.isChildExecution == true, "guardian with an explicit parent is a child execution")
+
+        let malformedSource = Data(#"{"type":"session_meta","payload":{"id":"unknown-thread","source":"user","cwd":"/tmp/Usage"}}"#.utf8)
+        let unknownMetadata = try unwrap(
+            CodexLocalUsageArtifactParser.parseSessionMetadata(malformedSource),
+            "metadata with an unrelated source shape"
+        )
+        try expect(unknownMetadata.lineage == nil, "unknown source shape does not invent lineage")
     }
 
     private static func testDesktopActivityAuthority() throws {
@@ -2874,6 +2912,48 @@ struct CodexUsageStatusTests {
         try expect(newer.scopeKey != sameRemoteOtherWorktree.scopeKey, "same remote in another physical worktree remains a distinct UI scope")
         let unproven = CodexExecutionProjection(key: CodexExecutionKey(profileID: nil, normalizedPhysicalRootPath: "/tmp/unknown", threadID: "thread-unknown", turnID: "turn-unknown"), repositoryDisplayName: nil, workspaceDisplayName: nil, chatName: nil, startedAt: Date(timeIntervalSince1970: 100), tokenTotal: nil, plan: nil, lastObservedAt: Date(timeIntervalSince1970: 100))
         try expect(unproven.groupName == "工作區身份未證明", "unproven scope is presented explicitly instead of as an unnamed workspace")
+    }
+
+    private static func testActiveWorkPresentationGrouping() throws {
+        let root = "/tmp/presentation-worktree"
+        let parent = CodexExecutionProjection(
+            key: CodexExecutionKey(profileID: nil, normalizedPhysicalRootPath: root, threadID: "parent-thread", turnID: "parent-turn"),
+            repositoryDisplayName: "Usage",
+            workspaceDisplayName: "Usage",
+            chatName: "User Chat",
+            startedAt: Date(timeIntervalSince1970: 200),
+            tokenTotal: 10,
+            plan: nil,
+            lastObservedAt: Date(timeIntervalSince1970: 200),
+            presentationLineage: CodexLocalSessionLineage(parentThreadID: nil, threadSource: .user, relationKind: .unknown, agentRole: nil)
+        )
+        let child = CodexExecutionProjection(
+            key: CodexExecutionKey(profileID: nil, normalizedPhysicalRootPath: root, threadID: "child-thread", turnID: "child-turn"),
+            repositoryDisplayName: "Usage",
+            workspaceDisplayName: "Usage",
+            chatName: "Chat 名稱未取得",
+            startedAt: Date(timeIntervalSince1970: 210),
+            tokenTotal: 20,
+            plan: nil,
+            lastObservedAt: Date(timeIntervalSince1970: 210),
+            presentationLineage: CodexLocalSessionLineage(parentThreadID: "parent-thread", threadSource: .subagent, relationKind: .threadSpawn, agentRole: "verifier")
+        )
+        let orphan = CodexExecutionProjection(
+            key: CodexExecutionKey(profileID: nil, normalizedPhysicalRootPath: root, threadID: "orphan-thread", turnID: "orphan-turn"),
+            repositoryDisplayName: "Usage",
+            workspaceDisplayName: "Usage",
+            chatName: "Guardian",
+            startedAt: Date(timeIntervalSince1970: 220),
+            tokenTotal: nil,
+            plan: nil,
+            lastObservedAt: Date(timeIntervalSince1970: 220),
+            presentationLineage: CodexLocalSessionLineage(parentThreadID: "missing-parent", threadSource: .guardianReview, relationKind: .guardian, agentRole: nil)
+        )
+        let groups = CodexActiveWorkPresentationPolicy.groups(for: [child, orphan, parent])
+        let parentGroup = try unwrap(groups.first(where: { $0.primary.key == parent.key }), "parent presentation group")
+        try expect(parentGroup.children.map(\.key) == [child.key], "explicit child is nested under its proven parent")
+        try expect(groups.contains(where: { $0.primary.key == orphan.key && $0.children.isEmpty }), "orphan child remains a standalone row")
+        try expect(groups.count == 2, "two top-level rows remain visible for one chat plus one orphan")
     }
 
     private static func testActiveExecutionReconciliationPolicy() throws {

@@ -1371,7 +1371,8 @@ final class UsageViewModel: ObservableObject {
                 startedAt: event.startedAt ?? event.observedAt,
                 tokenTotal: event.turnTokenTotal,
                 plan: nil,
-                lastObservedAt: event.observedAt
+                lastObservedAt: event.observedAt,
+                presentationLineage: event.presentationLineage
             )
         }
 
@@ -1389,6 +1390,9 @@ final class UsageViewModel: ObservableObject {
             if let identity = event.sessionIdentity {
                 activeExecutions[index].repositoryDisplayName = identity.repositoryDisplayName ?? activeExecutions[index].repositoryDisplayName
                 activeExecutions[index].workspaceDisplayName = identity.workspaceDisplayName ?? activeExecutions[index].workspaceDisplayName
+            }
+            if let lineage = event.presentationLineage {
+                activeExecutions[index].presentationLineage = lineage
             }
         }
 
