@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var rapidDrainEventObservation: AnyCancellable?
     private var statusItemUpdateTask: Task<Void, Never>?
     private var terminationReplyPending = false
+    private var terminationReplySent = false
+    private var terminationReplyWatchdog: DispatchWorkItem?
     private var floatingHUD: FloatingHUDPanelController!
     private var rapidDrainAnimator: RapidDrainStatusItemAnimator!
     private let popoverSelectionController = PopoverSelectionController()
@@ -116,11 +118,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminationReplyPending else { return .terminateNow }
         terminationReplyPending = true
+        terminationReplySent = false
+        let watchdog = DispatchWorkItem { [weak self] in
+            self?.replyToTerminationRequest()
+        }
+        terminationReplyWatchdog = watchdog
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + .nanoseconds(Int(TerminationFlushPolicy.replyTimeoutNanoseconds)),
+            execute: watchdog
+        )
         Task { @MainActor [weak self] in
-            await self?.model?.prepareForTermination()
-            NSApp.reply(toApplicationShouldTerminate: true)
+            guard let self else { return }
+            await self.model?.prepareForTermination()
+            self.replyToTerminationRequest()
         }
         return .terminateLater
+    }
+
+    /// Replies exactly once and never lets an auxiliary shutdown task keep
+    /// AppKit (and therefore the updater helper) waiting indefinitely.
+    private func replyToTerminationRequest() {
+        guard terminationReplyPending, !terminationReplySent else { return }
+        terminationReplySent = true
+        terminationReplyWatchdog?.cancel()
+        terminationReplyWatchdog = nil
+        NSApp.reply(toApplicationShouldTerminate: true)
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {

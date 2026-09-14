@@ -5088,7 +5088,7 @@ struct CodexUsageStatusTests {
 
         let artifactURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("outputs/CodexUsageStatus.app.zip")
-        let expectedArtifactVersion = "2.4.98"
+        let expectedArtifactVersion = "2.4.99"
         let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, expectedArtifactVersion])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 
@@ -5508,6 +5508,7 @@ struct CodexUsageStatusTests {
 
     private static func testBoundedTerminationFlush() throws {
         try expect(TerminationFlushPolicy.timeoutNanoseconds == 500_000_000, "termination flush is bounded to 500ms")
+        try expect(TerminationFlushPolicy.replyTimeoutNanoseconds == 2_000_000_000, "AppKit termination reply has a bounded 2s watchdog")
     }
 
     private static func testPersistenceWriteCoordinator() async throws {

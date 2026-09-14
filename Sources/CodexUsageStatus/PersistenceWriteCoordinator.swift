@@ -2,6 +2,11 @@ import Foundation
 
 enum TerminationFlushPolicy {
     static let timeoutNanoseconds: UInt64 = 500_000_000
+    /// AppKit must receive a termination reply even if an unrelated shutdown
+    /// callback or persistence task stalls. The replacement helper observes
+    /// the process exit independently, so this watchdog fails closed after a
+    /// short bounded grace period instead of holding the old bundle forever.
+    static let replyTimeoutNanoseconds: UInt64 = 2_000_000_000
 }
 
 /// Serializes local persistence without blocking the main actor. Writes are
