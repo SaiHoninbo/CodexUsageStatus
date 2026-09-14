@@ -1,5 +1,31 @@
 import Foundation
 
+/// Coordinates the termination reply across AppKit's main-thread handshake
+/// and the independent watchdog queue. AppKit can wait inside a nested
+/// termination run loop, so a main-queue watchdog is not reliable here.
+final class TerminationReplyGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var didReply = false
+    private let reply: @Sendable () -> Void
+
+    init(reply: @escaping @Sendable () -> Void) {
+        self.reply = reply
+    }
+
+    @discardableResult
+    func replyOnce() -> Bool {
+        lock.lock()
+        guard !didReply else {
+            lock.unlock()
+            return false
+        }
+        didReply = true
+        lock.unlock()
+        reply()
+        return true
+    }
+}
+
 enum TerminationFlushPolicy {
     static let timeoutNanoseconds: UInt64 = 500_000_000
     /// AppKit must receive a termination reply even if an unrelated shutdown

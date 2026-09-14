@@ -211,6 +211,7 @@ struct CodexUsageStatusTests {
             ,("App Server replacement admission", testAppServerReplacementAdmission)
             ,("managed worker admission", testManagedWorkerAdmission)
             ,("bounded termination flush", testBoundedTerminationFlush)
+            ,("termination reply gate", testTerminationReplyGate)
         ]
 
         var failures = 0
@@ -5589,6 +5590,21 @@ struct CodexUsageStatusTests {
     private static func testBoundedTerminationFlush() throws {
         try expect(TerminationFlushPolicy.timeoutNanoseconds == 500_000_000, "termination flush is bounded to 500ms")
         try expect(TerminationFlushPolicy.replyTimeoutNanoseconds == 2_000_000_000, "AppKit termination reply has a bounded 2s watchdog")
+    }
+
+    private static func testTerminationReplyGate() throws {
+        let counter = LockedCounter()
+        let gate = TerminationReplyGate { counter.increment() }
+        try expect(gate.replyOnce(), "termination reply gate sends the first reply")
+        try expect(!gate.replyOnce(), "termination reply gate suppresses duplicate replies")
+        try expect(counter.value == 1, "termination reply gate invokes its callback exactly once")
+
+        let concurrentCounter = LockedCounter()
+        let concurrentGate = TerminationReplyGate { concurrentCounter.increment() }
+        DispatchQueue.concurrentPerform(iterations: 64) { _ in
+            _ = concurrentGate.replyOnce()
+        }
+        try expect(concurrentCounter.value == 1, "termination reply gate remains exactly-once under concurrent races")
     }
 
     private static func testPersistenceWriteCoordinator() async throws {

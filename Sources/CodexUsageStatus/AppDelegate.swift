@@ -13,7 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var rapidDrainEventObservation: AnyCancellable?
     private var statusItemUpdateTask: Task<Void, Never>?
     private var terminationReplyPending = false
-    private var terminationReplySent = false
+    private var terminationReplyGate: TerminationReplyGate?
     private var terminationReplyWatchdog: DispatchWorkItem?
     private var floatingHUD: FloatingHUDPanelController!
     private var rapidDrainAnimator: RapidDrainStatusItemAnimator!
@@ -117,13 +117,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminationReplyPending else { return .terminateNow }
+        guard let app = NSApp else { return .terminateNow }
         terminationReplyPending = true
-        terminationReplySent = false
-        let watchdog = DispatchWorkItem { [weak self] in
-            self?.replyToTerminationRequest()
+        let replySelector = #selector(NSApplication.reply(toApplicationShouldTerminate:))
+        let gate = TerminationReplyGate {
+            // This callback intentionally runs on the watchdog queue. The
+            // main queue may be inside AppKit's nested termination handshake.
+            app.perform(replySelector, with: NSNumber(value: true))
+        }
+        terminationReplyGate = gate
+        let watchdog = DispatchWorkItem {
+            _ = gate.replyOnce()
         }
         terminationReplyWatchdog = watchdog
-        DispatchQueue.main.asyncAfter(
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(
             deadline: .now() + .nanoseconds(Int(TerminationFlushPolicy.replyTimeoutNanoseconds)),
             execute: watchdog
         )
@@ -138,11 +145,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Replies exactly once and never lets an auxiliary shutdown task keep
     /// AppKit (and therefore the updater helper) waiting indefinitely.
     private func replyToTerminationRequest() {
-        guard terminationReplyPending, !terminationReplySent else { return }
-        terminationReplySent = true
+        guard terminationReplyPending, let gate = terminationReplyGate else { return }
+        guard gate.replyOnce() else { return }
         terminationReplyWatchdog?.cancel()
         terminationReplyWatchdog = nil
-        NSApp.reply(toApplicationShouldTerminate: true)
+        terminationReplyGate = nil
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
