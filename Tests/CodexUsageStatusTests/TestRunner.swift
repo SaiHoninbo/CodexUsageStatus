@@ -4676,11 +4676,15 @@ struct CodexUsageStatusTests {
         return String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
     }
 
-    private static func runToolStatus(_ executable: String, _ arguments: [String]) throws -> Int32 {
+    private static func runToolStatus(
+        _ executable: String,
+        _ arguments: [String],
+        environment: [String: String] = [:]
+    ) throws -> Int32 {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
-        process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]
+        process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"].merging(environment) { _, override in override }
         try process.run()
         process.waitUntilExit()
         return process.terminationStatus
@@ -5396,6 +5400,59 @@ struct CodexUsageStatusTests {
         let retiredSigningValidatorScript = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("script/validate_release_signing_identity.sh")
         try expect(!FileManager.default.fileExists(atPath: retiredSigningValidatorScript.path), "stable-identity release validator is retired")
+
+        let canonicalArtifactURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("outputs/CodexUsageStatus.app.zip")
+        let originalCanonicalArtifact = try Data(contentsOf: canonicalArtifactURL)
+
+        let developerIDEnvironment = [
+            "CODEX_RELEASE_MODE": "1",
+            "CODEX_SIGNING_MODE": "developer-id",
+            "CODEX_DEVELOPER_IDENTITY": "Developer ID Application: Placeholder (A1B2C3D4E5)",
+            "CODEX_EXPECTED_TEAM_ID": "A1B2C3D4E5",
+            "CODEX_NOTARY_PROFILE": "placeholder-profile",
+        ]
+        let missingCutoverStatus = try runToolStatus(
+            "/bin/bash",
+            [packageScript.path, "package"],
+            environment: developerIDEnvironment
+        )
+        try expect(missingCutoverStatus != 0, "Developer ID package requires the explicit PM cutover gate")
+
+        var missingIdentityEnvironment = developerIDEnvironment
+        missingIdentityEnvironment["CODEX_DEVELOPER_ID_CUTOVER"] = "1"
+        missingIdentityEnvironment.removeValue(forKey: "CODEX_DEVELOPER_IDENTITY")
+        let missingIdentityStatus = try runToolStatus(
+            "/bin/bash",
+            [packageScript.path, "package"],
+            environment: missingIdentityEnvironment
+        )
+        try expect(missingIdentityStatus != 0, "Developer ID package fails closed without a signing identity")
+
+        var missingTeamEnvironment = developerIDEnvironment
+        missingTeamEnvironment["CODEX_DEVELOPER_ID_CUTOVER"] = "1"
+        missingTeamEnvironment.removeValue(forKey: "CODEX_EXPECTED_TEAM_ID")
+        let missingTeamStatus = try runToolStatus(
+            "/bin/bash",
+            [packageScript.path, "package"],
+            environment: missingTeamEnvironment
+        )
+        try expect(missingTeamStatus != 0, "Developer ID package fails closed without an expected Team ID")
+
+        var missingNotaryProfileEnvironment = developerIDEnvironment
+        missingNotaryProfileEnvironment["CODEX_DEVELOPER_ID_CUTOVER"] = "1"
+        missingNotaryProfileEnvironment.removeValue(forKey: "CODEX_NOTARY_PROFILE")
+        let missingNotaryProfileStatus = try runToolStatus(
+            "/bin/bash",
+            [packageScript.path, "package"],
+            environment: missingNotaryProfileEnvironment
+        )
+        try expect(missingNotaryProfileStatus != 0, "Developer ID package fails closed without a notary profile")
+        let finalCanonicalArtifact = try Data(contentsOf: canonicalArtifactURL)
+        try expect(
+            finalCanonicalArtifact == originalCanonicalArtifact,
+            "Developer ID preflight failures leave the canonical ad-hoc artifact untouched"
+        )
     }
 
     private static func testReleaseArtifactValidation() throws {
@@ -5411,6 +5468,18 @@ struct CodexUsageStatusTests {
 
         let publicStatus = try runToolStatus("/bin/bash", [validatorURL.path, "--public-release", artifactURL.path, expectedArtifactVersion])
         try expect(publicStatus == 0, "ad-hoc artifact is accepted by the public GitHub release gate")
+
+        let developerIDAdhocStatus = try runToolStatus(
+            "/bin/bash",
+            [validatorURL.path, "--public-release-developer-id", artifactURL.path, expectedArtifactVersion, "A1B2C3D4E5"]
+        )
+        try expect(developerIDAdhocStatus != 0, "Developer ID validator rejects the current ad-hoc public artifact")
+
+        let missingDeveloperIDTeamStatus = try runToolStatus(
+            "/bin/bash",
+            [validatorURL.path, "--public-release-developer-id", artifactURL.path, expectedArtifactVersion]
+        )
+        try expect(missingDeveloperIDTeamStatus != 0, "Developer ID validator fails closed without an expected Team ID")
 
         let notarizeStatus = try runToolStatus("/bin/bash", [validatorURL.path, "--notarize", artifactURL.path, "2.4.95"])
         try expect(notarizeStatus != 0, "retired notarization mode is rejected")

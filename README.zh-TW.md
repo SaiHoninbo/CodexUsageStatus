@@ -35,9 +35,10 @@ Codex Usage Status 是 macOS 選單列用量 HUD，用來監控本機 Codex App 
 5. 如果 macOS 阻擋啟動，開啟「系統設定 → 隱私權與安全性」，在安全性提示中選擇「仍要打開」。
 6. 啟動 Codex Usage Status；它會出現在選單列，也可以在 Codex 旁顯示浮動 HUD。
 
-候選版、本機測試包與正式公開 artifact 都使用 GitHub Release 的 ad-hoc
-簽章。固定 GitHub repository、固定 asset 名稱、bundle 驗證與 strict
-code-signature 驗證就是發布信任邊界，不需要額外的 Apple 簽章憑證。
+候選版與本機測試包使用 ad-hoc 簽章；目前啟用中的正式公開發版政策也維持
+ad-hoc，直到另有明確 PM 切換決策。固定 GitHub repository、asset 名稱、bundle
+驗證與 strict code-signature 驗證是目前的發行信任邊界；現行 ad-hoc 路徑不需要
+Apple 簽章憑證。Developer ID＋notarization 路徑目前只可作為休眠能力準備，尚未啟用。
 建議固定放在 `/Applications`，讓登入啟動註冊使用穩定的 App 路徑。
 
 ## 權限
@@ -137,6 +138,16 @@ ad-hoc 驗證：
 ./script/validate_release_artifact.sh --public-release outputs/CodexUsageStatus.app.zip 2.4.108
 ```
 
+休眠的 Developer ID validator 與目前 ad-hoc 驗證分開；它會刻意拒絕目前的
+ad-hoc `.108` artifact，並要求 Developer ID Application 憑證鏈、指定 Team ID、
+Hardened Runtime、安全 timestamp 與已 stapling 的 notarization ticket：
+
+```bash
+./script/validate_release_artifact.sh --public-release-developer-id outputs/CodexUsageStatus.app.zip 2.4.108 ABCDE12345
+```
+
+這個驗證模式不代表已授權 Developer ID 發版，也不會切換現行 ad-hoc 政策。
+
 ZIP 必須先通過這個 validator，才能上傳 GitHub Release。
 
 ## 從原始碼建置
@@ -171,6 +182,40 @@ outputs/CodexUsageStatus.app.zip
 `CODEX_RELEASE_MODE=1` 即可；這只標記該包是準備發布的 artifact，仍使用相同的
 ad-hoc 簽章與固定 bundle 驗證。通過驗證的同一份 ZIP 再由維護者發布到 GitHub
 Release。GitHub Releases 是唯一發布通道。
+
+### 休眠的 Developer ID 發版準備路徑
+
+Developer ID 不是目前啟用的正式發版政策。只有另有 PM 明確授權切換，且機器已
+安裝 Developer ID Application 憑證及配對的 private key、設定好 `notarytool`
+Keychain profile，才可使用此路徑。它會要求以下條件全部成立，絕不退回 ad-hoc：
+
+- PM 明確授權切換後設定 `CODEX_DEVELOPER_ID_CUTOVER=1`
+- `CODEX_DEVELOPER_IDENTITY` 唯一對應有效 Developer ID Application identity
+- `CODEX_EXPECTED_TEAM_ID` 與該 identity 的 Team ID 相符
+- `CODEX_NOTARY_PROFILE` 指向已設定的 `notarytool` Keychain profile
+
+只有明確的 `package` mode 加上 `CODEX_RELEASE_MODE=1` 才能選擇
+`CODEX_SIGNING_MODE=developer-id`。流程會使用 Hardened Runtime 與安全 timestamp
+簽署，建立暫存 ZIP 送 notarization，等待接受後將 ticket stapling 並驗證，最後才
+建立及驗證 canonical ZIP。不得把憑證 private key、密碼、API key 或其他 notarization
+secret 存入 repository。
+
+只有在切換已獲授權且憑證已備妥後，維護者才可使用：
+
+```bash
+CODEX_RELEASE_MODE=1 \
+CODEX_SIGNING_MODE=developer-id \
+CODEX_DEVELOPER_ID_CUTOVER=1 \
+CODEX_DEVELOPER_IDENTITY='Developer ID Application: Name (ABCDE12345)' \
+CODEX_EXPECTED_TEAM_ID=ABCDE12345 \
+CODEX_NOTARY_PROFILE=codexusage-notary \
+./script/build_and_run.sh package
+./script/validate_release_artifact.sh --public-release-developer-id outputs/CodexUsageStatus.app.zip 2.4.108 ABCDE12345
+```
+
+暫存 notarization submission ZIP 不是 GitHub asset。canonical
+`CodexUsageStatus.app.zip` 只有在 notarization 接受且完成 stapling 後才會建立；
+發布仍是另一個需要授權的動作。
 
 若要產生一次性的 runtime 或 UI 驗證版本，請使用 `candidate` mode：
 

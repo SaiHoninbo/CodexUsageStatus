@@ -2,15 +2,21 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 [--public-release|--notarize] <CodexUsageStatus.app.zip> [expected-version]" >&2
+  echo "usage: $0 [--public-release|--public-release-developer-id|--notarize] <CodexUsageStatus.app.zip> [expected-version [expected-team-id]]" >&2
   exit 2
 }
 
 PUBLIC_RELEASE=0
+PUBLIC_RELEASE_DEVELOPER_ID=0
 NOTARIZE=0
 case "${1:-}" in
   --public-release)
     PUBLIC_RELEASE=1
+    shift
+    ;;
+  --public-release-developer-id)
+    PUBLIC_RELEASE=1
+    PUBLIC_RELEASE_DEVELOPER_ID=1
     shift
     ;;
   --notarize)
@@ -27,8 +33,13 @@ fi
 
 ZIP_PATH="${1:-}"
 EXPECTED_VERSION="${2:-}"
+EXPECTED_TEAM_ID="${3:-}"
 [[ -n "$ZIP_PATH" ]] || usage
 [[ -f "$ZIP_PATH" ]] || { echo "release artifact does not exist: $ZIP_PATH" >&2; exit 3; }
+if [[ "$PUBLIC_RELEASE_DEVELOPER_ID" == 1 && ! "$EXPECTED_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]; then
+  echo "Developer ID public validation requires a valid 10-character expected Team ID" >&2
+  exit 2
+fi
 
 WORK_DIR="$(mktemp -d /private/tmp/codex-release-artifact.XXXXXX)"
 trap 'rm -rf "$WORK_DIR"' EXIT
@@ -69,7 +80,34 @@ fi
 
 codesign --verify --deep --strict "$APP_BUNDLE" >/dev/null
 SIGNING_DETAILS="$(codesign -dvvv "$APP_BUNDLE" 2>&1)"
-if [[ "$PUBLIC_RELEASE" == 1 ]]; then
+if [[ "$PUBLIC_RELEASE_DEVELOPER_ID" == 1 ]]; then
+  if printf '%s\n' "$SIGNING_DETAILS" | grep -Fq 'Signature=adhoc'; then
+    echo "Developer ID public release artifact must not be ad-hoc signed" >&2
+    exit 3
+  fi
+  if ! printf '%s\n' "$SIGNING_DETAILS" | grep -Fq 'Authority=Developer ID Application:'; then
+    echo "Developer ID public release artifact is missing a Developer ID Application certificate chain" >&2
+    exit 3
+  fi
+  if ! printf '%s\n' "$SIGNING_DETAILS" | grep -Fq "TeamIdentifier=$EXPECTED_TEAM_ID"; then
+    echo "Developer ID public release artifact TeamIdentifier does not match the expected Team ID" >&2
+    exit 3
+  fi
+  if ! printf '%s\n' "$SIGNING_DETAILS" | grep -Eq '^flags=.*\(runtime\)'; then
+    echo "Developer ID public release artifact is missing the Hardened Runtime flag" >&2
+    exit 3
+  fi
+  if ! printf '%s\n' "$SIGNING_DETAILS" | grep -Eq '^Timestamp=.+$' || \
+      printf '%s\n' "$SIGNING_DETAILS" | grep -Fq 'Timestamp=none'; then
+    echo "Developer ID public release artifact is missing a secure code-signing timestamp" >&2
+    exit 3
+  fi
+  if ! xcrun stapler validate "$APP_BUNDLE"; then
+    echo "Developer ID public release artifact is missing a valid stapled notarization ticket" >&2
+    exit 3
+  fi
+  echo "Validated public GitHub Developer ID release artifact: $ZIP_PATH (version $VERSION, Team ID $EXPECTED_TEAM_ID)"
+elif [[ "$PUBLIC_RELEASE" == 1 ]]; then
   if ! printf '%s\n' "$SIGNING_DETAILS" | grep -Fq 'Signature=adhoc'; then
     echo "public GitHub release artifact must use the repository's ad-hoc signature policy" >&2
     exit 3

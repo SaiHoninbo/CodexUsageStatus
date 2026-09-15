@@ -31,10 +31,12 @@ Do not download the repository source archive for installation. The source archi
 5. If macOS blocks the app, open **System Settings → Privacy & Security**, scroll to the security message, and choose **Open Anyway**.
 6. Launch Codex Usage Status. It appears as a menu-bar item and can show the floating HUD beside Codex.
 
-Candidate, local test, and public release bundles use the canonical GitHub
-Release path with an ad-hoc signature. The fixed GitHub repository, asset name,
-bundle validation, and strict code-signature check are the release trust
-boundary; no external signing credential is required.
+Candidate and local-test bundles use ad-hoc signing. The active public GitHub
+Release policy also remains ad-hoc until an explicit PM cutover. The fixed
+GitHub repository, asset name, bundle validation, and strict code-signature
+check are the current release trust boundary; the active ad-hoc path needs no
+external signing credential. A dormant Developer ID + notarization path may be
+prepared for a future cutover, but it is not an active release option today.
 Keeping the app in `/Applications` also gives the login-item registration a
 stable path.
 
@@ -139,6 +141,18 @@ ad-hoc validation path:
 ./script/validate_release_artifact.sh --public-release outputs/CodexUsageStatus.app.zip 2.4.108
 ```
 
+The dormant Developer ID validator is separate and deliberately rejects the
+current ad-hoc `.108` artifact. It requires a stapled notarization ticket, a
+Developer ID Application certificate chain, the expected Team ID, Hardened
+Runtime, and a secure timestamp:
+
+```bash
+./script/validate_release_artifact.sh --public-release-developer-id outputs/CodexUsageStatus.app.zip 2.4.108 ABCDE12345
+```
+
+This validation mode does not authorize a Developer ID release or change the
+active ad-hoc policy.
+
 The ZIP must pass this validator before it is uploaded to a GitHub Release.
 
 ## Building from source
@@ -176,6 +190,44 @@ Release, set `CODEX_RELEASE_MODE=1`; this marks the package as the intended
 public artifact while retaining the same ad-hoc signature and fixed-bundle
 validation. Publish that exact validated ZIP as a separate maintainer action.
 GitHub Releases is the only distribution channel.
+
+### Dormant Developer ID release preparation
+
+Developer ID signing is not the active public-release policy. Do not use this
+path until a separate PM decision explicitly authorizes the cutover and the
+machine has a valid Developer ID Application identity with its matching
+private key plus a configured `notarytool` Keychain profile. The pipeline
+requires all of the following and never falls back to ad-hoc signing:
+
+- `CODEX_DEVELOPER_ID_CUTOVER=1` after explicit PM authorization
+- `CODEX_DEVELOPER_IDENTITY` selecting exactly one valid Developer ID Application identity
+- `CODEX_EXPECTED_TEAM_ID` matching that identity
+- `CODEX_NOTARY_PROFILE` naming the configured `notarytool` Keychain profile
+
+Only the explicit `package` mode with `CODEX_RELEASE_MODE=1` can select
+`CODEX_SIGNING_MODE=developer-id`. It signs with Hardened Runtime and a secure
+timestamp, submits a temporary ZIP for notarization, staples and validates the
+ticket on the app, then creates and validates the final canonical ZIP. Never
+put a certificate private key, password, API key, or other notarization secret
+in the repository.
+
+After cutover is authorized and credentials are provisioned, the maintainer
+invocation is:
+
+```bash
+CODEX_RELEASE_MODE=1 \
+CODEX_SIGNING_MODE=developer-id \
+CODEX_DEVELOPER_ID_CUTOVER=1 \
+CODEX_DEVELOPER_IDENTITY='Developer ID Application: Name (ABCDE12345)' \
+CODEX_EXPECTED_TEAM_ID=ABCDE12345 \
+CODEX_NOTARY_PROFILE=codexusage-notary \
+./script/build_and_run.sh package
+./script/validate_release_artifact.sh --public-release-developer-id outputs/CodexUsageStatus.app.zip 2.4.108 ABCDE12345
+```
+
+The temporary notarization submission ZIP is not the GitHub asset. The final
+`CodexUsageStatus.app.zip` is created only after notarization acceptance and
+stapling; publishing it remains a separate authorized release action.
 
 For disposable runtime or UI evidence, use the `candidate` mode instead:
 
