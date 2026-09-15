@@ -5186,10 +5186,14 @@ struct CodexUsageStatusTests {
         )
         try expect(script.contains("APP_PID=$PPID"), "replacement captures the old app PID")
         try expect(script.contains("TARGET_EXECUTABLE=\"$OLD/Contents/MacOS/CodexUsageStatus\""), "replacement derives the exact old executable identity")
+        try expect(script.contains("APP_START_ID=\"\""), "replacement captures a stable process start identity")
+        try expect(script.contains("process_start_identity"), "replacement probes the process birth marker")
         try expect(script.contains("kill -TERM \"$APP_PID\""), "replacement helper owns the single graceful termination signal")
         try expect(script.contains("termination_signal_sent"), "replacement records the helper termination hand-off")
         try expect(script.contains("old_process_identity_mismatch"), "replacement fails closed when the target PID identity is wrong")
-        try expect(script.contains("old_process_identity_changed"), "replacement fails closed when the target PID changes")
+        try expect(script.contains("original_process_exited_pid_reused"), "replacement treats PID reuse after SIGTERM as original-process exit")
+        try expect(script.contains("old_process_identity_unknown"), "replacement bounds an indeterminate post-signal identity")
+        try expect(!script.contains("old_process_identity_changed"), "replacement does not fail on a transient post-signal command transition")
         try expect(!script.contains("kill -9"), "replacement never escalates to SIGKILL")
         try expect(script.contains("kill -0 \"$APP_PID\""), "replacement probes old process liveness")
         try expect(script.contains("WAIT_DEADLINE=$(($(date +%s) + 30))"), "replacement wait is bounded")
@@ -5205,6 +5209,16 @@ struct CodexUsageStatusTests {
         try expect(script.contains("relaunch_failed"), "replacement reports relaunch failure explicitly")
         try expect(script.contains("restore_old"), "replacement restores the previous bundle when relaunch fails")
         try expect(script.contains("exec >> \"$LOG\" 2>&1"), "replacement retains helper diagnostics in a log")
+
+        let updateSource = try String(
+            contentsOf: URL(fileURLWithPath: "Sources/CodexUsageStatus/AppUpdateService.swift"),
+            encoding: .utf8
+        )
+        guard let installStart = updateSource.range(of: "    func install(")?.lowerBound else {
+            throw HarnessError.assertion("updater install method is missing")
+        }
+        let installSource = updateSource[installStart...]
+        try expect(!installSource.contains("NSApp.terminate(nil)"), "updater helper is the sole final termination authority")
 
         let receipt = AppUpdateReplacementReceipt.parse(Data("status=failed\nstep=old_process_timeout\nmessage=previous app did not exit\nreleaseVersion=2.5.0\nupdatedAt=2000\n".utf8))
         try expect(receipt?.status == .failed, "replacement failure receipt parses its status")
@@ -5317,7 +5331,7 @@ struct CodexUsageStatusTests {
 
         let artifactURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("outputs/CodexUsageStatus.app.zip")
-            let expectedArtifactVersion = "2.4.105"
+            let expectedArtifactVersion = "2.4.106"
         let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, expectedArtifactVersion])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 

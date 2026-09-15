@@ -491,7 +491,6 @@ final class AppUpdateService: NSObject {
                         baselineUpdatedAt: baselineUpdatedAt,
                         baselineReceiptData: baselineReceiptData
                     )
-                    NSApp.terminate(nil)
                 } catch let error as AppUpdateError {
                     self.finishInstall(.error(error.localizedDescription))
                 } catch {
@@ -740,6 +739,7 @@ enum AppUpdateInstaller {
         LOG=\(shellQuote(resolvedLogPath))
         RELEASE_VERSION=\(shellQuote(releaseVersion))
         APP_PID=$PPID
+        APP_START_ID=""
         WAIT_DEADLINE=$(($(date +%s) + 30))
         mkdir -p "$(dirname "$RECEIPT")"
         touch "$LOG"
@@ -766,50 +766,46 @@ enum AppUpdateInstaller {
         current_process_command() {
             /bin/ps -p "$APP_PID" -o command= 2>/dev/null | /usr/bin/sed 's/^[[:space:]]*//'
         }
-        target_process_is_alive() {
-            if ! kill -0 "$APP_PID" 2>/dev/null; then return 1; fi
-            CURRENT_COMMAND="$(current_process_command)"
-            case "$CURRENT_COMMAND" in
-                "$TARGET_EXECUTABLE"|"$TARGET_EXECUTABLE "*) return 0 ;;
-                *) return 2 ;;
-            esac
+        process_start_identity() {
+            /bin/ps -p "$APP_PID" -o lstart= 2>/dev/null | /usr/bin/sed 's/^[[:space:]]*//'
         }
         terminate_target_process() {
-            if target_process_is_alive; then
-                :
-            else
-                TARGET_STATE=$?
-                if [ "$TARGET_STATE" -eq 1 ]; then
-                    write_receipt installing old_process_already_exited "The previous app had already exited."
-                    return 0
-                fi
-                fail old_process_identity_mismatch "The replacement target PID no longer matches the previous app."
+            if ! kill -0 "$APP_PID" 2>/dev/null; then
+                write_receipt installing old_process_already_exited "The previous app had already exited."
+                return 0
+            fi
+            CURRENT_COMMAND="$(current_process_command)"
+            case "$CURRENT_COMMAND" in
+                "$TARGET_EXECUTABLE"|"$TARGET_EXECUTABLE "*) ;;
+                *) fail old_process_identity_mismatch "The replacement target PID no longer matches the previous app." ;;
+            esac
+            APP_START_ID="$(process_start_identity)"
+            if [ -z "$APP_START_ID" ]; then
+                fail old_process_identity_unavailable "The previous app process start identity could not be verified."
             fi
             write_receipt installing terminating_old_process "Requesting the previous app to terminate."
             if kill -TERM "$APP_PID" 2>/dev/null; then
                 :
             else
-                if target_process_is_alive; then
+                if kill -0 "$APP_PID" 2>/dev/null; then
                     fail old_process_signal_failed "The previous app could not be signaled safely."
-                else
-                    TARGET_STATE=$?
-                    if [ "$TARGET_STATE" -eq 1 ]; then
-                        write_receipt installing old_process_already_exited "The previous app exited before the termination signal."
-                        return 0
-                    fi
-                    fail old_process_identity_mismatch "The replacement target PID changed before the termination signal."
                 fi
+                write_receipt installing old_process_already_exited "The previous app exited before the termination signal."
+                return 0
             fi
             write_receipt installing termination_signal_sent "Termination signal sent to the verified previous app."
             while true; do
                 if ! kill -0 "$APP_PID" 2>/dev/null; then return 0; fi
-                CURRENT_COMMAND="$(current_process_command)"
-                case "$CURRENT_COMMAND" in
-                    "$TARGET_EXECUTABLE"|"$TARGET_EXECUTABLE "*) ;;
-                    *) fail old_process_identity_changed "The previous app PID changed identity before replacement." ;;
-                esac
+                CURRENT_START_ID="$(process_start_identity)"
+                if [ -n "$CURRENT_START_ID" ] && [ "$CURRENT_START_ID" != "$APP_START_ID" ]; then
+                    write_receipt installing original_process_exited_pid_reused "The original app exited and its PID was reused; the new process was not signaled."
+                    return 0
+                fi
                 if [ "$(date +%s)" -ge "$WAIT_DEADLINE" ]; then
-                    fail old_process_timeout "The previous app did not exit after the helper termination request."
+                    if [ -n "$CURRENT_START_ID" ]; then
+                        fail old_process_timeout "The previous app did not exit after the helper termination request."
+                    fi
+                    fail old_process_identity_unknown "The previous app process identity remained indeterminate after the helper termination request."
                 fi
                 sleep 0.2
             done
