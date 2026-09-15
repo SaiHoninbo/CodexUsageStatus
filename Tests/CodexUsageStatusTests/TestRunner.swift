@@ -1043,6 +1043,30 @@ struct CodexUsageStatusTests {
         let onlySevenPresentation = HUDQuotaPresentationPolicy.make(snapshot: onlySeven, profileID: profileID, now: now)
         try expect(onlySevenPresentation?.fiveHour == nil, "a 7-day window must never populate the 5-hour row")
         try expect(onlySevenPresentation?.sevenDay?.remainingPercent == 98, "available 7-day row remains present")
+        try expect(
+            HUDQuotaPresentationPolicy.availability(
+                for: .fiveHour,
+                snapshot: onlySeven,
+                presentation: onlySevenPresentation
+            ) == .notProvided,
+            "loaded snapshot without 5-hour window is explicitly not provided"
+        )
+        try expect(
+            HUDQuotaPresentationPolicy.availability(
+                for: .sevenDay,
+                snapshot: onlySeven,
+                presentation: onlySevenPresentation
+            ) == .available,
+            "loaded 7-day window is available"
+        )
+        try expect(
+            HUDQuotaPresentationPolicy.availability(
+                for: .fiveHour,
+                snapshot: nil,
+                presentation: nil
+            ) == .updating,
+            "absent snapshot remains an updating state"
+        )
 
         let withSpendControl = UsageSnapshot(
             limitId: nil, limitName: nil, planType: "pro",

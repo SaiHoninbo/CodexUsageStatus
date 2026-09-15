@@ -37,6 +37,20 @@ struct HUDQuotaWindowPresentation: Equatable {
     }
 }
 
+enum HUDQuotaWindowAvailability: Equatable {
+    case available
+    case updating
+    case notProvided
+
+    var displayText: String {
+        switch self {
+        case .available: return ""
+        case .updating: return "更新中"
+        case .notProvided: return "未提供"
+        }
+    }
+}
+
 struct HUDDualQuotaPresentation: Equatable {
     let profileID: UUID
     let fiveHour: HUDQuotaWindowPresentation?
@@ -73,6 +87,25 @@ struct HUDDualQuotaPresentation: Equatable {
 }
 
 enum HUDQuotaPresentationPolicy {
+    /// Classify a quota slot independently from its rendered presentation.
+    /// A loaded snapshot with no matching duration means the upstream did not
+    /// provide that window; an absent snapshot is still an in-flight update.
+    static func availability(
+        for kind: HUDQuotaWindowKind,
+        snapshot: UsageSnapshot?,
+        presentation: HUDDualQuotaPresentation?
+    ) -> HUDQuotaWindowAvailability {
+        let rendered: HUDQuotaWindowPresentation?
+        switch kind {
+        case .fiveHour: rendered = presentation?.fiveHour
+        case .sevenDay: rendered = presentation?.sevenDay
+        case .thirtyDay: rendered = presentation?.thirtyDay
+        case .gptReserveWeekly: rendered = presentation?.gptReserveWeekly
+        }
+        if rendered != nil { return .available }
+        return snapshot == nil ? .updating : .notProvided
+    }
+
     static func make(
         snapshot: UsageSnapshot?,
         profileID: UUID?,

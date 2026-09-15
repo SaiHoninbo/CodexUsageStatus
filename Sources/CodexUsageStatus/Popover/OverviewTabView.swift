@@ -451,13 +451,41 @@ extension UsagePopoverView {
                     profileID: model.currentProfileID
                 )
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
-                    quotaSummaryRow(kind: .fiveHour, presentation: presentation?.fiveHour, accent: HUDColorPalette.fiveHour)
-                    quotaSummaryRow(kind: .sevenDay, presentation: presentation?.sevenDay, accent: HUDColorPalette.sevenDay)
+                    quotaSummaryRow(
+                        kind: .fiveHour,
+                        presentation: presentation?.fiveHour,
+                        availability: HUDQuotaPresentationPolicy.availability(
+                            for: .fiveHour,
+                            snapshot: model.snapshot,
+                            presentation: presentation
+                        ),
+                        accent: HUDColorPalette.fiveHour
+                    )
+                    quotaSummaryRow(
+                        kind: .sevenDay,
+                        presentation: presentation?.sevenDay,
+                        availability: HUDQuotaPresentationPolicy.availability(
+                            for: .sevenDay,
+                            snapshot: model.snapshot,
+                            presentation: presentation
+                        ),
+                        accent: HUDColorPalette.sevenDay
+                    )
                     if let thirtyDay = presentation?.thirtyDay {
-                        quotaSummaryRow(kind: .thirtyDay, presentation: thirtyDay, accent: HUDColorPalette.sevenDay)
+                        quotaSummaryRow(
+                            kind: .thirtyDay,
+                            presentation: thirtyDay,
+                            availability: .available,
+                            accent: HUDColorPalette.sevenDay
+                        )
                     }
                     if let reserve = presentation?.gptReserveWeekly {
-                        quotaSummaryRow(kind: .gptReserveWeekly, presentation: reserve, accent: HUDColorPalette.gptReserveWeekly)
+                        quotaSummaryRow(
+                            kind: .gptReserveWeekly,
+                            presentation: reserve,
+                            availability: .available,
+                            accent: HUDColorPalette.gptReserveWeekly
+                        )
                     }
                 }
             } else {
@@ -628,7 +656,12 @@ extension UsagePopoverView {
     }
 
     @ViewBuilder
-    private func quotaSummaryRow(kind: HUDQuotaWindowKind, presentation: HUDQuotaWindowPresentation?, accent: Color) -> some View {
+    private func quotaSummaryRow(
+        kind: HUDQuotaWindowKind,
+        presentation: HUDQuotaWindowPresentation?,
+        availability: HUDQuotaWindowAvailability,
+        accent: Color
+    ) -> some View {
         if let presentation {
             VStack(alignment: .leading, spacing: 5) {
                 HStack(alignment: .firstTextBaseline, spacing: 5) {
@@ -660,6 +693,11 @@ extension UsagePopoverView {
             HStack {
                 Text(kind.label).font(.caption.weight(.semibold))
                 Spacer()
+                if !availability.displayText.isEmpty {
+                    Text(availability.displayText)
+                        .font(.caption2)
+                        .foregroundStyle(HUDColorPalette.tertiaryText)
+                }
             }
             .padding(9)
             .background(HUDColorPalette.controlSurface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
