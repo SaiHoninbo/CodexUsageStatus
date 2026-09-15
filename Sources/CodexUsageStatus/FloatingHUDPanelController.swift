@@ -757,6 +757,11 @@ final class FloatingHUDPanelController: NSObject {
     ) -> Bool {
         guard CodexApplicationPolicy.isCodexApplication(bundleIdentifier: application.bundleIdentifier),
               let bundleURL = application.bundleURL else {
+            // A frontmost non-Codex application invalidates any in-flight
+            // publisher validation.  Without cancelling here, a completed
+            // detached task could leave its identity stranded in the
+            // `validating` state until another unrelated invalidation.
+            cancelTrustValidation()
             trustedCodexApplicationIdentity = nil
             Self.performanceLogger.debug(
                 "HUD trust check trigger=\(trigger.rawValue, privacy: .public) cache=invalid bundle_identity=0"
@@ -830,11 +835,21 @@ final class FloatingHUDPanelController: NSObject {
                 )
             }.value
 
+            guard let self else { return }
+
+            // Only the validation that still owns this generation and pending
+            // identity may converge state.  Clear that ownership before
+            // checking the frontmost app: switching away while Security.framework
+            // is validating must not strand a completed task as `validating`.
+            guard self.trustValidationGeneration == generation,
+                  self.pendingTrustValidationIdentity == result.identity else {
+                return
+            }
+            self.pendingTrustValidationIdentity = nil
+            self.trustValidationTask = nil
+
             guard !Task.isCancelled,
-                  let self,
-                  self.trustValidationGeneration == generation,
                   self.positioningSessionGeneration == positioningGeneration,
-                  self.pendingTrustValidationIdentity == result.identity,
                   let frontmost = NSWorkspace.shared.frontmostApplication,
                   frontmost.processIdentifier == result.identity.processIdentifier,
                   frontmost.launchDate == result.identity.launchDate,
@@ -843,8 +858,6 @@ final class FloatingHUDPanelController: NSObject {
                 return
             }
 
-            self.pendingTrustValidationIdentity = nil
-            self.trustValidationTask = nil
             Self.performanceLogger.debug(
                 "HUD trust validation trigger=\(VisibilityRefreshTrigger.trustValidationCompletion.rawValue, privacy: .public) launch_date_available=true trusted=\(result.trusted, privacy: .public) duration_ms=\(result.durationMilliseconds, privacy: .public)"
             )

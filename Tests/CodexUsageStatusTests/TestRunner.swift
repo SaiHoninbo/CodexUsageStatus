@@ -105,6 +105,75 @@ private final class ToggleIdentity: @unchecked Sendable {
     }
 }
 
+/// Small deterministic fixture for the HUD trust-validation handoff contract.
+/// It mirrors only the lifecycle invariants (generation ownership, pending
+/// cleanup, and identity-gated convergence), not Security.framework itself.
+private final class HUDTrustValidationRaceProbe {
+    struct Identity: Equatable {
+        let value: String
+    }
+
+    private(set) var generation: UInt64 = 0
+    private(set) var pendingIdentity: Identity?
+    private(set) var trustedIdentity: Identity?
+    private(set) var rejectedIdentity: Identity?
+    private(set) var validationCount = 0
+
+    func begin(_ identity: Identity) -> UInt64 {
+        generation &+= 1
+        pendingIdentity = identity
+        rejectedIdentity = nil
+        validationCount += 1
+        return generation
+    }
+
+    func invalidatePendingValidation() {
+        generation &+= 1
+        pendingIdentity = nil
+    }
+
+    @discardableResult
+    func complete(
+        identity: Identity,
+        expectedGeneration: UInt64,
+        frontmostMatches: Bool,
+        trusted: Bool
+    ) -> Bool {
+        guard generation == expectedGeneration,
+              pendingIdentity == identity else {
+            return false
+        }
+
+        // Ownership is cleared before the frontmost identity guard, matching
+        // the production handoff's deterministic cleanup requirement.
+        pendingIdentity = nil
+        guard frontmostMatches else { return false }
+
+        if trusted {
+            trustedIdentity = identity
+            rejectedIdentity = nil
+        } else {
+            trustedIdentity = nil
+            rejectedIdentity = identity
+        }
+        return true
+    }
+
+    func refresh(_ identity: Identity, launchDateAvailable: Bool = true) -> Bool {
+        guard launchDateAvailable else {
+            invalidatePendingValidation()
+            trustedIdentity = nil
+            rejectedIdentity = nil
+            return false
+        }
+        if trustedIdentity == identity { return true }
+        if rejectedIdentity == identity { return false }
+        if pendingIdentity == identity { return false }
+        _ = begin(identity)
+        return false
+    }
+}
+
 @main
 struct CodexUsageStatusTests {
     static func main() async {
@@ -203,6 +272,11 @@ struct CodexUsageStatusTests {
             ("HUD C metrics", testHUDMetrics),
             ("HUD update badge policy", testHUDUpdateBadgePolicy),
             ("Codex application identity", testCodexApplicationIdentity),
+            ("HUD trust validation clears on focus loss", testHUDTrustValidationClearsOnFocusLoss),
+            ("HUD trust validation recovers after focus returns", testHUDTrustValidationRecoversAfterFocusReturns),
+            ("HUD trust validation rejects stale results", testHUDTrustValidationRejectsStaleResults),
+            ("HUD trust validation stable cache", testHUDTrustValidationStableCache),
+            ("HUD trust validation missing launch date", testHUDTrustValidationMissingLaunchDate),
             ("Codex prompt shortcuts", testCodexPromptShortcuts),
             ("temporary clipboard guards", testClipboardTemporaryOperationPolicy),
             ("retired feature cleanup", testRetiredFeatureCleanup)
@@ -5518,6 +5592,113 @@ struct CodexUsageStatusTests {
         if FileManager.default.fileExists(atPath: official.path) {
             try expect(CodexApplicationPolicy.isTrustedBundle(at: official), "official signed Codex bundle should be accepted")
         }
+    }
+
+    private static func testHUDTrustValidationClearsOnFocusLoss() throws {
+        let probe = HUDTrustValidationRaceProbe()
+        let codex = HUDTrustValidationRaceProbe.Identity(value: "codex-a")
+        let generation = probe.begin(codex)
+
+        try expect(
+            !probe.complete(
+                identity: codex,
+                expectedGeneration: generation,
+                frontmostMatches: false,
+                trusted: true
+            ),
+            "a validation completed after focus loss must not converge trust"
+        )
+        try expect(probe.pendingIdentity == nil, "focus loss clears the completed validation's pending identity")
+        try expect(probe.trustedIdentity == nil, "focus loss never caches a trusted result")
+        try expect(probe.rejectedIdentity == nil, "focus loss never caches a rejected result")
+    }
+
+    private static func testHUDTrustValidationRecoversAfterFocusReturns() throws {
+        let probe = HUDTrustValidationRaceProbe()
+        let codex = HUDTrustValidationRaceProbe.Identity(value: "codex-a")
+        let firstGeneration = probe.begin(codex)
+        _ = probe.complete(
+            identity: codex,
+            expectedGeneration: firstGeneration,
+            frontmostMatches: false,
+            trusted: true
+        )
+
+        try expect(probe.pendingIdentity == nil, "the first validation must release pending state")
+        try expect(!probe.refresh(codex), "returning focus starts a new validation instead of staying validating")
+        try expect(probe.validationCount == 2, "focus return schedules a fresh validation")
+        let secondGeneration = probe.generation
+        try expect(
+            probe.complete(
+                identity: codex,
+                expectedGeneration: secondGeneration,
+                frontmostMatches: true,
+                trusted: true
+            ),
+            "the fresh validation can converge once Codex is frontmost again"
+        )
+        try expect(probe.trustedIdentity == codex, "the recovered validation caches the trusted identity")
+    }
+
+    private static func testHUDTrustValidationRejectsStaleResults() throws {
+        let probe = HUDTrustValidationRaceProbe()
+        let firstCodex = HUDTrustValidationRaceProbe.Identity(value: "codex-a")
+        let secondCodex = HUDTrustValidationRaceProbe.Identity(value: "codex-b")
+        let firstGeneration = probe.begin(firstCodex)
+        let secondGeneration = probe.begin(secondCodex)
+
+        try expect(
+            !probe.complete(
+                identity: firstCodex,
+                expectedGeneration: firstGeneration,
+                frontmostMatches: true,
+                trusted: true
+            ),
+            "a stale validation cannot overwrite a newer process identity"
+        )
+        try expect(probe.pendingIdentity == secondCodex, "the newer identity remains the pending owner")
+        try expect(probe.trustedIdentity == nil, "stale validation does not populate the trust cache")
+        try expect(
+            probe.complete(
+                identity: secondCodex,
+                expectedGeneration: secondGeneration,
+                frontmostMatches: true,
+                trusted: true
+            ),
+            "the current identity may converge normally"
+        )
+    }
+
+    private static func testHUDTrustValidationStableCache() throws {
+        let probe = HUDTrustValidationRaceProbe()
+        let codex = HUDTrustValidationRaceProbe.Identity(value: "codex-a")
+        let generation = probe.begin(codex)
+        try expect(
+            probe.complete(
+                identity: codex,
+                expectedGeneration: generation,
+                frontmostMatches: true,
+                trusted: true
+            ),
+            "initial validation succeeds for the stable identity"
+        )
+        let validationCount = probe.validationCount
+        try expect(probe.refresh(codex), "a stable trusted identity uses the cache")
+        try expect(probe.validationCount == validationCount, "a stable identity is validated only once")
+    }
+
+    private static func testHUDTrustValidationMissingLaunchDate() throws {
+        let probe = HUDTrustValidationRaceProbe()
+        let codex = HUDTrustValidationRaceProbe.Identity(value: "codex-without-launch-date")
+        _ = probe.begin(codex)
+
+        try expect(
+            !probe.refresh(codex, launchDateAvailable: false),
+            "an unavailable launch date fails closed"
+        )
+        try expect(probe.pendingIdentity == nil, "missing launch date invalidates pending validation")
+        try expect(probe.trustedIdentity == nil, "missing launch date cannot create a trusted cache")
+        try expect(probe.rejectedIdentity == nil, "missing launch date cannot create a rejected cache")
     }
 
     private static func testLoginLifecycleShutdown() async throws {
