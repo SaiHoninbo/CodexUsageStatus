@@ -5793,6 +5793,7 @@ struct CodexUsageStatusTests {
         let content = #"{"type":"session_meta","payload":{"id":"thread-cursor"}}"# + "\n"
         try Data(content.utf8).write(to: rollout)
         let cursorURL = root.appendingPathComponent("state/cursors.json")
+        let historicalEventCount = LockedCounter()
 
         await PersistenceWriteCoordinator.shared.flush(timeoutNanoseconds: 2_000_000_000)
 #if CODEX_USAGE_TESTING
@@ -5800,7 +5801,10 @@ struct CodexUsageStatusTests {
         PersistenceFileManager.resetTestCounters()
 #endif
         let observer = await MainActor.run {
-            let observer = CodexLocalUsageObserver(cursorURL: cursorURL)
+            let observer = CodexLocalUsageObserver(
+                cursorURL: cursorURL,
+                handler: { _, _ in historicalEventCount.increment() }
+            )
             observer.start()
             return observer
         }
@@ -5812,6 +5816,7 @@ struct CodexUsageStatusTests {
         let persisted = try Data(contentsOf: cursorURL)
         let decoded = try JSONDecoder().decode([String: CodexLocalUsageCursor].self, from: persisted)
         try expect(!decoded.isEmpty, "observer cursor snapshot is persisted")
+        try expect(historicalEventCount.value == 0, "async startup seed does not replay historical rollout content")
 #if CODEX_USAGE_TESTING
         try expect(CodexLocalUsageObserver.testCursorPersistRequestCount == 1, "cursor persistence is requested once")
         try expect(PersistenceFileManager.testMainActorDiskWriteCount == 0, "MainActor performs no cursor disk write")

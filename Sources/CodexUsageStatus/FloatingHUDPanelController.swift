@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import CoreGraphics
+import OSLog
 import SwiftUI
 
 enum FloatingHUDLayout {
@@ -95,6 +96,54 @@ private final class DraggableHUDPanel: NSPanel {
 /// only presents the current model state.
 @MainActor
 final class FloatingHUDPanelController: NSObject {
+    private static let performanceLogger = Logger(
+        subsystem: "com.openai.codex-usage-status",
+        category: "hud-performance"
+    )
+
+    private enum VisibilityRefreshTrigger: String {
+        case existingPanelStart = "existing-panel-start"
+        case applicationActivation = "application-activation"
+        case screenParametersChanged = "screen-parameters-changed"
+        case activeSpaceChanged = "active-space-changed"
+        case fallbackTimer = "fallback-timer"
+        case delayedStartup = "delayed-startup"
+        case resetPosition = "reset-position"
+        case focusLossRecheck = "focus-loss-recheck"
+        case trustValidationCompletion = "trust-validation-completion"
+    }
+
+    /// A publisher-bound trust result for one running process. The launch date
+    /// is the process birth identity; without it the HUD cannot safely
+    /// distinguish a reused PID and therefore fails closed.
+    private struct TrustedApplicationCacheEntry {
+        let processIdentifier: pid_t
+        let launchDate: Date
+        let bundleURL: URL
+
+        func matches(
+            processIdentifier: pid_t,
+            launchDate: Date,
+            bundleURL: URL
+        ) -> Bool {
+            self.processIdentifier == processIdentifier
+                && self.launchDate == launchDate
+                && self.bundleURL == bundleURL
+        }
+    }
+
+    private struct TrustValidationIdentity: Equatable, Sendable {
+        let processIdentifier: pid_t
+        let launchDate: Date
+        let bundleURL: URL
+    }
+
+    private struct TrustValidationResult: Sendable {
+        let identity: TrustValidationIdentity
+        let trusted: Bool
+        let durationMilliseconds: Double
+    }
+
     private let model: UsageViewModel
     var onShowDetails: (() -> Void)?
     var onOpenSettingsForAlert: ((HUDAlertPresentation) -> Void)?
@@ -108,6 +157,14 @@ final class FloatingHUDPanelController: NSObject {
     private var spaceObserver: NSObjectProtocol?
     private var modelObservation: AnyCancellable?
     private var visibilityRefreshTask: Task<Void, Never>?
+    private var trustValidationTask: Task<Void, Never>?
+    private var trustValidationGeneration: UInt64 = 0
+    private var pendingTrustValidationIdentity: TrustValidationIdentity?
+    private var rejectedTrustValidationIdentity: TrustValidationIdentity?
+    private var lastVisibilityRefreshUptimeNanoseconds: UInt64?
+    private var visibilityRefreshInvocation: UInt64 = 0
+    private var visibilityRefreshCoalescedCount: UInt64 = 0
+    private let minimumVisibilityRefreshIntervalNanoseconds: UInt64 = 250_000_000
     private var geometryRefreshTask: Task<Void, Never>?
     private let defaults = UserDefaults.standard
     private let bottomRightPositionKey = "ui.floatingHUD.bottomRightOffset"
@@ -117,7 +174,7 @@ final class FloatingHUDPanelController: NSObject {
     private var lastCodexWindowFrame: NSRect?
     private var lastCodexVisibleFrame: NSRect?
     private var lastCodexProcessID: pid_t?
-    private var trustedCodexApplicationIdentity: CodexApplicationPolicy.TrustedApplicationIdentity?
+    private var trustedCodexApplicationIdentity: TrustedApplicationCacheEntry?
     private var lastPositionedCodexWindowFrame: NSRect?
     private var lastPositionedVisibleFrame: NSRect?
     private var lastPositionedProcessID: pid_t?
@@ -141,7 +198,7 @@ final class FloatingHUDPanelController: NSObject {
 
     func start() {
         guard panel == nil else {
-            refreshVisibility()
+            refreshVisibility(trigger: .existingPanelStart)
             return
         }
 
@@ -236,7 +293,7 @@ final class FloatingHUDPanelController: NSObject {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.requestVisibilityRefresh()
+                self?.requestVisibilityRefresh(trigger: .applicationActivation)
             }
         }
 
@@ -256,14 +313,18 @@ final class FloatingHUDPanelController: NSObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.requestVisibilityRefresh() }
+            Task { @MainActor [weak self] in
+                self?.requestVisibilityRefresh(trigger: .screenParametersChanged)
+            }
         }
         spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.requestVisibilityRefresh() }
+            Task { @MainActor [weak self] in
+                self?.requestVisibilityRefresh(trigger: .activeSpaceChanged)
+            }
         }
 
         // Geometry depends only on quota rows/Credits and profile resets. A
@@ -286,13 +347,13 @@ final class FloatingHUDPanelController: NSObject {
                 // granting/revoking Accessibility in System Settings updates
                 // the HUD badge and action gate without an app restart.
                 self?.model.refreshAccessibilityPermissionState()
-                self?.requestVisibilityRefresh()
+                self?.requestVisibilityRefresh(trigger: .fallbackTimer)
             }
         }
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 250_000_000)
             guard !Task.isCancelled else { return }
-            self?.refreshVisibility()
+            self?.refreshVisibility(trigger: .delayedStartup)
         }
     }
 
@@ -316,6 +377,7 @@ final class FloatingHUDPanelController: NSObject {
         cancelFocusLoss()
         visibilityRefreshTask?.cancel()
         visibilityRefreshTask = nil
+        cancelTrustValidation()
         geometryRefreshTask?.cancel()
         geometryRefreshTask = nil
         refreshTimer?.invalidate()
@@ -350,7 +412,7 @@ final class FloatingHUDPanelController: NSObject {
         lastPositionedVisibleFrame = nil
         lastPositionedProcessID = nil
         lastPositionedPanelSize = nil
-        refreshVisibility()
+        refreshVisibility(trigger: .resetPosition)
     }
 
     /// Resize transaction for the seven persisted HUD levels.  The old panel
@@ -563,7 +625,21 @@ final class FloatingHUDPanelController: NSObject {
         )
     }
 
-    private func refreshVisibility() {
+    private func refreshVisibility(trigger: VisibilityRefreshTrigger) {
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        visibilityRefreshInvocation &+= 1
+        let invocation = visibilityRefreshInvocation
+        Self.performanceLogger.debug(
+            "HUD visibility refresh begin trigger=\(trigger.rawValue, privacy: .public) invocation=\(invocation, privacy: .public)"
+        )
+        defer {
+            let finishedAt = DispatchTime.now().uptimeNanoseconds
+            let durationMilliseconds = Double(finishedAt - startedAt) / 1_000_000.0
+            Self.performanceLogger.debug(
+                "HUD visibility refresh end trigger=\(trigger.rawValue, privacy: .public) invocation=\(invocation, privacy: .public) duration_ms=\(durationMilliseconds, privacy: .public) coalesced=\(self.visibilityRefreshCoalescedCount, privacy: .public)"
+            )
+        }
+        lastVisibilityRefreshUptimeNanoseconds = startedAt
         guard let panel else { return }
         // Automatic positioning and visibility work must not compete with a
         // user-controlled drag. The panel's final frame is persisted from
@@ -582,7 +658,7 @@ final class FloatingHUDPanelController: NSObject {
             hideImmediately(panel)
             return
         }
-        guard isCodexApplication(frontmostApplication) else {
+        guard isCodexApplication(frontmostApplication, trigger: trigger) else {
             scheduleFocusLoss(panel)
             return
         }
@@ -632,16 +708,32 @@ final class FloatingHUDPanelController: NSObject {
     /// reconciliation.  The short delay lets @Published finish assigning its
     /// new value while preventing every intermediate publication from doing a
     /// full AX + CGWindowList pass on the main actor.
-    private func requestVisibilityRefresh() {
-        guard visibilityRefreshTask == nil else { return }
+    private func requestVisibilityRefresh(trigger: VisibilityRefreshTrigger) {
+        guard visibilityRefreshTask == nil else {
+            visibilityRefreshCoalescedCount &+= 1
+            Self.performanceLogger.debug(
+                "HUD visibility refresh coalesced trigger=\(trigger.rawValue, privacy: .public) total=\(self.visibilityRefreshCoalescedCount, privacy: .public)"
+            )
+            return
+        }
         let expectedGeneration = positioningSessionGeneration
+        let now = DispatchTime.now().uptimeNanoseconds
+        let elapsed = lastVisibilityRefreshUptimeNanoseconds.map { now >= $0 ? now - $0 : 0 } ?? minimumVisibilityRefreshIntervalNanoseconds
+        let rateLimitDelay = elapsed >= minimumVisibilityRefreshIntervalNanoseconds
+            ? 0
+            : minimumVisibilityRefreshIntervalNanoseconds - elapsed
+        let delayNanoseconds = max(50_000_000, rateLimitDelay)
         visibilityRefreshTask = Task { @MainActor [weak self] in
             defer { self?.visibilityRefreshTask = nil }
-            try? await Task.sleep(nanoseconds: 50_000_000)
+            do {
+                try await Task.sleep(nanoseconds: delayNanoseconds)
+            } catch {
+                return
+            }
             guard !Task.isCancelled,
                   let self,
                   expectedGeneration == self.positioningSessionGeneration else { return }
-            self.refreshVisibility()
+            self.refreshVisibility(trigger: trigger)
         }
     }
 
@@ -659,36 +751,123 @@ final class FloatingHUDPanelController: NSObject {
         }
     }
 
-    private func isCodexApplication(_ application: NSRunningApplication) -> Bool {
+    private func isCodexApplication(
+        _ application: NSRunningApplication,
+        trigger: VisibilityRefreshTrigger
+    ) -> Bool {
         guard CodexApplicationPolicy.isCodexApplication(bundleIdentifier: application.bundleIdentifier),
               let bundleURL = application.bundleURL else {
             trustedCodexApplicationIdentity = nil
+            Self.performanceLogger.debug(
+                "HUD trust check trigger=\(trigger.rawValue, privacy: .public) cache=invalid bundle_identity=0"
+            )
             return false
         }
 
         let processIdentifier = application.processIdentifier
         guard let launchDate = application.launchDate else {
+            cancelTrustValidation()
             trustedCodexApplicationIdentity = nil
-            return CodexApplicationPolicy.isTrustedBundle(at: bundleURL)
+            rejectedTrustValidationIdentity = nil
+            Self.performanceLogger.debug(
+                "HUD trust check trigger=\(trigger.rawValue, privacy: .public) cache=unproven launch_date_available=false"
+            )
+            return false
         }
+        let identity = TrustValidationIdentity(
+            processIdentifier: processIdentifier,
+            launchDate: launchDate,
+            bundleURL: bundleURL
+        )
         if let trustedCodexApplicationIdentity,
            trustedCodexApplicationIdentity.matches(
                processIdentifier: processIdentifier,
                launchDate: launchDate,
                bundleURL: bundleURL
-           ) {
+            ) {
+            Self.performanceLogger.debug(
+                "HUD trust check trigger=\(trigger.rawValue, privacy: .public) cache=hit launch_date_available=true"
+            )
             return true
         }
 
-        let isTrusted = CodexApplicationPolicy.isTrustedBundle(at: bundleURL)
-        trustedCodexApplicationIdentity = isTrusted
-            ? CodexApplicationPolicy.TrustedApplicationIdentity(
-                processIdentifier: processIdentifier,
-                launchDate: launchDate,
-                bundleURL: bundleURL
+        if rejectedTrustValidationIdentity == identity {
+            Self.performanceLogger.debug(
+                "HUD trust check trigger=\(trigger.rawValue, privacy: .public) cache=rejected"
             )
-            : nil
-        return isTrusted
+            return false
+        }
+
+        if pendingTrustValidationIdentity == identity {
+            Self.performanceLogger.debug(
+                "HUD trust check trigger=\(trigger.rawValue, privacy: .public) cache=validating"
+            )
+            return false
+        }
+
+        Self.performanceLogger.debug(
+            "HUD trust check trigger=\(trigger.rawValue, privacy: .public) cache=miss launch_date_available=true"
+        )
+        beginTrustValidation(identity: identity)
+        return false
+    }
+
+    private func beginTrustValidation(identity: TrustValidationIdentity) {
+        cancelTrustValidation()
+        trustValidationGeneration &+= 1
+        let generation = trustValidationGeneration
+        let positioningGeneration = positioningSessionGeneration
+        pendingTrustValidationIdentity = identity
+        trustValidationTask = Task { @MainActor [weak self] in
+            let result = await Task.detached(priority: .utility) {
+                let startedAt = DispatchTime.now().uptimeNanoseconds
+                let trusted = CodexApplicationPolicy.isTrustedBundle(at: identity.bundleURL)
+                let finishedAt = DispatchTime.now().uptimeNanoseconds
+                return TrustValidationResult(
+                    identity: identity,
+                    trusted: trusted,
+                    durationMilliseconds: Double(finishedAt - startedAt) / 1_000_000.0
+                )
+            }.value
+
+            guard !Task.isCancelled,
+                  let self,
+                  self.trustValidationGeneration == generation,
+                  self.positioningSessionGeneration == positioningGeneration,
+                  self.pendingTrustValidationIdentity == result.identity,
+                  let frontmost = NSWorkspace.shared.frontmostApplication,
+                  frontmost.processIdentifier == result.identity.processIdentifier,
+                  frontmost.launchDate == result.identity.launchDate,
+                  frontmost.bundleURL == result.identity.bundleURL,
+                  CodexApplicationPolicy.isCodexApplication(bundleIdentifier: frontmost.bundleIdentifier) else {
+                return
+            }
+
+            self.pendingTrustValidationIdentity = nil
+            self.trustValidationTask = nil
+            Self.performanceLogger.debug(
+                "HUD trust validation trigger=\(VisibilityRefreshTrigger.trustValidationCompletion.rawValue, privacy: .public) launch_date_available=true trusted=\(result.trusted, privacy: .public) duration_ms=\(result.durationMilliseconds, privacy: .public)"
+            )
+            if result.trusted {
+                self.rejectedTrustValidationIdentity = nil
+                self.trustedCodexApplicationIdentity = TrustedApplicationCacheEntry(
+                    processIdentifier: result.identity.processIdentifier,
+                    launchDate: result.identity.launchDate,
+                    bundleURL: result.identity.bundleURL
+                )
+            } else {
+                self.trustedCodexApplicationIdentity = nil
+                self.rejectedTrustValidationIdentity = result.identity
+            }
+            self.requestVisibilityRefresh(trigger: .trustValidationCompletion)
+        }
+    }
+
+    private func cancelTrustValidation() {
+        trustValidationGeneration &+= 1
+        trustValidationTask?.cancel()
+        trustValidationTask = nil
+        pendingTrustValidationIdentity = nil
     }
 
     private func invalidatePendingVisibilityCallbacks() {
@@ -726,6 +905,8 @@ final class FloatingHUDPanelController: NSObject {
         if clearProcessID {
             lastCodexProcessID = nil
             trustedCodexApplicationIdentity = nil
+            rejectedTrustValidationIdentity = nil
+            cancelTrustValidation()
         }
     }
 
@@ -979,7 +1160,7 @@ final class FloatingHUDPanelController: NSObject {
             // A nil frontmost application is still unknown focus. Only a
             // concrete non-Codex application may confirm the hide.
             guard let frontmost = NSWorkspace.shared.frontmostApplication,
-                  !self.isCodexApplication(frontmost) else {
+                  !self.isCodexApplication(frontmost, trigger: .focusLossRecheck) else {
                 self.focusLossTask = nil
                 return
             }

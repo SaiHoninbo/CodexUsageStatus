@@ -908,6 +908,23 @@ final class CodexLocalUsageObserver {
     typealias SessionIdentityReader = @Sendable (URL) -> CodexLocalSessionIdentity?
     typealias SessionMetadataReader = @Sendable (URL) -> CodexLocalSessionMetadata?
 
+    /// A rollout discovered by the detached bootstrap seed. The complete
+    /// metadata snapshot lets the first normal scan start caught up at EOF
+    /// without another MainActor filesystem probe. A head thread identity is
+    /// only needed for a root added after observation has already started.
+    private struct RolloutSeed: Sendable {
+        let path: String
+        let fileSize: UInt64
+        let modificationTime: Date?
+        let fileResourceIdentifier: String?
+        let threadID: String?
+    }
+
+    private enum RolloutSeedMode: Sendable, Equatable {
+        case startup
+        case addedRoot
+    }
+
     private let cursorURL: URL
     private var roots: [CodexLocalUsageObservationRoot] = []
     private var cursors: [String: CodexLocalUsageCursor] = [:]
@@ -928,6 +945,11 @@ final class CodexLocalUsageObserver {
     private var rootsGeneration: UInt64 = 0
     private var lifecycleGeneration: UInt64 = 0
     private var observationEpoch: UInt64 = 0
+    private var rolloutSeedTask: Task<Void, Never>?
+    private var rolloutSeedGeneration: UInt64 = 0
+    private var rolloutSeedPending = false
+    private var rolloutSeedMode: RolloutSeedMode?
+    private var rolloutSeedBlocksScan = false
 
     init(
         cursorURL: URL,
@@ -982,23 +1004,19 @@ final class CodexLocalUsageObserver {
         // profile cannot replay its historical session data into the machine
         // ledger. Newly appended lines are still consumed on the next scan.
         let newlyAddedRoots = roots.filter { !previousRootPaths.contains($0.codexHomeURL.path) }
-        let paths = Self.rolloutPaths(in: newlyAddedRoots)
-        knownRolloutPaths.formUnion(paths)
-        fastPollPaths = Self.initialFastPollPaths(fastPollPaths.union(paths), cursors: cursors)
-        var didAddCursor = false
-        for path in paths where !seededPaths.contains(path) {
-            seededPaths.insert(path)
-            if cursors[path] == nil,
-               let attributes = try? FileManager.default.attributesOfItem(atPath: path),
-               let fileSize = attributes[.size] as? NSNumber {
-                cursors[path] = CodexLocalUsageCursor(
-                    byteOffset: fileSize.uint64Value,
-                    threadID: Self.threadIdentity(for: URL(fileURLWithPath: path))
-                )
-                didAddCursor = true
-            }
+        // If startup seeding (or a previous root addition) is still pending,
+        // resnapshot every current root.  Otherwise a stale worker result for
+        // the old root set could be discarded and leave an existing root
+        // unseeded.  The generation gate in scheduleRolloutSeed() makes the
+        // superseded worker harmless.
+        if rolloutSeedPending, rolloutSeedMode == .startup {
+            scheduleRolloutSeed(for: roots, mode: .startup)
+            return
         }
-        if didAddCursor { persistCursors() }
+        guard !newlyAddedRoots.isEmpty else { return }
+        let rootsToSeed = newlyAddedRoots
+        let mode: RolloutSeedMode = .addedRoot
+        scheduleRolloutSeed(for: rootsToSeed, mode: mode)
     }
 
     /// Returns whether a physical root is currently inside the observer's
@@ -1022,10 +1040,11 @@ final class CodexLocalUsageObserver {
                 observedActivityCount: 0
             )
         )
-        seededPaths = Self.rolloutPaths(in: roots)
-        knownRolloutPaths = seededPaths
-        fastPollPaths = Self.initialFastPollPaths(seededPaths, cursors: cursors)
+        seededPaths = []
+        knownRolloutPaths = []
+        fastPollPaths = []
         scanTick = 0
+        scheduleRolloutSeed(for: roots, mode: .startup)
         scan()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -1042,6 +1061,12 @@ final class CodexLocalUsageObserver {
         lifecycleGeneration &+= 1
         observationEpoch &+= 1
         scanInFlight = false
+        rolloutSeedTask?.cancel()
+        rolloutSeedTask = nil
+        rolloutSeedGeneration &+= 1
+        rolloutSeedPending = false
+        rolloutSeedMode = nil
+        rolloutSeedBlocksScan = false
         if wasStarted {
             activeExecutionReconciliationHandler?(
                 CodexLocalActiveExecutionReconciliation(
@@ -1056,6 +1081,7 @@ final class CodexLocalUsageObserver {
 
     deinit {
         timer?.invalidate()
+        rolloutSeedTask?.cancel()
     }
 
     private func loadCursors() {
@@ -1091,8 +1117,84 @@ final class CodexLocalUsageObserver {
         }
     }
 
+    /// Enumerates the current rollout namespace off the MainActor.  The
+    /// resulting seed is applied only after the captured lifecycle/root/epoch
+    /// generations still match, so a stop/restart or root replacement cannot
+    /// publish stale paths or EOF cursors.
+    private func scheduleRolloutSeed(
+        for rootsToSeed: [CodexLocalUsageObservationRoot],
+        mode: RolloutSeedMode
+    ) {
+        rolloutSeedTask?.cancel()
+        guard !rootsToSeed.isEmpty else {
+            rolloutSeedPending = false
+            rolloutSeedMode = nil
+            rolloutSeedBlocksScan = false
+            rolloutSeedTask = nil
+            return
+        }
+
+        rolloutSeedPending = true
+        rolloutSeedMode = mode
+        rolloutSeedBlocksScan = mode == .startup
+        rolloutSeedGeneration &+= 1
+        let seedGeneration = rolloutSeedGeneration
+        let lifecycleGeneration = self.lifecycleGeneration
+        let rootsGeneration = self.rootsGeneration
+        let observationEpoch = self.observationEpoch
+
+        rolloutSeedTask = Task { @MainActor [weak self] in
+            let work = Task.detached(priority: .utility) {
+                Self.rolloutSeeds(in: rootsToSeed, includeThreadIdentity: mode == .addedRoot)
+            }
+            let seeds = await withTaskCancellationHandler(operation: {
+                await work.value
+            }, onCancel: {
+                work.cancel()
+            })
+            guard !Task.isCancelled, let self else { return }
+            guard self.hasStarted,
+                  self.rolloutSeedPending,
+                  self.rolloutSeedGeneration == seedGeneration,
+                  self.lifecycleGeneration == lifecycleGeneration,
+                  self.rootsGeneration == rootsGeneration,
+                  self.observationEpoch == observationEpoch else {
+                return
+            }
+
+            let paths = Set(seeds.map(\.path))
+            let pathsBefore = self.seededPaths
+            self.seededPaths.formUnion(paths)
+            self.knownRolloutPaths.formUnion(paths)
+
+            var didAddCursor = false
+            for seed in seeds where !pathsBefore.contains(seed.path) {
+                guard self.cursors[seed.path] == nil else { continue }
+                self.cursors[seed.path] = CodexLocalUsageCursor(
+                    byteOffset: seed.fileSize,
+                    threadID: mode == .addedRoot ? seed.threadID : nil,
+                    fileSize: seed.fileSize,
+                    modificationTime: seed.modificationTime,
+                    fileResourceIdentifier: seed.fileResourceIdentifier
+                )
+                didAddCursor = true
+            }
+            self.fastPollPaths = Self.initialFastPollPaths(self.fastPollPaths.union(paths), cursors: self.cursors)
+            self.rolloutSeedPending = false
+            self.rolloutSeedMode = nil
+            self.rolloutSeedBlocksScan = false
+            self.rolloutSeedTask = nil
+            // The detached seed already carries the complete metadata
+            // snapshot, so the first scan can stay on the cheap caught-up
+            // path. Persist the EOF cursor once; subsequent scans only write
+            // when file metadata or byte offsets actually change.
+            if didAddCursor { self.persistCursors() }
+            self.scan()
+        }
+    }
+
     private func scan() {
-        guard !scanInFlight, !roots.isEmpty else { return }
+        guard !scanInFlight, !roots.isEmpty, !rolloutSeedBlocksScan else { return }
         scanInFlight = true
         scanGeneration &+= 1
         scanTick &+= 1
@@ -1566,21 +1668,38 @@ final class CodexLocalUsageObserver {
         )
     }
 
-    private nonisolated static func rolloutPaths(
-        in roots: [CodexLocalUsageObservationRoot]
-    ) -> Set<String> {
+    private nonisolated static func rolloutSeeds(
+        in roots: [CodexLocalUsageObservationRoot],
+        includeThreadIdentity: Bool
+    ) -> [RolloutSeed] {
         let fileManager = FileManager.default
-        var paths = Set<String>()
+        var seedsByPath: [String: RolloutSeed] = [:]
         for root in roots {
+            if Task.isCancelled { return [] }
             for directoryName in ["sessions.local", "sessions"] {
+                if Task.isCancelled { return [] }
                 let directory = root.codexHomeURL.appendingPathComponent(directoryName, isDirectory: true)
                 guard let enumerator = fileManager.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey]) else { continue }
                 for case let fileURL as URL in enumerator where fileURL.pathExtension == "jsonl" && fileURL.lastPathComponent.hasPrefix("rollout-") {
-                    paths.insert(canonicalPath(fileURL.path))
+                    if Task.isCancelled { return [] }
+                    let path = canonicalPath(fileURL.path)
+                    guard let values = try? fileURL.resourceValues(
+                        forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey, .fileResourceIdentifierKey]
+                    ),
+                    values.isRegularFile == true,
+                    let size = values.fileSize else { continue }
+                    let threadID = includeThreadIdentity ? Self.threadIdentity(for: fileURL) : nil
+                    seedsByPath[path] = RolloutSeed(
+                        path: path,
+                        fileSize: UInt64(size),
+                        modificationTime: values.contentModificationDate,
+                        fileResourceIdentifier: values.fileResourceIdentifier.map { String(describing: $0) },
+                        threadID: threadID
+                    )
                 }
             }
         }
-        return paths
+        return seedsByPath.values.sorted { $0.path < $1.path }
     }
 
     private nonisolated static func boundedFastPollPaths(
@@ -1605,16 +1724,11 @@ final class CodexLocalUsageObserver {
         cursors: [String: CodexLocalUsageCursor]
     ) -> Set<String> {
         guard paths.count > regularPollPathLimit else { return paths }
-        let fileManager = FileManager.default
         return Set(
             paths
                 .sorted { lhs, rhs in
-                    let lhsDate = cursors[lhs]?.modificationTime
-                        ?? (try? fileManager.attributesOfItem(atPath: lhs)[.modificationDate] as? Date)
-                        ?? .distantPast
-                    let rhsDate = cursors[rhs]?.modificationTime
-                        ?? (try? fileManager.attributesOfItem(atPath: rhs)[.modificationDate] as? Date)
-                        ?? .distantPast
+                    let lhsDate = cursors[lhs]?.modificationTime ?? .distantPast
+                    let rhsDate = cursors[rhs]?.modificationTime ?? .distantPast
                     if lhsDate != rhsDate { return lhsDate > rhsDate }
                     return lhs < rhs
                 }
