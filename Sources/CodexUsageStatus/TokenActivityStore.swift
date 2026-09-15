@@ -342,6 +342,11 @@ final class TokenActivityStore: ObservableObject {
         await PersistenceWriteCoordinator.shared.flush()
     }
 
+    @discardableResult
+    func flushPendingWrites(untilUptimeNanoseconds deadline: UInt64) async -> Bool {
+        await PersistenceWriteCoordinator.shared.flush(untilUptimeNanoseconds: deadline)
+    }
+
     private static func dateString(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)

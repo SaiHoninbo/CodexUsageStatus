@@ -430,7 +430,10 @@ final class AppUpdateService: NSObject {
     /// replacement helper waits for this process to terminate, then moves
     /// the old bundle aside before installing the new one, so a failed move
     /// restores the old app instead of deleting it or launching two copies.
-    func install(_ release: AppUpdateRelease) {
+    func install(
+        _ release: AppUpdateRelease,
+        prepareForReplacement: (() async -> Bool)? = nil
+    ) {
         guard case .available(let available) = state,
               available.version == release.version,
               !state.isBusy,
@@ -475,6 +478,11 @@ final class AppUpdateService: NSObject {
                         release: activeRelease,
                         currentBundleURL: Bundle.main.bundleURL
                     )
+                    if let prepareForReplacement,
+                       !(await prepareForReplacement()) {
+                        self.finishInstall(.error("更新未完成：本機資料尚未完成安全寫入，未啟動替換。"))
+                        return
+                    }
                     self.state = .installing(activeRelease)
                     self.onStateChange?(self.state)
                     try AppUpdateInstaller.schedule(plan: plan)
@@ -754,6 +762,58 @@ enum AppUpdateInstaller {
             write_receipt failed "$1" "$2"
             exit 1
         }
+        TARGET_EXECUTABLE="$OLD/Contents/MacOS/CodexUsageStatus"
+        current_process_command() {
+            /bin/ps -p "$APP_PID" -o command= 2>/dev/null | /usr/bin/sed 's/^[[:space:]]*//'
+        }
+        target_process_is_alive() {
+            if ! kill -0 "$APP_PID" 2>/dev/null; then return 1; fi
+            CURRENT_COMMAND="$(current_process_command)"
+            case "$CURRENT_COMMAND" in
+                "$TARGET_EXECUTABLE"|"$TARGET_EXECUTABLE "*) return 0 ;;
+                *) return 2 ;;
+            esac
+        }
+        terminate_target_process() {
+            if target_process_is_alive; then
+                :
+            else
+                TARGET_STATE=$?
+                if [ "$TARGET_STATE" -eq 1 ]; then
+                    write_receipt installing old_process_already_exited "The previous app had already exited."
+                    return 0
+                fi
+                fail old_process_identity_mismatch "The replacement target PID no longer matches the previous app."
+            fi
+            write_receipt installing terminating_old_process "Requesting the previous app to terminate."
+            if kill -TERM "$APP_PID" 2>/dev/null; then
+                :
+            else
+                if target_process_is_alive; then
+                    fail old_process_signal_failed "The previous app could not be signaled safely."
+                else
+                    TARGET_STATE=$?
+                    if [ "$TARGET_STATE" -eq 1 ]; then
+                        write_receipt installing old_process_already_exited "The previous app exited before the termination signal."
+                        return 0
+                    fi
+                    fail old_process_identity_mismatch "The replacement target PID changed before the termination signal."
+                fi
+            fi
+            write_receipt installing termination_signal_sent "Termination signal sent to the verified previous app."
+            while true; do
+                if ! kill -0 "$APP_PID" 2>/dev/null; then return 0; fi
+                CURRENT_COMMAND="$(current_process_command)"
+                case "$CURRENT_COMMAND" in
+                    "$TARGET_EXECUTABLE"|"$TARGET_EXECUTABLE "*) ;;
+                    *) fail old_process_identity_changed "The previous app PID changed identity before replacement." ;;
+                esac
+                if [ "$(date +%s)" -ge "$WAIT_DEADLINE" ]; then
+                    fail old_process_timeout "The previous app did not exit after the helper termination request."
+                fi
+                sleep 0.2
+            done
+        }
         restore_old() {
             FAILED_NEW="$ROOT/CodexUsageStatus.failed-$$"
             if [ ! -d "$OLD" ] || [ ! -d "$BACKUP" ]; then return 1; fi
@@ -765,19 +825,13 @@ enum AppUpdateInstaller {
             return 0
         }
         write_receipt installing helper_started "Replacement helper started."
-        sleep 1
+
         if [ ! -d \"$NEW\" ]; then fail new_bundle_missing "The downloaded bundle is missing."; fi
-        # NSApp.terminate(nil) is asynchronous: AppDelegate first flushes
-        # pending writes and only then replies to AppKit. Wait for the exact
-        # old process to disappear before replacing or reopening the bundle;
-        # otherwise `open -n` can leave the old and new menu-bar instances
-        # alive together. A bounded wait fails closed and leaves the old app
-        # untouched if termination cannot be observed.
+        # The helper owns the final process hand-off. AppKit termination is
+        # still requested by the old app for its bounded persistence flush,
+        # but replacement no longer depends on an AppKit reply completing.
         write_receipt installing waiting_for_old_process "Waiting for the previous app to exit."
-        while kill -0 \"$APP_PID\" 2>/dev/null; do
-            if [ \"$(date +%s)\" -ge \"$WAIT_DEADLINE\" ]; then fail old_process_timeout "The previous app did not exit before the replacement deadline."; fi
-            sleep 0.2
-        done
+        terminate_target_process
         write_receipt installing backing_up_old_bundle "Backing up the current app bundle."
         if ! mv \"$OLD\" \"$BACKUP\"; then fail backup_failed "The current app bundle could not be backed up."; fi
         write_receipt installing replacing_bundle "Installing the downloaded app bundle."

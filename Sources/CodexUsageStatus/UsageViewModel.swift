@@ -153,9 +153,14 @@ final class UsageViewModel: ObservableObject {
     private var isSchedulingWorkers = false
     private var workerReplacementTasks: [UUID: Task<Void, Never>] = [:]
     private var isStopping = false
+    /// Becomes true only after the bounded persistence hand-off has drained.
+    /// The updater must not launch its replacement helper until this barrier
+    /// is complete, otherwise helper-owned SIGTERM could race local writes.
+    private var boundedShutdownHandoffCompleted = false
     private var localStoresLoaded = false
     private var startupTask: Task<Void, Never>?
     private var defaultClientStopTask: Task<Void, Never>?
+    private var shutdownPersistenceTask: Task<Bool, Never>?
     private var estimationHistoryScanTask: Task<Void, Never>?
     private var completedDurationSamples: [CodexExecutionDurationSample] = []
 
@@ -497,19 +502,44 @@ final class UsageViewModel: ObservableObject {
         tokenReelAudioPlayer.cancel()
         defaultClientStopTask?.cancel()
         defaultClientStopTask = nil
-        Task { [historyStore, tokenActivityStore] in
-            await historyStore.flushPendingWrites()
-            await tokenActivityStore.flushPendingWrites()
-            await PersistenceWriteCoordinator.shared.flush()
+        guard shutdownPersistenceTask == nil else { return }
+        let deadline = DispatchTime.now().uptimeNanoseconds &+ TerminationFlushPolicy.timeoutNanoseconds
+        shutdownPersistenceTask = Task { [historyStore, tokenActivityStore] in
+            let historyFlushed = await historyStore.flushPendingWrites(untilUptimeNanoseconds: deadline)
+            let tokenActivityFlushed = await tokenActivityStore.flushPendingWrites(untilUptimeNanoseconds: deadline)
+            let coordinatorFlushed = await PersistenceWriteCoordinator.shared.flush(untilUptimeNanoseconds: deadline)
+            return historyFlushed && tokenActivityFlushed && coordinatorFlushed
         }
+    }
+
+    /// Performs the single bounded shutdown hand-off used by both the normal
+    /// AppKit termination path and the updater replacement path. Keeping this
+    /// primitive shared prevents the helper's direct SIGTERM from bypassing
+    /// observer shutdown and pending history/token persistence.
+    @discardableResult
+    private func prepareForBoundedShutdownHandoff() async -> Bool {
+        if !boundedShutdownHandoffCompleted {
+            if !isStopping { stop() }
+            // `stop()` schedules the stores against one shared deadline. Await
+            // that exact task; otherwise an empty coordinator could report
+            // ready before the stores enqueue their final writes.
+            boundedShutdownHandoffCompleted = await shutdownPersistenceTask?.value ?? false
+        }
+        return boundedShutdownHandoffCompleted
     }
 
     /// Bounded termination hook used by AppDelegate's terminate-later reply.
     /// All disk work happens off the main actor and is capped by the shared
     /// coordinator timeout so shutdown cannot hang indefinitely.
     func prepareForTermination() async {
-        stop()
-        await PersistenceWriteCoordinator.shared.flush(timeoutNanoseconds: TerminationFlushPolicy.timeoutNanoseconds)
+        _ = await prepareForBoundedShutdownHandoff()
+    }
+
+    /// Called after an update archive has been validated but before the helper
+    /// is launched. A false result is fail-closed: no helper, SIGTERM, backup,
+    /// or bundle replacement may occur when persistence did not drain.
+    func prepareForUpdateReplacement() async -> Bool {
+        await prepareForBoundedShutdownHandoff()
     }
 
     func refresh() {
@@ -573,7 +603,10 @@ final class UsageViewModel: ObservableObject {
     }
 
     func installUpdate(_ release: AppUpdateRelease) {
-        updateService.install(release)
+        updateService.install(release) { [weak self] in
+            guard let self else { return false }
+            return await self.prepareForUpdateReplacement()
+        }
     }
 
     func setAccountScope(_ scope: AccountScope) {

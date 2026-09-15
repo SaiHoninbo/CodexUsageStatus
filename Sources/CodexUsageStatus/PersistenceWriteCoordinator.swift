@@ -69,12 +69,21 @@ actor PersistenceWriteCoordinator {
 
     /// Waits briefly for queued writes to finish. The timeout is deliberately
     /// bounded so app termination can never wait on disk indefinitely.
-    func flush(timeoutNanoseconds: UInt64 = TerminationFlushPolicy.timeoutNanoseconds) async {
-        let deadline = ContinuousClock.now.advanced(by: .nanoseconds(Int64(timeoutNanoseconds)))
+    @discardableResult
+    func flush(timeoutNanoseconds: UInt64 = TerminationFlushPolicy.timeoutNanoseconds) async -> Bool {
+        let deadline = DispatchTime.now().uptimeNanoseconds &+ timeoutNanoseconds
+        return await flush(untilUptimeNanoseconds: deadline)
+    }
+
+    /// Shares one wall-clock deadline across multiple persistence stores so a
+    /// shutdown hand-off cannot accidentally spend 500 ms per store.
+    @discardableResult
+    func flush(untilUptimeNanoseconds deadline: UInt64) async -> Bool {
         while !pending.isEmpty || !active.isEmpty {
-            if ContinuousClock.now >= deadline { return }
+            if DispatchTime.now().uptimeNanoseconds >= deadline { return false }
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
+        return true
     }
 
     private func startIfNeeded(key: String) {

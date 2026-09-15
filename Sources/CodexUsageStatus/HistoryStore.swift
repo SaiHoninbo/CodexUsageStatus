@@ -157,6 +157,11 @@ final class HistoryStore: ObservableObject {
         await PersistenceWriteCoordinator.shared.flush()
     }
 
+    @discardableResult
+    func flushPendingWrites(untilUptimeNanoseconds deadline: UInt64) async -> Bool {
+        await PersistenceWriteCoordinator.shared.flush(untilUptimeNanoseconds: deadline)
+    }
+
     private func isDuplicate(_ lhs: HistorySample, _ rhs: HistorySample) -> Bool {
         lhs.limitId == rhs.limitId
             && lhs.primaryUsedPercent == rhs.primaryUsedPercent

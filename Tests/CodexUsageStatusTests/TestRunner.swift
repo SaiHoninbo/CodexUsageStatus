@@ -183,6 +183,7 @@ struct CodexUsageStatusTests {
             ("update state presentation", testUpdateStatePresentation),
             ("update receipt observation policy", testUpdateReceiptObservationPolicy),
             ("update replacement waits for old process", testUpdateReplacementWaitsForOldProcess),
+            ("update preparation precedes replacement", testUpdatePreparationContract),
             ("update authority and packaging policy", testUpdateAuthorityAndPackagingPolicy),
             ("release signing policy", testReleaseSigningPolicy),
             ("release artifact validation", testReleaseArtifactValidation),
@@ -5184,14 +5185,20 @@ struct CodexUsageStatusTests {
             rootPath: "/tmp/update"
         )
         try expect(script.contains("APP_PID=$PPID"), "replacement captures the old app PID")
+        try expect(script.contains("TARGET_EXECUTABLE=\"$OLD/Contents/MacOS/CodexUsageStatus\""), "replacement derives the exact old executable identity")
+        try expect(script.contains("kill -TERM \"$APP_PID\""), "replacement helper owns the single graceful termination signal")
+        try expect(script.contains("termination_signal_sent"), "replacement records the helper termination hand-off")
+        try expect(script.contains("old_process_identity_mismatch"), "replacement fails closed when the target PID identity is wrong")
+        try expect(script.contains("old_process_identity_changed"), "replacement fails closed when the target PID changes")
+        try expect(!script.contains("kill -9"), "replacement never escalates to SIGKILL")
         try expect(script.contains("kill -0 \"$APP_PID\""), "replacement probes old process liveness")
         try expect(script.contains("WAIT_DEADLINE=$(($(date +%s) + 30))"), "replacement wait is bounded")
-        guard let waitRange = script.range(of: "while kill -0"),
+        guard let terminationRange = script.range(of: "termination_signal_sent"),
               let moveRange = script.range(of: "mv \"$OLD\" \"$BACKUP\""),
               let openRange = script.range(of: "/usr/bin/open -n \"$OLD\"") else {
             throw HarnessError.assertion("replacement script is missing its hand-off phases")
         }
-        try expect(waitRange.lowerBound < moveRange.lowerBound, "replacement waits before moving the old bundle")
+        try expect(terminationRange.lowerBound < moveRange.lowerBound, "replacement terminates the old process before moving its bundle")
         try expect(moveRange.lowerBound < openRange.lowerBound, "replacement opens the new bundle only after replacement")
         try expect(script.contains("old_process_timeout"), "replacement fails closed when the old process does not exit")
         try expect(script.contains("write_receipt"), "replacement writes a bounded hand-off receipt")
@@ -5204,6 +5211,34 @@ struct CodexUsageStatusTests {
         try expect(receipt?.step == "old_process_timeout", "replacement failure receipt preserves its step")
         try expect(receipt?.releaseVersion == "2.5.0", "replacement failure receipt preserves its target version")
         try expect(receipt?.displayMessage == "previous app did not exit", "replacement failure receipt preserves its factual message")
+    }
+
+    private static func testUpdatePreparationContract() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: "Sources/CodexUsageStatus/AppUpdateService.swift"),
+            encoding: .utf8
+        )
+        try expect(source.contains("prepareForReplacement"), "replacement scheduling accepts the bounded preparation hand-off")
+        try expect(source.contains("本機資料尚未完成安全寫入"), "preparation failure becomes an actionable install error")
+        try expect(source.range(of: "prepareForReplacement")!.lowerBound < source.range(of: "AppUpdateInstaller.schedule")!.lowerBound, "preparation completes before helper scheduling")
+
+        let modelSource = try String(
+            contentsOf: URL(fileURLWithPath: "Sources/CodexUsageStatus/UsageViewModel.swift"),
+            encoding: .utf8
+        )
+        try expect(modelSource.contains("prepareForBoundedShutdownHandoff"), "termination and updater share one bounded shutdown primitive")
+        try expect(modelSource.contains("prepareForUpdateReplacement"), "updater invokes the shared preparation primitive")
+        try expect(modelSource.contains("TerminationFlushPolicy.timeoutNanoseconds"), "updater hand-off retains the 500ms persistence bound")
+        try expect(modelSource.contains("boundedShutdownHandoffCompleted"), "successful preparation is recorded before helper launch")
+        try expect(modelSource.contains("await shutdownPersistenceTask?.value"), "updater hand-off awaits the stores' scheduled flush task")
+        try expect(modelSource.contains("DispatchTime.now().uptimeNanoseconds &+ TerminationFlushPolicy.timeoutNanoseconds"), "all shutdown stores share one 500ms wall-clock deadline")
+
+        let coordinatorSource = try String(
+            contentsOf: URL(fileURLWithPath: "Sources/CodexUsageStatus/PersistenceWriteCoordinator.swift"),
+            encoding: .utf8
+        )
+        try expect(coordinatorSource.contains("return false"), "flush reports a bounded preparation timeout")
+        try expect(coordinatorSource.contains("return true"), "flush reports a completed preparation hand-off")
     }
 
     private static func testUpdateAuthorityAndPackagingPolicy() throws {
@@ -5282,7 +5317,7 @@ struct CodexUsageStatusTests {
 
         let artifactURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("outputs/CodexUsageStatus.app.zip")
-        let expectedArtifactVersion = "2.4.103"
+        let expectedArtifactVersion = "2.4.104"
         let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, expectedArtifactVersion])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 
