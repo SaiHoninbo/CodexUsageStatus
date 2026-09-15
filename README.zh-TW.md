@@ -133,9 +133,9 @@ evidence。只把 ZIP 提交到 `main` 並不會自動建立 App 內的 Release 
 ad-hoc 驗證：
 
 ```bash
-./script/validate_release_artifact.sh outputs/CodexUsageStatus.app.zip 2.4.108
+./script/validate_release_artifact.sh outputs/CodexUsageStatus.app.zip 2.4.109
 # 正式 GitHub Release 驗證：
-./script/validate_release_artifact.sh --public-release outputs/CodexUsageStatus.app.zip 2.4.108
+./script/validate_release_artifact.sh --public-release outputs/CodexUsageStatus.app.zip 2.4.109
 ```
 
 休眠的 Developer ID validator 與目前 ad-hoc 驗證分開；它會刻意拒絕目前的
@@ -143,7 +143,7 @@ ad-hoc `.108` artifact，並要求 Developer ID Application 憑證鏈、指定 T
 Hardened Runtime、安全 timestamp 與已 stapling 的 notarization ticket：
 
 ```bash
-./script/validate_release_artifact.sh --public-release-developer-id outputs/CodexUsageStatus.app.zip 2.4.108 ABCDE12345
+./script/validate_release_artifact.sh --public-release-developer-id outputs/CodexUsageStatus.app.zip 2.4.109 ABCDE12345
 ```
 
 這個驗證模式不代表已授權 Developer ID 發版，也不會切換現行 ad-hoc 政策。
@@ -210,7 +210,7 @@ CODEX_DEVELOPER_IDENTITY='Developer ID Application: Name (ABCDE12345)' \
 CODEX_EXPECTED_TEAM_ID=ABCDE12345 \
 CODEX_NOTARY_PROFILE=codexusage-notary \
 ./script/build_and_run.sh package
-./script/validate_release_artifact.sh --public-release-developer-id outputs/CodexUsageStatus.app.zip 2.4.108 ABCDE12345
+./script/validate_release_artifact.sh --public-release-developer-id outputs/CodexUsageStatus.app.zip 2.4.109 ABCDE12345
 ```
 
 暫存 notarization submission ZIP 不是 GitHub asset。canonical
