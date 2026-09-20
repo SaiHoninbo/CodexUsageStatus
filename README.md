@@ -136,9 +136,9 @@ verification. Local, candidate, and public-release artifacts use the same
 ad-hoc validation path:
 
 ```bash
-./script/validate_release_artifact.sh outputs/CodexUsageStatus.app.zip 2.4.109
+./script/validate_release_artifact.sh outputs/CodexUsageStatus.app.zip 2.4.110
 # Public GitHub Release validation:
-./script/validate_release_artifact.sh --public-release outputs/CodexUsageStatus.app.zip 2.4.109
+./script/validate_release_artifact.sh --public-release outputs/CodexUsageStatus.app.zip 2.4.110
 ```
 
 The dormant Developer ID validator is separate and deliberately rejects the
@@ -147,7 +147,7 @@ Developer ID Application certificate chain, the expected Team ID, Hardened
 Runtime, and a secure timestamp:
 
 ```bash
-./script/validate_release_artifact.sh --public-release-developer-id outputs/CodexUsageStatus.app.zip 2.4.109 ABCDE12345
+./script/validate_release_artifact.sh --public-release-developer-id outputs/CodexUsageStatus.app.zip 2.4.110 ABCDE12345
 ```
 
 This validation mode does not authorize a Developer ID release or change the
@@ -222,7 +222,7 @@ CODEX_DEVELOPER_IDENTITY='Developer ID Application: Name (ABCDE12345)' \
 CODEX_EXPECTED_TEAM_ID=ABCDE12345 \
 CODEX_NOTARY_PROFILE=codexusage-notary \
 ./script/build_and_run.sh package
-./script/validate_release_artifact.sh --public-release-developer-id outputs/CodexUsageStatus.app.zip 2.4.109 ABCDE12345
+./script/validate_release_artifact.sh --public-release-developer-id outputs/CodexUsageStatus.app.zip 2.4.110 ABCDE12345
 ```
 
 The temporary notarization submission ZIP is not the GitHub asset. The final

@@ -1,5 +1,16 @@
 import Foundation
 
+enum ClipboardPasteDispatchDecision: Equatable {
+    case immediateFrontmost
+    case delayedActivationFallback
+}
+
+enum ClipboardPasteDispatchPolicy {
+    static func decision(targetIsVerifiedFrontmost: Bool) -> ClipboardPasteDispatchDecision {
+        targetIsVerifiedFrontmost ? .immediateFrontmost : .delayedActivationFallback
+    }
+}
+
 /// Pure guards for the temporary prompt clipboard flow.  AppKit performs the
 /// actual paste, while these predicates keep change-count and content checks
 /// deterministic in the core test harness.

@@ -43,6 +43,10 @@ final class FloatingHUDLayoutState: ObservableObject {
     @Published var hasEstablishedPosition = false
     @Published var quotaRowCount: Int = 1
     @Published var showsAccountInfoRow = false
+    /// Increments only when a hidden panel is successfully made visible. The
+    /// SwiftUI tree uses this as a per-show render marker while the panel
+    /// itself remains persistent and reusable.
+    @Published var visibilityGeneration: UInt64 = 0
 
     var size: NSSize {
         FloatingHUDLayout.size(
@@ -111,6 +115,8 @@ final class FloatingHUDPanelController: NSObject {
         case resetPosition = "reset-position"
         case focusLossRecheck = "focus-loss-recheck"
         case trustValidationCompletion = "trust-validation-completion"
+
+        var isApplicationActivation: Bool { self == .applicationActivation }
     }
 
     /// A publisher-bound trust result for one running process. The launch date
@@ -157,6 +163,7 @@ final class FloatingHUDPanelController: NSObject {
     private var spaceObserver: NSObjectProtocol?
     private var modelObservation: AnyCancellable?
     private var visibilityRefreshTask: Task<Void, Never>?
+    private var visibilityRefreshTaskGeneration: UInt64 = 0
     private var trustValidationTask: Task<Void, Never>?
     private var trustValidationGeneration: UInt64 = 0
     private var pendingTrustValidationIdentity: TrustValidationIdentity?
@@ -182,6 +189,7 @@ final class FloatingHUDPanelController: NSObject {
     private var hasEstablishedPosition = false
     private var lastKnownSafePanelFrame: NSRect?
     private var positioningSessionGeneration: UInt64 = 0
+    private var pendingMeaningfulRender: (generation: UInt64, requestUptimeNanoseconds: UInt64, trigger: VisibilityRefreshTrigger)?
     private var lastPlacement: HUDPlacement = .bottomRight
     private let layoutState = FloatingHUDLayoutState()
     private var isUserDraggingHUD = false
@@ -247,7 +255,10 @@ final class FloatingHUDPanelController: NSObject {
             setHUDThemeAppearance: { [weak self] appearance in
                 self?.applyHUDAppearance(appearance)
             },
-            openSettingsForAlert: { [weak self] alert in self?.onOpenSettingsForAlert?(alert) }
+            openSettingsForAlert: { [weak self] alert in self?.onOpenSettingsForAlert?(alert) },
+            meaningfulRender: { [weak self] generation in
+                self?.recordMeaningfulRender(generation: generation)
+            }
         )
         let hostingView = FirstClickHostingView(rootView: rootView)
         let initialAppearance = HUDThemePalette.forTheme(HUDThemePreference.loadTheme()).appearance
@@ -291,9 +302,13 @@ final class FloatingHUDPanelController: NSObject {
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] notification in
+            let activatedApplication = notification.object as? NSRunningApplication
             Task { @MainActor [weak self] in
-                self?.requestVisibilityRefresh(trigger: .applicationActivation)
+                self?.requestVisibilityRefresh(
+                    trigger: .applicationActivation,
+                    activatedApplication: activatedApplication
+                )
             }
         }
 
@@ -377,6 +392,8 @@ final class FloatingHUDPanelController: NSObject {
         cancelFocusLoss()
         visibilityRefreshTask?.cancel()
         visibilityRefreshTask = nil
+        visibilityRefreshTaskGeneration &+= 1
+        pendingMeaningfulRender = nil
         cancelTrustValidation()
         geometryRefreshTask?.cancel()
         geometryRefreshTask = nil
@@ -625,7 +642,10 @@ final class FloatingHUDPanelController: NSObject {
         )
     }
 
-    private func refreshVisibility(trigger: VisibilityRefreshTrigger) {
+    private func refreshVisibility(
+        trigger: VisibilityRefreshTrigger,
+        requestUptimeNanoseconds: UInt64? = nil
+    ) {
         let startedAt = DispatchTime.now().uptimeNanoseconds
         visibilityRefreshInvocation &+= 1
         let invocation = visibilityRefreshInvocation
@@ -684,6 +704,11 @@ final class FloatingHUDPanelController: NSObject {
             // visible wobble. Only show after a successful first placement.
             if !panel.isVisible {
                 panel.orderFrontRegardless()
+                recordPanelVisible(
+                    panel: panel,
+                    trigger: trigger,
+                    requestUptimeNanoseconds: requestUptimeNanoseconds
+                )
             }
         case .retainedExistingPosition:
             guard restoreRetainedPositionIfPossible(panel) else {
@@ -693,6 +718,11 @@ final class FloatingHUDPanelController: NSObject {
             panel.alphaValue = 1.0
             if !panel.isVisible {
                 panel.orderFrontRegardless()
+                recordPanelVisible(
+                    panel: panel,
+                    trigger: trigger,
+                    requestUptimeNanoseconds: requestUptimeNanoseconds
+                )
             }
         case .unavailable:
             // Without an authenticated safe frame, even a currently visible
@@ -708,33 +738,133 @@ final class FloatingHUDPanelController: NSObject {
     /// reconciliation.  The short delay lets @Published finish assigning its
     /// new value while preventing every intermediate publication from doing a
     /// full AX + CGWindowList pass on the main actor.
-    private func requestVisibilityRefresh(trigger: VisibilityRefreshTrigger) {
-        guard visibilityRefreshTask == nil else {
-            visibilityRefreshCoalescedCount &+= 1
-            Self.performanceLogger.debug(
-                "HUD visibility refresh coalesced trigger=\(trigger.rawValue, privacy: .public) total=\(self.visibilityRefreshCoalescedCount, privacy: .public)"
-            )
-            return
+    private func requestVisibilityRefresh(
+        trigger: VisibilityRefreshTrigger,
+        activatedApplication: NSRunningApplication? = nil
+    ) {
+        let requestUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+        Self.performanceLogger.debug(
+            "HUD visibility refresh requested trigger=\(trigger.rawValue, privacy: .public) request_uptime_ns=\(requestUptimeNanoseconds, privacy: .public)"
+        )
+
+        let shouldPromote = HUDVisibilityRefreshPolicy.shouldPromoteExplicitActivation(
+            isApplicationActivation: trigger.isApplicationActivation,
+            frontmostIsVerifiedCodex: isVerifiedCodexActivation(activatedApplication),
+            panelIsVisible: panel?.isVisible ?? false
+        )
+
+        if visibilityRefreshTask != nil {
+            guard shouldPromote else {
+                visibilityRefreshCoalescedCount &+= 1
+                Self.performanceLogger.debug(
+                    "HUD visibility refresh coalesced trigger=\(trigger.rawValue, privacy: .public) total=\(self.visibilityRefreshCoalescedCount, privacy: .public)"
+                )
+                return
+            }
+            // A verified user-visible Codex activation outranks a pending
+            // background reconciliation. The generation guard below prevents
+            // the cancelled task from clearing or running the replacement.
+            visibilityRefreshTask?.cancel()
+            visibilityRefreshTask = nil
         }
+
         let expectedGeneration = positioningSessionGeneration
-        let now = DispatchTime.now().uptimeNanoseconds
-        let elapsed = lastVisibilityRefreshUptimeNanoseconds.map { now >= $0 ? now - $0 : 0 } ?? minimumVisibilityRefreshIntervalNanoseconds
+        let elapsed = lastVisibilityRefreshUptimeNanoseconds.map {
+            requestUptimeNanoseconds >= $0 ? requestUptimeNanoseconds - $0 : 0
+        } ?? minimumVisibilityRefreshIntervalNanoseconds
         let rateLimitDelay = elapsed >= minimumVisibilityRefreshIntervalNanoseconds
             ? 0
             : minimumVisibilityRefreshIntervalNanoseconds - elapsed
-        let delayNanoseconds = max(50_000_000, rateLimitDelay)
+        let delayNanoseconds = HUDVisibilityRefreshPolicy.delayNanoseconds(
+            shouldPromote: shouldPromote,
+            rateLimitDelayNanoseconds: rateLimitDelay
+        )
+        visibilityRefreshTaskGeneration &+= 1
+        let taskGeneration = visibilityRefreshTaskGeneration
         visibilityRefreshTask = Task { @MainActor [weak self] in
-            defer { self?.visibilityRefreshTask = nil }
-            do {
-                try await Task.sleep(nanoseconds: delayNanoseconds)
-            } catch {
-                return
+            defer {
+                if let self, self.visibilityRefreshTaskGeneration == taskGeneration {
+                    self.visibilityRefreshTask = nil
+                }
+            }
+            if delayNanoseconds > 0 {
+                do {
+                    try await Task.sleep(nanoseconds: delayNanoseconds)
+                } catch {
+                    return
+                }
             }
             guard !Task.isCancelled,
                   let self,
+                  self.visibilityRefreshTaskGeneration == taskGeneration,
                   expectedGeneration == self.positioningSessionGeneration else { return }
-            self.refreshVisibility(trigger: trigger)
+            self.refreshVisibility(
+                trigger: trigger,
+                requestUptimeNanoseconds: requestUptimeNanoseconds
+            )
         }
+    }
+
+    private func isVerifiedCodexActivation(_ activatedApplication: NSRunningApplication?) -> Bool {
+        guard let activatedApplication,
+              let frontmost = NSWorkspace.shared.frontmostApplication,
+              activatedApplication.processIdentifier == frontmost.processIdentifier,
+              activatedApplication.launchDate == frontmost.launchDate,
+              activatedApplication.bundleURL == frontmost.bundleURL,
+              CodexApplicationPolicy.isCodexApplication(bundleIdentifier: frontmost.bundleIdentifier),
+              let launchDate = frontmost.launchDate,
+              let bundleURL = frontmost.bundleURL,
+              let trusted = trustedCodexApplicationIdentity else { return false }
+        return trusted.matches(
+            processIdentifier: frontmost.processIdentifier,
+            launchDate: launchDate,
+            bundleURL: bundleURL
+        )
+    }
+
+    private func recordPanelVisible(
+        panel: NSPanel,
+        trigger: VisibilityRefreshTrigger,
+        requestUptimeNanoseconds: UInt64?
+    ) {
+        guard panel.isVisible else { return }
+        let visibleUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+        let latencyMilliseconds = requestUptimeNanoseconds.map {
+            Double(visibleUptimeNanoseconds >= $0 ? visibleUptimeNanoseconds - $0 : 0) / 1_000_000.0
+        }
+        layoutState.visibilityGeneration &+= 1
+        pendingMeaningfulRender = (
+            generation: layoutState.visibilityGeneration,
+            requestUptimeNanoseconds: requestUptimeNanoseconds ?? visibleUptimeNanoseconds,
+            trigger: trigger
+        )
+        if let latencyMilliseconds {
+            Self.performanceLogger.debug(
+                "HUD visible trigger=\(trigger.rawValue, privacy: .public) latency_ms=\(latencyMilliseconds, privacy: .public) generation=\(self.layoutState.visibilityGeneration, privacy: .public)"
+            )
+        } else {
+            Self.performanceLogger.debug(
+                "HUD visible trigger=\(trigger.rawValue, privacy: .public) latency_ms=unmeasured generation=\(self.layoutState.visibilityGeneration, privacy: .public)"
+            )
+        }
+    }
+
+    private func recordMeaningfulRender(generation: UInt64) {
+        guard let pendingMeaningfulRender,
+              pendingMeaningfulRender.generation == generation,
+              panel?.isVisible == true else {
+            return
+        }
+        let renderedUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+        let latencyMilliseconds = Double(
+            renderedUptimeNanoseconds >= pendingMeaningfulRender.requestUptimeNanoseconds
+                ? renderedUptimeNanoseconds - pendingMeaningfulRender.requestUptimeNanoseconds
+                : 0
+        ) / 1_000_000.0
+        Self.performanceLogger.debug(
+            "HUD meaningful render trigger=\(pendingMeaningfulRender.trigger.rawValue, privacy: .public) latency_ms=\(latencyMilliseconds, privacy: .public) generation=\(generation, privacy: .public)"
+        )
+        self.pendingMeaningfulRender = nil
     }
 
     /// Cheap model-driven sizing path. It uses the last authoritative window
@@ -887,6 +1017,8 @@ final class FloatingHUDPanelController: NSObject {
         cancelFocusLoss()
         visibilityRefreshTask?.cancel()
         visibilityRefreshTask = nil
+        visibilityRefreshTaskGeneration &+= 1
+        pendingMeaningfulRender = nil
         positioningSessionGeneration &+= 1
     }
 
@@ -906,6 +1038,7 @@ final class FloatingHUDPanelController: NSObject {
     private func invalidatePositioningSession(clearProcessID: Bool) {
         positioningSessionGeneration &+= 1
         cancelFocusLoss()
+        pendingMeaningfulRender = nil
         hasEstablishedPosition = false
         layoutState.hasEstablishedPosition = false
         lastKnownSafePanelFrame = nil
@@ -1181,6 +1314,7 @@ final class FloatingHUDPanelController: NSObject {
             self.focusLossGeneration &+= 1
             self.layoutState.isCodexFocused = false
             panel.orderOut(nil)
+            self.pendingMeaningfulRender = nil
         }
     }
 
@@ -1194,6 +1328,7 @@ final class FloatingHUDPanelController: NSObject {
         cancelFocusLoss()
         layoutState.isCodexFocused = false
         panel.orderOut(nil)
+        pendingMeaningfulRender = nil
     }
 
     private func savedAnchor() -> HUDAnchor? {

@@ -160,3 +160,28 @@ enum HUDVisibilityPolicy {
         return candidate
     }
 }
+
+/// Scheduling policy for the AppKit visibility reconciler.  Only a verified
+/// Codex activation while the persistent panel is hidden may bypass the
+/// background coalescing floor; unrelated activations and already-visible
+/// panels keep the bounded reconciliation cadence.
+enum HUDVisibilityRefreshPolicy {
+    static let coalescingFloorNanoseconds: UInt64 = 50_000_000
+
+    static func shouldPromoteExplicitActivation(
+        isApplicationActivation: Bool,
+        frontmostIsVerifiedCodex: Bool,
+        panelIsVisible: Bool
+    ) -> Bool {
+        isApplicationActivation && frontmostIsVerifiedCodex && !panelIsVisible
+    }
+
+    static func delayNanoseconds(
+        shouldPromote: Bool,
+        rateLimitDelayNanoseconds: UInt64
+    ) -> UInt64 {
+        shouldPromote
+            ? rateLimitDelayNanoseconds
+            : max(coalescingFloorNanoseconds, rateLimitDelayNanoseconds)
+    }
+}

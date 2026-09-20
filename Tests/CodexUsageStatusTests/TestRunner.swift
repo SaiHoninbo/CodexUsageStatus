@@ -192,6 +192,7 @@ struct CodexUsageStatusTests {
             ("threshold policy boundaries", testThresholdPolicyBoundaries),
             ("HUD warning and decrease policy", testHUDWarningAndDecreasePolicy),
             ("HUD visibility policy", testHUDVisibilityPolicy),
+            ("HUD explicit verified-Codex activation fast path", testHUDExplicitVerifiedCodexActivationFastPath),
             ("HUD dual quota presentation policy", testHUDQuotaPresentationPolicy),
             ("HUD cross-Space unique Quartz matching", testHUDCrossSpaceUniqueQuartzMatching),
             ("HUD placement and adaptive anchors", testHUDPlacementAndAdaptiveAnchors),
@@ -218,6 +219,7 @@ struct CodexUsageStatusTests {
             ("reset credit decoding and sparse preservation", testResetCreditDecoding),
             ("reset credit consume request", testResetCreditConsumeRequest),
             ("HUD reset credit presentation", testHUDResetCreditPresentation),
+            ("HUD reset credit exact expiry deterministic projection", testHUDResetCreditExactExpiryProjection),
             ("account health decoding", testAccountHealthDecoding),
             ("account profile display formatting", testAccountProfileDisplayFormatting),
             ("account scope summary", testAccountScopeSummary),
@@ -279,6 +281,7 @@ struct CodexUsageStatusTests {
             ("HUD trust validation missing launch date", testHUDTrustValidationMissingLaunchDate),
             ("Codex prompt shortcuts", testCodexPromptShortcuts),
             ("temporary clipboard guards", testClipboardTemporaryOperationPolicy),
+            ("verified-frontmost clipboard immediate dispatch policy", testVerifiedFrontmostClipboardImmediateDispatchPolicy),
             ("retired feature cleanup", testRetiredFeatureCleanup)
             ,("App Server retry policy", testAppServerRetryPolicy)
             ,("refresh request coalescing", testRefreshRequestCoalescing)
@@ -840,7 +843,6 @@ struct CodexUsageStatusTests {
             ) == .retainPanel,
             "Codex restoration should retain the visible panel"
         )
-
         try expect(
             HUDVisibilityPolicy.cachedPresentation(currentProfileID: profileA, cached: cachedA) == cachedA,
             "same profile may reuse its cached presentation"
@@ -939,6 +941,62 @@ struct CodexUsageStatusTests {
         try expect(
             !HUDVisibilityPolicy.shouldApplyFocusLoss(scheduledGeneration: 4, currentGeneration: 5),
             "an invalidated focus-loss generation must not apply"
+        )
+    }
+
+    private static func testHUDExplicitVerifiedCodexActivationFastPath() throws {
+        try expect(
+            HUDVisibilityRefreshPolicy.shouldPromoteExplicitActivation(
+                isApplicationActivation: true,
+                frontmostIsVerifiedCodex: true,
+                panelIsVisible: false
+            ),
+            "a verified Codex activation promotes a hidden HUD immediately"
+        )
+        try expect(
+            !HUDVisibilityRefreshPolicy.shouldPromoteExplicitActivation(
+                isApplicationActivation: true,
+                frontmostIsVerifiedCodex: true,
+                panelIsVisible: true
+            ),
+            "a visible HUD keeps the existing coalescing policy"
+        )
+        try expect(
+            !HUDVisibilityRefreshPolicy.shouldPromoteExplicitActivation(
+                isApplicationActivation: true,
+                frontmostIsVerifiedCodex: false,
+                panelIsVisible: false
+            ),
+            "an unverified activation cannot bypass the visibility floor"
+        )
+        try expect(
+            !HUDVisibilityRefreshPolicy.shouldPromoteExplicitActivation(
+                isApplicationActivation: false,
+                frontmostIsVerifiedCodex: true,
+                panelIsVisible: false
+            ),
+            "non-application refreshes remain background-coalesced"
+        )
+        try expect(
+            HUDVisibilityRefreshPolicy.delayNanoseconds(
+                shouldPromote: true,
+                rateLimitDelayNanoseconds: 0
+            ) == 0,
+            "an explicit verified activation skips the fixed visibility floor"
+        )
+        try expect(
+            HUDVisibilityRefreshPolicy.delayNanoseconds(
+                shouldPromote: true,
+                rateLimitDelayNanoseconds: 12_000
+            ) == 12_000,
+            "an explicit activation preserves an active rate-limit delay"
+        )
+        try expect(
+            HUDVisibilityRefreshPolicy.delayNanoseconds(
+                shouldPromote: false,
+                rateLimitDelayNanoseconds: 0
+            ) == 50_000_000,
+            "background visibility refreshes retain the 50ms coalescing floor"
         )
     }
 
@@ -2348,7 +2406,8 @@ struct CodexUsageStatusTests {
             profileIDOverride: UUID? = nil,
             reduceMotion: Bool = false,
             isAccessibilityTrusted: Bool = true,
-            tokenFeedback: TokenHeroUpdateFeedback? = nil
+            tokenFeedback: TokenHeroUpdateFeedback? = nil,
+            exactExpiryText: String? = nil
         ) -> HUDPresentation {
             let effectiveProfileID = profileIDOverride ?? profileID
             let fiveHour = HUDQuotaWindowPresentation(
@@ -2401,6 +2460,7 @@ struct CodexUsageStatusTests {
                 resetCreditCount: nil,
                 resetCreditNextExpiryAt: nil,
                 resetCreditCountdownText: nil,
+                resetCreditExactExpiryText: exactExpiryText,
                 scaleLevel: .standard,
                 isPasteInFlight: false,
                 isPasteAndSubmitInFlight: false,
@@ -2426,6 +2486,10 @@ struct CodexUsageStatusTests {
         try expect(base != makePresentation(profileIDOverride: UUID()), "profile identity changes invalidate the HUD presentation")
         try expect(base != makePresentation(reduceMotion: true), "Reduce Motion changes invalidate pulse presentation")
         try expect(base != makePresentation(isAccessibilityTrusted: false), "Accessibility trust changes invalidate action availability")
+        try expect(
+            base != makePresentation(exactExpiryText: "9/21 07:38 到期"),
+            "Reset Credit exact expiry changes invalidate the HUD presentation"
+        )
         let feedback = TokenHeroUpdateFeedback(
             generation: 1,
             previousTokens: 4_829_524_138,
@@ -2643,6 +2707,95 @@ struct CodexUsageStatusTests {
         try expect(HUDResetCreditCountdownPolicy.text(expiresAt: expired, now: now) == "已過期", "expired detail remains explicit")
         try expect(HUDResetCreditCountdownPolicy.text(expiresAt: nil, now: now) == "到期未知", "missing expiry remains explicit")
 
+        let exactNow = Date(timeIntervalSince1970: 1_726_875_000)
+        let exactExpiry = Int64(1_726_875_480)
+        let taipei = TimeZone(secondsFromGMT: 8 * 3_600)!
+        let utc = TimeZone(secondsFromGMT: 0)!
+        try expect(
+            HUDResetCreditCountdownPolicy.exactExpiryText(
+                expiresAt: exactExpiry,
+                now: exactNow,
+                timeZone: taipei
+            ) == "9/21 07:38 到期",
+            "authoritative expiry formats in the injected local timezone"
+        )
+        try expect(
+            HUDResetCreditCountdownPolicy.exactExpiryText(
+                expiresAt: exactExpiry,
+                now: exactNow,
+                timeZone: utc
+            ) == "9/20 23:38 到期",
+            "exact expiry conversion does not depend on the host timezone"
+        )
+        let monthBoundaryNow = Date(timeIntervalSince1970: 1_727_740_740)
+        try expect(
+            HUDResetCreditCountdownPolicy.exactExpiryText(
+                expiresAt: 1_727_740_800,
+                now: monthBoundaryNow,
+                timeZone: utc
+            ) == "10/1 00:00 到期",
+            "exact expiry crosses the month boundary using local calendar fields"
+        )
+        try expect(
+            HUDResetCreditCountdownPolicy.exactExpiryText(
+                expiresAt: exactExpiry,
+                now: Date(timeIntervalSince1970: TimeInterval(exactExpiry) - 0.1),
+                timeZone: utc
+            ) != nil,
+            "expiry immediately before the boundary remains visible"
+        )
+        try expect(
+            HUDResetCreditCountdownPolicy.exactExpiryText(
+                expiresAt: exactExpiry,
+                now: Date(timeIntervalSince1970: TimeInterval(exactExpiry) + 0.1),
+                timeZone: utc
+            ) == nil,
+            "expiry immediately after the boundary fails closed"
+        )
+        for invalidExpiry in [Int64(0), Int64(-1), Int64.max] {
+            try expect(
+                HUDResetCreditCountdownPolicy.exactExpiryText(
+                    expiresAt: invalidExpiry,
+                    now: exactNow,
+                    timeZone: utc
+                ) == nil,
+                "invalid expiry \(invalidExpiry) does not fabricate an exact time"
+            )
+        }
+        try expect(
+            HUDResetCreditDisplayPolicy.timingText(
+                countdownText: "剩 0 天 8 小時",
+                exactExpiryText: "9/21 07:38 到期"
+            ) == "剩 0 天 8 小時 ｜ 9/21 07:38 到期",
+            "countdown and exact expiry share one separator policy"
+        )
+        try expect(
+            HUDResetCreditDisplayPolicy.timingText(
+                countdownText: "剩 0 天 8 小時",
+                exactExpiryText: nil
+            ) == "剩 0 天 8 小時",
+            "missing exact expiry leaves no dangling separator"
+        )
+        let exactCredits = RateLimitResetCredits(
+            availableCount: 2,
+            credits: [credit("exact", expiresAt: exactExpiry)]
+        )
+        let exactPresentation = try unwrap(
+            HUDResetCreditPresentation.make(from: exactCredits, now: exactNow, timeZone: taipei),
+            "exact Reset Credit presentation"
+        )
+        try expect(exactPresentation.exactExpiryText == "9/21 07:38 到期", "presentation exposes exact expiry text")
+        try expect(exactPresentation.countdownText == "剩不到 1 小時", "presentation uses the same now for countdown")
+        let refreshedCredits = RateLimitResetCredits(
+            availableCount: 2,
+            credits: [credit("exact", expiresAt: exactExpiry + 3_600)]
+        )
+        try expect(
+            HUDResetCreditPresentation.make(from: refreshedCredits, now: exactNow, timeZone: taipei)?.exactExpiryText
+                == "9/21 08:38 到期",
+            "a refreshed authoritative expiry replaces the previous projection"
+        )
+
         let visibleCredits = CreditsBalance(hasCredits: true, unlimited: false, balance: "3.50")
         try expect(HUDAccountInfoVisibilityPolicy.showsRow(credits: visibleCredits, resetCreditCount: nil), "Credits-only information shows the row")
         try expect(HUDAccountInfoVisibilityPolicy.showsRow(credits: nil, resetCreditCount: 2), "Reset-Credit-only information shows the row")
@@ -2651,10 +2804,130 @@ struct CodexUsageStatusTests {
         try expect(!HUDAccountInfoVisibilityPolicy.showsRow(credits: nil, resetCreditCount: nil), "no account information hides the row")
         let countOnly = RateLimitResetCredits(availableCount: 2, credits: nil)
         try expect(
+            HUDResetCreditPresentation.make(from: nil, now: now) == nil,
+            "a missing Reset Credit payload has no presentation"
+        )
+        try expect(
             HUDResetCreditPresentation.make(from: countOnly, now: now)?.nextExpiryAt == nil,
             "positive count with no detail never fabricates an expiry"
         )
+        try expect(
+            HUDResetCreditPresentation.make(from: countOnly, now: now)?.exactExpiryText == nil,
+            "count-only data never fabricates an exact expiry"
+        )
         try expect(HUDResetCreditPresentation.make(from: nil, now: now) == nil, "unknown Reset Credit data stays absent")
+    }
+
+    private static func testHUDResetCreditExactExpiryProjection() throws {
+        func credit(_ id: String, expiresAt: Int64?) -> RateLimitResetCredit {
+            RateLimitResetCredit(
+                id: id,
+                resetType: "weekly",
+                status: "available",
+                grantedAt: nil,
+                expiresAt: expiresAt,
+                title: id,
+                description: nil
+            )
+        }
+
+        let utc = TimeZone(secondsFromGMT: 0)!
+        let taipei = TimeZone(secondsFromGMT: 8 * 3_600)!
+        let now = Date(timeIntervalSince1970: 1_726_875_000)
+        let expiry = Int64(1_726_875_480)
+        let credits = RateLimitResetCredits(
+            availableCount: 1,
+            credits: [credit("exact", expiresAt: expiry)]
+        )
+        let presentation = try unwrap(
+            HUDResetCreditPresentation.make(from: credits, now: now, timeZone: taipei),
+            "deterministic exact-expiry presentation"
+        )
+        try expect(
+            presentation.exactExpiryText == "9/21 07:38 到期",
+            "the authoritative expiry is formatted in the injected local timezone"
+        )
+        try expect(
+            HUDResetCreditPresentation.make(from: credits, now: now, timeZone: utc)?.exactExpiryText
+                == "9/20 23:38 到期",
+            "the exact expiry formatter is independent of the host timezone"
+        )
+        try expect(
+            HUDResetCreditDisplayPolicy.timingText(
+                countdownText: presentation.countdownText,
+                exactExpiryText: presentation.exactExpiryText
+            ) == "剩不到 1 小時 ｜ 9/21 07:38 到期",
+            "the compact HUD joins countdown and exact expiry without changing row semantics"
+        )
+
+        let fractionalNow = Date(timeIntervalSince1970: 1_000.5)
+        let fractionalCredits = RateLimitResetCredits(
+            availableCount: 2,
+            credits: [
+                credit("already-elapsed", expiresAt: 1_000),
+                credit("fractional-future", expiresAt: 1_001)
+            ]
+        )
+        let fractionalPresentation = try unwrap(
+            HUDResetCreditPresentation.make(from: fractionalCredits, now: fractionalNow, timeZone: utc),
+            "fractional-now exact-expiry presentation"
+        )
+        try expect(
+            fractionalPresentation.nextExpiryAt == 1_001,
+            "one shared fractional now rejects an integer-second expiry already in the past"
+        )
+        try expect(
+            fractionalPresentation.exactExpiryText == "1/1 00:16 到期",
+            "the exact projection preserves authoritative seconds while formatting to minutes"
+        )
+
+        let monthBoundaryNow = Date(timeIntervalSince1970: 1_727_740_740)
+        try expect(
+            HUDResetCreditCountdownPolicy.exactExpiryText(
+                expiresAt: 1_727_740_800,
+                now: monthBoundaryNow,
+                timeZone: utc
+            ) == "10/1 00:00 到期",
+            "the exact expiry crosses a month boundary using the injected calendar"
+        )
+        try expect(
+            HUDResetCreditCountdownPolicy.exactExpiryText(
+                expiresAt: expiry,
+                now: Date(timeIntervalSince1970: TimeInterval(expiry) + 0.1),
+                timeZone: utc
+            ) == nil,
+            "an expired authoritative timestamp fails closed"
+        )
+        for invalidExpiry in [Int64(0), Int64(-1), Int64.max] {
+            try expect(
+                HUDResetCreditCountdownPolicy.exactExpiryText(
+                    expiresAt: invalidExpiry,
+                    now: now,
+                    timeZone: utc
+                ) == nil,
+                "invalid expiry (invalidExpiry) never fabricates an exact time"
+            )
+        }
+
+        let refreshedCredits = RateLimitResetCredits(
+            availableCount: 1,
+            credits: [credit("exact", expiresAt: expiry + 3_600)]
+        )
+        try expect(
+            HUDResetCreditPresentation.make(from: refreshedCredits, now: now, timeZone: taipei)?.exactExpiryText
+                == "9/21 08:38 到期",
+            "a refreshed authoritative expiry replaces the previous projection"
+        )
+        let countOnly = RateLimitResetCredits(availableCount: 2, credits: nil)
+        try expect(
+            HUDResetCreditPresentation.make(from: countOnly, now: now, timeZone: taipei)?.exactExpiryText == nil,
+            "count-only Reset Credit data never fabricates an exact expiry"
+        )
+        try expect(
+            HUDResetCreditDisplayPolicy.timingText(countdownText: "剩 0 天 8 小時", exactExpiryText: nil)
+                == "剩 0 天 8 小時",
+            "missing exact expiry leaves no dangling separator"
+        )
     }
 
     private static func testAccountHealthDecoding() throws {
@@ -5486,7 +5759,7 @@ struct CodexUsageStatusTests {
 
         let artifactURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("outputs/CodexUsageStatus.app.zip")
-        let expectedArtifactVersion = "2.4.109"
+        let expectedArtifactVersion = "2.4.110"
         let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, expectedArtifactVersion])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 
@@ -5840,6 +6113,17 @@ struct CodexUsageStatusTests {
         try expect(!ClipboardTemporaryOperationPolicy.canRestore(
             expectedText: "sample", observedText: "New user text", preparedChangeCount: 327, currentChangeCount: 328
         ), "new user clipboard is never overwritten")
+    }
+
+    private static func testVerifiedFrontmostClipboardImmediateDispatchPolicy() throws {
+        try expect(
+            ClipboardPasteDispatchPolicy.decision(targetIsVerifiedFrontmost: true) == .immediateFrontmost,
+            "verified frontmost Codex uses the immediate paste dispatch path"
+        )
+        try expect(
+            ClipboardPasteDispatchPolicy.decision(targetIsVerifiedFrontmost: false) == .delayedActivationFallback,
+            "non-frontmost or unverified Codex uses the activation fallback"
+        )
     }
 
     private static func testRetiredFeatureCleanup() throws {

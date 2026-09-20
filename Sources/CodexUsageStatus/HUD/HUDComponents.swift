@@ -141,6 +141,7 @@ struct HUDAccountInfoRow: View {
     let credits: CreditsBalance?
     let resetCreditCount: Int?
     let resetCreditCountdownText: String?
+    let resetCreditExactExpiryText: String?
     let width: CGFloat
     let sectionHeight: CGFloat
     let rowHeight: CGFloat
@@ -230,8 +231,12 @@ struct HUDAccountInfoRow: View {
                         .monospacedDigit()
                 }
                 .foregroundStyle(resetColor)
-                if count > 0, let resetCreditCountdownText {
-                    Text(resetCreditCountdownText)
+                if count > 0,
+                   let timingText = HUDResetCreditDisplayPolicy.timingText(
+                       countdownText: resetCreditCountdownText,
+                       exactExpiryText: resetCreditExactExpiryText
+                   ) {
+                    Text(timingText)
                         .font(.system(size: max(8, 10 * scaleFactor), weight: .medium, design: .rounded))
                         .foregroundStyle(palette.secondaryText)
                         .lineLimit(1)
@@ -248,8 +253,11 @@ struct HUDAccountInfoRow: View {
             parts.append(credits?.unlimited == true ? "Credits 無限額度" : "Credits 餘額 \(balanceText)")
         }
         if let visibleResetCreditCount {
-            let countdown = resetCreditCountdownText.map { "，\($0)" } ?? ""
-            parts.append("重置券 \(visibleResetCreditCount) 張\(countdown)")
+            let suffix = HUDResetCreditDisplayPolicy.timingText(
+                countdownText: resetCreditCountdownText,
+                exactExpiryText: resetCreditExactExpiryText
+            ).map { "，\($0)" } ?? ""
+            parts.append("重置券 \(visibleResetCreditCount) 張\(suffix)")
         }
         return parts.joined(separator: "；")
     }

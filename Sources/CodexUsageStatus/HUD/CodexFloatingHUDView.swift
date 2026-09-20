@@ -1,5 +1,32 @@
 import Foundation
+import AppKit
 import SwiftUI
+
+private struct HUDMeaningfulRenderMarker: NSViewRepresentable {
+    let generation: UInt64
+    let onRender: (UInt64) -> Void
+
+    final class Coordinator {
+        var lastGeneration: UInt64 = 0
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSView {
+        NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        guard generation > 0,
+              context.coordinator.lastGeneration != generation else { return }
+        context.coordinator.lastGeneration = generation
+        // The next main-loop turn is after SwiftUI has committed this
+        // generation-bearing update to the AppKit hosting tree.
+        DispatchQueue.main.async {
+            onRender(generation)
+        }
+    }
+}
 
 struct CodexFloatingHUDView: View {
     private enum UpdateFeedbackKind {
@@ -44,6 +71,7 @@ struct CodexFloatingHUDView: View {
     /// SwiftUI theme without recreating the panel or changing its geometry.
     let setHUDThemeAppearance: (HUDThemeAppearance) -> Void
     let openSettingsForAlert: (HUDAlertPresentation) -> Void
+    let meaningfulRender: (UInt64) -> Void
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var isPasteHovered = false
     @State private var isPasteAndSubmitHovered = false
@@ -123,6 +151,13 @@ struct CodexFloatingHUDView: View {
                 updateFeedbackBanner(updateFeedback)
                     .zIndex(20)
             }
+        }
+        .overlay {
+            HUDMeaningfulRenderMarker(
+                generation: layoutState.visibilityGeneration,
+                onRender: meaningfulRender
+            )
+            .allowsHitTesting(false)
         }
         .contextMenu {
             contextMenuContent
@@ -204,10 +239,8 @@ struct CodexFloatingHUDView: View {
             showsAccountInfoRow: showsAccountInfoRow,
             resetCreditCount: resetCredit?.count,
             resetCreditNextExpiryAt: resetCredit?.nextExpiryAt,
-            resetCreditCountdownText: resetCredit.flatMap { reset in
-                guard reset.count > 0, let expiry = reset.nextExpiryAt else { return nil }
-                return HUDResetCreditCountdownPolicy.text(expiresAt: expiry, now: model.currentDate)
-            },
+            resetCreditCountdownText: resetCredit?.countdownText,
+            resetCreditExactExpiryText: resetCredit?.exactExpiryText,
             scaleLevel: layoutState.scaleLevel,
             isPasteInFlight: isPasteInFlight,
             isPasteAndSubmitInFlight: isPasteAndSubmitInFlight,
@@ -380,6 +413,7 @@ struct CodexFloatingHUDView: View {
                     credits: displayedCredits,
                     resetCreditCount: presentation.resetCreditCount,
                     resetCreditCountdownText: presentation.resetCreditCountdownText,
+                    resetCreditExactExpiryText: presentation.resetCreditExactExpiryText,
                     width: metrics.contentWidth,
                     sectionHeight: metrics.accountInfoSectionHeight,
                     rowHeight: metrics.accountInfoRowHeight,

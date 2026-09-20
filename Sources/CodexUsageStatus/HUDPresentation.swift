@@ -72,6 +72,7 @@ struct HUDPresentation: Equatable {
     let resetCreditCount: Int?
     let resetCreditNextExpiryAt: Int64?
     let resetCreditCountdownText: String?
+    let resetCreditExactExpiryText: String?
     let scaleLevel: HUDScaleLevel
     let isPasteInFlight: Bool
     let isPasteAndSubmitInFlight: Bool
@@ -173,14 +174,29 @@ enum HUDAccountInfoVisibilityPolicy {
 struct HUDResetCreditPresentation: Equatable {
     let count: Int
     let nextExpiryAt: Int64?
+    let countdownText: String?
+    let exactExpiryText: String?
 
-    static func make(from resetCredits: RateLimitResetCredits?, now: Date) -> HUDResetCreditPresentation? {
+    static func make(
+        from resetCredits: RateLimitResetCredits?,
+        now: Date,
+        timeZone: TimeZone = .current
+    ) -> HUDResetCreditPresentation? {
         guard let resetCredits else { return nil }
+        let nextExpiryAt = HUDResetCreditCountdownPolicy.nearestFutureExpiry(
+            in: resetCredits.availableCredits,
+            now: now
+        )
         return HUDResetCreditPresentation(
             count: resetCredits.availableCount,
-            nextExpiryAt: HUDResetCreditCountdownPolicy.nearestFutureExpiry(
-                in: resetCredits.availableCredits,
-                now: now
+            nextExpiryAt: nextExpiryAt,
+            countdownText: nextExpiryAt.map {
+                HUDResetCreditCountdownPolicy.text(expiresAt: $0, now: now)
+            },
+            exactExpiryText: HUDResetCreditCountdownPolicy.exactExpiryText(
+                expiresAt: nextExpiryAt,
+                now: now,
+                timeZone: timeZone
             )
         )
     }
@@ -194,11 +210,11 @@ enum HUDResetCreditCountdownPolicy {
         in credits: [RateLimitResetCredit],
         now: Date
     ) -> Int64? {
-        let nowTimestamp = Int64(now.timeIntervalSince1970)
+        let nowTimestamp = now.timeIntervalSince1970
         return credits
             .filter(\.isAvailable)
             .compactMap(\.expiresAt)
-            .filter { $0 > nowTimestamp }
+            .filter { TimeInterval($0).isFinite && TimeInterval($0) > nowTimestamp }
             .min()
     }
 
@@ -212,6 +228,45 @@ enum HUDResetCreditCountdownPolicy {
         let days = totalHours / 24
         let hours = totalHours % 24
         return "剩 \(days) 天 \(hours) 小時"
+    }
+
+    /// Formats only an authoritative future expiry. This deliberately does
+    /// not derive precision from a count or a rounded countdown value.
+    static func exactExpiryText(
+        expiresAt: Int64?,
+        now: Date,
+        timeZone: TimeZone = .current
+    ) -> String? {
+        guard let expiresAt,
+              expiresAt > 0,
+              TimeInterval(expiresAt).isFinite else { return nil }
+
+        let expiry = Date(timeIntervalSince1970: TimeInterval(expiresAt))
+        guard expiry.timeIntervalSince1970.isFinite,
+              expiry >= .distantPast,
+              expiry <= .distantFuture,
+              expiry.timeIntervalSince(now) > 0 else { return nil }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = calendar
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "M/d HH:mm"
+        let formatted = formatter.string(from: expiry)
+        guard !formatted.isEmpty else { return nil }
+        return "\(formatted) 到期"
+    }
+}
+
+enum HUDResetCreditDisplayPolicy {
+    static func timingText(
+        countdownText: String?,
+        exactExpiryText: String?
+    ) -> String? {
+        let parts = [countdownText, exactExpiryText].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " ｜ ")
     }
 }
 

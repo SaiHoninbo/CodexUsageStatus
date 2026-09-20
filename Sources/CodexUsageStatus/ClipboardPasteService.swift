@@ -77,8 +77,7 @@ enum ClipboardPasteService {
 
         let token = UUID()
         activeTemporaryOperationToken = token
-        target.activate(options: [.activateAllWindows])
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+        let prepareAndPaste = {
             guard isTemporaryOperationOwned(by: token),
                   isTargetFrontmost(target),
                   pasteboard.changeCount == initialChangeCount else {
@@ -138,7 +137,8 @@ enum ClipboardPasteService {
                 return
             }
 
-            guard isTargetFrontmost(target),
+            guard isEventPostingAuthorized(),
+                  isTargetFrontmost(target),
                   pasteboard.changeCount == preparedChangeCount,
                   pasteboard.string(forType: .string) == shortcut.text,
                   postKey(keyCode: 9, flags: .maskCommand) else {
@@ -171,6 +171,7 @@ enum ClipboardPasteService {
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
                 guard isTemporaryOperationOwned(by: token),
+                      isEventPostingAuthorized(),
                       !target.isTerminated,
                       isTargetFrontmost(target),
                       pasteboard.changeCount == preparedChangeCount,
@@ -195,6 +196,30 @@ enum ClipboardPasteService {
                     completion: completion,
                     success: true
                 )
+            }
+        }
+
+        if ClipboardPasteDispatchPolicy.decision(
+            targetIsVerifiedFrontmost: isTargetFrontmost(target)
+        ) == .immediateFrontmost {
+            // Preserve the already-published in-flight UI state for one
+            // render turn before the fast clipboard dispatch can complete. If
+            // focus changes during that turn, keep the existing activation
+            // fallback instead of failing a valid user action silently.
+            DispatchQueue.main.async {
+                if isTargetFrontmost(target) {
+                    prepareAndPaste()
+                } else {
+                    target.activate(options: [.activateAllWindows])
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+                        prepareAndPaste()
+                    }
+                }
+            }
+        } else {
+            target.activate(options: [.activateAllWindows])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+                prepareAndPaste()
             }
         }
     }
@@ -351,11 +376,7 @@ enum ClipboardPasteService {
             return
         }
 
-        // The HUD is a non-activating panel. Activate Codex first and then
-        // post the shortcut to the active session, so the restored text field
-        // receives it even when the original Codex process/window was rebuilt.
-        target.activate(options: [.activateAllWindows])
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+        let dispatchIfFrontmost = {
             guard isTargetFrontmost(target) else {
                 target.activate(options: [.activateAllWindows])
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
@@ -381,6 +402,25 @@ enum ClipboardPasteService {
                 completion: completion
             )
         }
+
+        if ClipboardPasteDispatchPolicy.decision(
+            targetIsVerifiedFrontmost: isTargetFrontmost(target)
+        ) == .immediateFrontmost {
+            // The HUD action has already published its in-flight state. Yield
+            // one main-loop turn so SwiftUI can render that acknowledgement
+            // before a fast Cmd-V completion clears it.
+            DispatchQueue.main.async {
+                dispatchIfFrontmost()
+            }
+        } else {
+            // The HUD is a non-activating panel. Activate Codex first and then
+            // post the shortcut to the active session, so the restored text
+            // field receives it even when the original window was rebuilt.
+            target.activate(options: [.activateAllWindows])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+                dispatchIfFrontmost()
+            }
+        }
     }
 
     private static func finishPaste(
@@ -391,7 +431,7 @@ enum ClipboardPasteService {
         // Focus can change between the delayed activation check and this
         // event post. Revalidate both process liveness and signed publisher
         // immediately before Cmd-V so another app cannot receive the paste.
-        guard isTargetFrontmost(target) else {
+        guard isEventPostingAuthorized(), isTargetFrontmost(target) else {
             showAlert(
                 title: "無法貼上剪貼簿內容",
                 message: "Codex 沒有保持在前景，為安全起見沒有貼上或送出。"
@@ -420,7 +460,7 @@ enum ClipboardPasteService {
         // small settling window before sending Return, and re-check focus so
         // an intervening app cannot receive the submit key.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
-            guard !target.isTerminated, isTargetFrontmost(target) else {
+            guard isEventPostingAuthorized(), !target.isTerminated, isTargetFrontmost(target) else {
                 showAlert(
                     title: "貼上完成，但尚未送出",
                     message: "Codex 已不是前景視窗，為安全起見沒有發送 Enter。"
@@ -447,6 +487,8 @@ enum ClipboardPasteService {
             return false
         }
         return frontmost.processIdentifier == target.processIdentifier
+            && frontmost.launchDate == target.launchDate
+            && frontmost.bundleURL == target.bundleURL
             && isCodexApplication(frontmost)
     }
 
