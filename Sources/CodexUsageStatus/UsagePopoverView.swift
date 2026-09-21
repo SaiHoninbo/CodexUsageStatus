@@ -204,7 +204,6 @@ struct UsagePopoverView: View {
                     }
                     HStack(spacing: 7) {
                         accountSwitcherMenu
-                        accountManagementButton
                     }
                 }
                 Spacer(minLength: 0)
@@ -264,6 +263,14 @@ struct UsagePopoverView: View {
                 let created = model.createManagedProfile()
                 PopoverInteractionTrace.effectCompleted("header.createAccount", success: created != nil)
             }
+            Divider()
+            Button("管理帳號…") {
+                acknowledgeAction("帳號管理已開啟", control: "header.accountManagement")
+                PopoverInteractionTrace.started("header.accountManagement")
+                selectionController.select(AccountManagementRoute.destination(from: selectedTab))
+                PopoverInteractionTrace.effectDispatched("header.accountManagement")
+                PopoverInteractionTrace.effectCompleted("header.accountManagement", success: true)
+            }
         } label: {
             HStack(spacing: 4) {
                 Text(model.accountDisplayName)
@@ -279,22 +286,6 @@ struct UsagePopoverView: View {
         .menuStyle(.borderlessButton)
         .help("切換目前帳號或建立受管帳號")
         .accessibilityLabel("目前帳號：\(model.accountDisplayName)")
-    }
-
-    private var accountManagementButton: some View {
-        Button {
-            acknowledgeAction("帳號管理已開啟", control: "header.accountManagement")
-            PopoverInteractionTrace.started("header.accountManagement")
-            selectionController.select(AccountManagementRoute.destination(from: selectedTab))
-            PopoverInteractionTrace.effectDispatched("header.accountManagement")
-            PopoverInteractionTrace.effectCompleted("header.accountManagement", success: true)
-        } label: {
-            Label("管理", systemImage: "person.2")
-                .font(.caption.weight(.semibold))
-        }
-        .buttonStyle(PopoverImmediateButtonStyle(controlID: "header.accountManagement"))
-        .help("開啟帳號管理")
-        .accessibilityLabel("帳號管理")
     }
 
     // Shared formatting belongs to the shell because the alert, Overview, and

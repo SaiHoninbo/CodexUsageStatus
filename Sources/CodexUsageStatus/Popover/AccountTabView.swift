@@ -26,14 +26,11 @@ extension UsagePopoverView {
                     .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             } else {
                 accountManagementSection("目前帳號", rows: currentRows, compact: true)
-                if AccountManagementDisclosurePolicy.shouldShowAttentionSummary(count: attentionCount) {
-                    attentionSummary(count: attentionCount)
-                }
                 if !otherRows.isEmpty {
-                    otherAccountsDisclosure(count: otherRows.count)
+                    otherAccountsDisclosure(count: otherRows.count, attentionCount: attentionCount)
                 }
                 if isAllAccountsExpanded {
-                    accountManagementSection("其他帳號 \(otherRows.count)", rows: expandedRows, lazy: true)
+                    expandedOtherAccountRows(expandedRows)
                 }
             }
 
@@ -44,7 +41,7 @@ extension UsagePopoverView {
         }
         .onChange(of: isAllAccountsExpanded) { _, _ in
             DispatchQueue.main.async {
-                PopoverInteractionTrace.firstContentVisible("accounts.allAccountsDisclosure")
+                PopoverInteractionTrace.firstContentVisible("accounts.otherAccountsDisclosure")
             }
         }
     }
@@ -103,36 +100,9 @@ extension UsagePopoverView {
         }
     }
 
-    private func attentionSummary(count: Int) -> some View {
-        Button {
-            acknowledgeAction("已展開需要處理的帳號", control: "accounts.attentionSummary")
-            PopoverInteractionTrace.started("accounts.attentionSummary")
-            isAllAccountsExpanded = true
-            PopoverInteractionTrace.effectDispatched("accounts.attentionSummary")
-            PopoverInteractionTrace.effectCompleted("accounts.attentionSummary", success: true)
-        } label: {
-            HStack(spacing: 7) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(HUDColorPalette.warning)
-                Text("\(count) 個帳號需要處理")
-                    .font(.caption.weight(.semibold))
-                Spacer(minLength: 0)
-                Image(systemName: "arrow.right")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(HUDColorPalette.tertiaryText)
-            }
-            .padding(9)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(PopoverImmediateButtonStyle(controlID: "accounts.attentionSummary"))
-        .background(HUDColorPalette.warning.opacity(0.12), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(HUDColorPalette.warning.opacity(0.35), lineWidth: 0.7) }
-        .accessibilityLabel("\(count) 個帳號需要處理")
-        .accessibilityHint("展開其他帳號列表")
-    }
-
-    private func otherAccountsDisclosure(count: Int) -> some View {
-        Button {
+    private func otherAccountsDisclosure(count: Int, attentionCount: Int) -> some View {
+        let hasAttention = AccountManagementDisclosurePolicy.shouldShowAttentionSummary(count: attentionCount)
+        return Button {
             let expanded = !isAllAccountsExpanded
             acknowledgeAction(expanded ? "其他帳號已展開" : "其他帳號已收合", control: "accounts.otherAccountsDisclosure")
             PopoverInteractionTrace.started("accounts.otherAccountsDisclosure")
@@ -141,24 +111,39 @@ extension UsagePopoverView {
             PopoverInteractionTrace.effectCompleted("accounts.otherAccountsDisclosure", success: true)
         } label: {
             HStack(spacing: 7) {
-                Image(systemName: isAllAccountsExpanded ? "chevron.down" : "chevron.right")
-                    .font(.caption2.weight(.bold))
-                    .frame(width: 12)
-                Label(AccountManagementDisclosurePolicy.otherAccountsLabel(count: count), systemImage: "person.3")
+                Image(systemName: hasAttention ? "exclamationmark.triangle.fill" : "person.3")
+                    .foregroundStyle(hasAttention ? HUDColorPalette.warning : HUDColorPalette.secondaryText)
+                    .frame(width: 16)
+                Text(AccountManagementDisclosurePolicy.disclosureLabel(otherCount: count, attentionCount: attentionCount))
                     .font(.caption.weight(.semibold))
                 Spacer(minLength: 0)
-                Text("\(count)")
-                    .font(.caption2.monospacedDigit())
+                Image(systemName: isAllAccountsExpanded ? "chevron.down" : "chevron.right")
+                    .font(.caption2.weight(.bold))
                     .foregroundStyle(HUDColorPalette.tertiaryText)
             }
             .padding(9)
             .contentShape(Rectangle())
         }
         .buttonStyle(PopoverImmediateButtonStyle(controlID: "accounts.otherAccountsDisclosure"))
-        .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(HUDColorPalette.border, lineWidth: 0.7) }
+        .background(
+            hasAttention ? HUDColorPalette.warning.opacity(0.12) : HUDColorPalette.surface,
+            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(hasAttention ? HUDColorPalette.warning.opacity(0.35) : HUDColorPalette.border, lineWidth: 0.7)
+        }
         .accessibilityValue(isAllAccountsExpanded ? "已展開" : "已收合")
         .accessibilityHint(isAllAccountsExpanded ? "收合其他帳號列表" : "展開其他帳號列表")
+    }
+
+    private func expandedOtherAccountRows(_ rows: [AllAccountsUsageRowPresentation]) -> some View {
+        LazyVStack(alignment: .leading, spacing: 0) {
+            accountManagementRows(rows, compact: false)
+        }
+        .padding(.horizontal, 10)
+        .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(HUDColorPalette.border, lineWidth: 0.7) }
     }
 
     private func isAttention(_ row: AllAccountsUsageRowPresentation) -> Bool {

@@ -37,8 +37,11 @@ enum AccountManagementDisclosurePolicy {
         !isCurrent
     }
 
-    static func otherAccountsLabel(count: Int) -> String {
-        "其他帳號 \(max(0, count))"
+    static func disclosureLabel(otherCount: Int, attentionCount: Int) -> String {
+        let safeOtherCount = max(0, otherCount)
+        let safeAttentionCount = max(0, attentionCount)
+        guard safeAttentionCount > 0 else { return "其他帳號 \(safeOtherCount)" }
+        return "其他帳號 \(safeOtherCount) · \(safeAttentionCount) 需處理"
     }
 }
 

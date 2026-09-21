@@ -5142,9 +5142,10 @@ struct CodexUsageStatusTests {
                 && AccountManagementDisclosurePolicy.shouldShowAttentionSummary(count: 2)
                 && !AccountManagementDisclosurePolicy.includesInOtherAccounts(isCurrent: true)
                 && AccountManagementDisclosurePolicy.includesInOtherAccounts(isCurrent: false)
-                && AccountManagementDisclosurePolicy.otherAccountsLabel(count: 3) == "其他帳號 3"
-                && AccountManagementDisclosurePolicy.otherAccountsLabel(count: -1) == "其他帳號 0",
-            "account management exposes only a warning summary and a non-current disclosure"
+                && AccountManagementDisclosurePolicy.disclosureLabel(otherCount: 3, attentionCount: 0) == "其他帳號 3"
+                && AccountManagementDisclosurePolicy.disclosureLabel(otherCount: 22, attentionCount: 3) == "其他帳號 22 · 3 需處理"
+                && AccountManagementDisclosurePolicy.disclosureLabel(otherCount: -1, attentionCount: -2) == "其他帳號 0",
+            "account management merges warning count into the single other-account disclosure"
         )
     }
 
