@@ -1,14 +1,13 @@
 import SwiftUI
 
-/// Full account management is a secondary surface. The shell owns the current
-/// account switcher; this surface owns the current row and the lazy list of
-/// other profiles without repeating the same account in multiple sections.
+/// Full account management is a secondary surface. This surface owns the
+/// account rows and the lazy list of other profiles without repeating the same
+/// account in multiple sections.
 extension UsagePopoverView {
     var accountsTab: some View {
         let summaryRows = accountManagementSummaryRows
         let currentRows = summaryRows.filter(\.isCurrent)
         let otherRows = orderedOtherRows(summaryRows)
-        let attentionCount = otherRows.filter(isAttention).count
         // The full activity/token projection is intentionally evaluated only
         // after disclosure, preserving the existing lazy account behavior.
         let expandedRows = isAllAccountsExpanded ? orderedOtherRows(accountTabRows) : []
@@ -27,7 +26,7 @@ extension UsagePopoverView {
             } else {
                 accountManagementSection("目前帳號", rows: currentRows, compact: true)
                 if !otherRows.isEmpty {
-                    otherAccountsDisclosure(count: otherRows.count, attentionCount: attentionCount)
+                    otherAccountsDisclosure(count: otherRows.count)
                 }
                 if isAllAccountsExpanded {
                     expandedOtherAccountRows(expandedRows)
@@ -100,9 +99,8 @@ extension UsagePopoverView {
         }
     }
 
-    private func otherAccountsDisclosure(count: Int, attentionCount: Int) -> some View {
-        let hasAttention = AccountManagementDisclosurePolicy.shouldShowAttentionSummary(count: attentionCount)
-        return Button {
+    private func otherAccountsDisclosure(count: Int) -> some View {
+        Button {
             let expanded = !isAllAccountsExpanded
             acknowledgeAction(expanded ? "其他帳號已展開" : "其他帳號已收合", control: "accounts.otherAccountsDisclosure")
             PopoverInteractionTrace.started("accounts.otherAccountsDisclosure")
@@ -111,10 +109,10 @@ extension UsagePopoverView {
             PopoverInteractionTrace.effectCompleted("accounts.otherAccountsDisclosure", success: true)
         } label: {
             HStack(spacing: 7) {
-                Image(systemName: hasAttention ? "exclamationmark.triangle.fill" : "person.3")
-                    .foregroundStyle(hasAttention ? HUDColorPalette.warning : HUDColorPalette.secondaryText)
+                Image(systemName: "person.3")
+                    .foregroundStyle(HUDColorPalette.secondaryText)
                     .frame(width: 16)
-                Text(AccountManagementDisclosurePolicy.disclosureLabel(otherCount: count, attentionCount: attentionCount))
+                Text(AccountManagementDisclosurePolicy.otherAccountsLabel(count: count))
                     .font(.caption.weight(.semibold))
                 Spacer(minLength: 0)
                 Image(systemName: isAllAccountsExpanded ? "chevron.down" : "chevron.right")
@@ -125,13 +123,10 @@ extension UsagePopoverView {
             .contentShape(Rectangle())
         }
         .buttonStyle(PopoverImmediateButtonStyle(controlID: "accounts.otherAccountsDisclosure"))
-        .background(
-            hasAttention ? HUDColorPalette.warning.opacity(0.12) : HUDColorPalette.surface,
-            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
-        )
+        .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .stroke(hasAttention ? HUDColorPalette.warning.opacity(0.35) : HUDColorPalette.border, lineWidth: 0.7)
+                .stroke(HUDColorPalette.border, lineWidth: 0.7)
         }
         .accessibilityValue(isAllAccountsExpanded ? "已展開" : "已收合")
         .accessibilityHint(isAllAccountsExpanded ? "收合其他帳號列表" : "展開其他帳號列表")

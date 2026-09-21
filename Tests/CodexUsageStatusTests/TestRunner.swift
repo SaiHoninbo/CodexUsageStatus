@@ -5138,14 +5138,11 @@ struct CodexUsageStatusTests {
             "full account management is collapsed until explicitly expanded"
         )
         try expect(
-            !AccountManagementDisclosurePolicy.shouldShowAttentionSummary(count: 0)
-                && AccountManagementDisclosurePolicy.shouldShowAttentionSummary(count: 2)
-                && !AccountManagementDisclosurePolicy.includesInOtherAccounts(isCurrent: true)
+            !AccountManagementDisclosurePolicy.includesInOtherAccounts(isCurrent: true)
                 && AccountManagementDisclosurePolicy.includesInOtherAccounts(isCurrent: false)
-                && AccountManagementDisclosurePolicy.disclosureLabel(otherCount: 3, attentionCount: 0) == "其他帳號 3"
-                && AccountManagementDisclosurePolicy.disclosureLabel(otherCount: 22, attentionCount: 3) == "其他帳號 22 · 3 需處理"
-                && AccountManagementDisclosurePolicy.disclosureLabel(otherCount: -1, attentionCount: -2) == "其他帳號 0",
-            "account management merges warning count into the single other-account disclosure"
+                && AccountManagementDisclosurePolicy.otherAccountsLabel(count: 3) == "其他帳號 3"
+                && AccountManagementDisclosurePolicy.otherAccountsLabel(count: -1) == "其他帳號 0",
+            "account management keeps one non-current disclosure without an aggregate warning row"
         )
     }
 
