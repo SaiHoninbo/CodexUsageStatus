@@ -207,7 +207,7 @@ cat > "$INFO_PLIST" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>2.4.110</string>
+  <string>2.4.111</string>
   <key>CFBundleVersion</key>
   <string>126</string>
   <key>LSMinimumSystemVersion</key>
@@ -279,7 +279,7 @@ if [[ "$SHOULD_PACKAGE" == 1 ]]; then
     PACKAGE_TEMP_ZIP="$PACKAGE_TEMP_DIR/$APP_NAME.app.zip"
     COPYFILE_DISABLE=1 ditto --norsrc -c -k --keepParent "$APP_BUNDLE" "$PACKAGE_TEMP_ZIP"
     "$ROOT_DIR/script/validate_release_artifact.sh" \
-      --public-release-developer-id "$PACKAGE_TEMP_ZIP" "2.4.110" "$EXPECTED_TEAM_ID"
+      --public-release-developer-id "$PACKAGE_TEMP_ZIP" "2.4.111" "$EXPECTED_TEAM_ID"
     mv "$PACKAGE_TEMP_ZIP" "$OUTPUT_ZIP"
     rmdir "$PACKAGE_TEMP_DIR"
     PACKAGE_TEMP_ZIP=""
