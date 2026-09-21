@@ -193,6 +193,7 @@ struct CodexUsageStatusTests {
             ("HUD warning and decrease policy", testHUDWarningAndDecreasePolicy),
             ("HUD visibility policy", testHUDVisibilityPolicy),
             ("HUD explicit verified-Codex activation fast path", testHUDExplicitVerifiedCodexActivationFastPath),
+            ("HUD session overlay window-level policy", testHUDSessionOverlayWindowLevelPolicy),
             ("HUD dual quota presentation policy", testHUDQuotaPresentationPolicy),
             ("HUD cross-Space unique Quartz matching", testHUDCrossSpaceUniqueQuartzMatching),
             ("HUD placement and adaptive anchors", testHUDPlacementAndAdaptiveAnchors),
@@ -997,6 +998,105 @@ struct CodexUsageStatusTests {
                 rateLimitDelayNanoseconds: 0
             ) == 50_000_000,
             "background visibility refreshes retain the 50ms coalescing floor"
+        )
+    }
+
+    private static func testHUDSessionOverlayWindowLevelPolicy() throws {
+        let panelFrame = CGRect(x: 100, y: 100, width: 320, height: 180)
+        let egoOverlay = HUDWindowLayerDescriptor(
+            ownerName: "ego lite",
+            ownerBundleIdentifier: "com.citrolabs.ego.lite",
+            layer: 100,
+            frame: panelFrame,
+            isOnScreen: true,
+            isOwnWindow: false
+        )
+
+        try expect(
+            HUDWindowLevelPolicy.targetLevel(
+                panelFrame: panelFrame,
+                windows: [egoOverlay]
+            ) == 101,
+            "an intersecting ego-lite overlay promotes only one level above its layer"
+        )
+        try expect(
+            HUDWindowLevelPolicy.targetLevel(
+                panelFrame: panelFrame,
+                windows: [
+                    HUDWindowLayerDescriptor(
+                        ownerName: "Unrelated App",
+                        ownerBundleIdentifier: "com.example.unrelated",
+                        layer: 100,
+                        frame: panelFrame,
+                        isOnScreen: true,
+                        isOwnWindow: false
+                    )
+                ]
+            ) == HUDWindowLevelPolicy.floatingLevel,
+            "unrelated applications cannot cause a HUD level escalation"
+        )
+        try expect(
+            HUDWindowLevelPolicy.targetLevel(
+                panelFrame: panelFrame,
+                windows: [
+                    HUDWindowLayerDescriptor(
+                        ownerName: "PlanLoop Desktop",
+                        ownerBundleIdentifier: "com.example.planloop",
+                        layer: 100,
+                        frame: CGRect(x: 0, y: 0, width: 50, height: 50),
+                        isOnScreen: true,
+                        isOwnWindow: false
+                    )
+                ]
+            ) == HUDWindowLevelPolicy.floatingLevel,
+            "a non-intersecting PlanLoop window cannot cause a HUD level escalation"
+        )
+        try expect(
+            HUDWindowLevelPolicy.targetLevel(
+                panelFrame: panelFrame,
+                windows: [
+                    HUDWindowLayerDescriptor(
+                        ownerName: "ego lite",
+                        ownerBundleIdentifier: "com.citrolabs.ego.lite",
+                        layer: 100,
+                        frame: panelFrame,
+                        isOnScreen: false,
+                        isOwnWindow: false
+                    )
+                ]
+            ) == HUDWindowLevelPolicy.floatingLevel,
+            "an off-screen overlay cannot cause a HUD level escalation"
+        )
+        try expect(
+            HUDWindowLevelPolicy.targetLevel(
+                panelFrame: panelFrame,
+                windows: [
+                    HUDWindowLayerDescriptor(
+                        ownerName: "ego lite",
+                        ownerBundleIdentifier: "com.citrolabs.ego.lite",
+                        layer: 100,
+                        frame: panelFrame,
+                        isOnScreen: true,
+                        isOwnWindow: true
+                    )
+                ]
+            ) == HUDWindowLevelPolicy.floatingLevel,
+            "the HUD's own window cannot cause a self-escalation"
+        )
+        try expect(
+            HUDWindowLevelPolicy.targetLevel(
+                panelFrame: panelFrame,
+                windows: [egoOverlay],
+                maximumLevel: 50
+            ) == HUDWindowLevelPolicy.floatingLevel,
+            "an escalation beyond the bounded maximum fails closed"
+        )
+        try expect(
+            HUDWindowLevelPolicy.isKnownSessionOverlay(
+                ownerName: "Window Server",
+                ownerBundleIdentifier: "com.apple.windowserver"
+            ) == false,
+            "system UI is not treated as a PlanLoop session overlay"
         )
     }
 

@@ -381,6 +381,88 @@ final class FloatingHUDPanelController: NSObject {
         panel?.contentView?.appearance = appKitAppearance
     }
 
+    /// Keep the HUD above a verified PlanLoop/ego-lite non-activating overlay
+    /// only when that overlay actually intersects the HUD frame. The normal
+    /// `.floating` level remains the default, and the bounded policy refuses
+    /// system-reserved levels or unrelated application windows.
+    @discardableResult
+    private func reconcileWindowLevel(_ panel: NSPanel) -> Bool {
+        let baseLevel = NSWindow.Level.floating.rawValue
+        let currentLevel = panel.level.rawValue
+        let targetLevel = HUDWindowLevelPolicy.targetLevel(
+            baseLevel: baseLevel,
+            panelFrame: panel.frame,
+            windows: onScreenWindowDescriptors(intersecting: panel.frame)
+        )
+        guard currentLevel != targetLevel else { return false }
+
+        panel.level = NSWindow.Level(rawValue: targetLevel)
+        Self.performanceLogger.debug(
+            "HUD window level reconciled current=\(currentLevel, privacy: .public) target=\(targetLevel, privacy: .public)"
+        )
+        return targetLevel > currentLevel
+    }
+
+    private func restoreBaseWindowLevel(_ panel: NSPanel) {
+        let baseLevel = NSWindow.Level.floating
+        guard panel.level != baseLevel else { return }
+        panel.level = baseLevel
+    }
+
+    private func onScreenWindowDescriptors(intersecting panelFrame: NSRect) -> [HUDWindowLayerDescriptor] {
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+            return []
+        }
+
+        let ownProcessIdentifier = ProcessInfo.processInfo.processIdentifier
+        return windows.compactMap { info in
+            guard let isOnScreen = (info[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue,
+                  isOnScreen,
+                  let layer = (info[kCGWindowLayer as String] as? NSNumber)?.intValue,
+                  let bounds = info[kCGWindowBounds as String] as? [String: Any],
+                  let x = (bounds["X"] as? NSNumber)?.doubleValue,
+                  let y = (bounds["Y"] as? NSNumber)?.doubleValue,
+                  let width = (bounds["Width"] as? NSNumber)?.doubleValue,
+                  let height = (bounds["Height"] as? NSNumber)?.doubleValue,
+                  width > 0,
+                  height > 0 else { return nil }
+            guard layer > NSWindow.Level.floating.rawValue else { return nil }
+
+            let quartzFrame = CGRect(x: x, y: y, width: width, height: height)
+            guard let displayMapping = quartzDisplayMapping(for: quartzFrame) else { return nil }
+            let appKitFrame = appKitWindowFrame(from: quartzFrame, mapping: displayMapping)
+            guard appKitFrame.intersects(panelFrame) else { return nil }
+
+            let ownerName = info[kCGWindowOwnerName as String] as? String
+            let ownerProcessIdentifier = (info[kCGWindowOwnerPID as String] as? NSNumber)?.intValue ?? -1
+            let ownerBundleIdentifier: String?
+            if HUDWindowLevelPolicy.isKnownSessionOverlay(
+                ownerName: ownerName,
+                ownerBundleIdentifier: nil
+            ) {
+                ownerBundleIdentifier = nil
+            } else {
+                ownerBundleIdentifier = NSRunningApplication(
+                    processIdentifier: pid_t(ownerProcessIdentifier)
+                )?.bundleIdentifier
+            }
+            guard HUDWindowLevelPolicy.isKnownSessionOverlay(
+                ownerName: ownerName,
+                ownerBundleIdentifier: ownerBundleIdentifier
+            ) else { return nil }
+
+            return HUDWindowLayerDescriptor(
+                ownerName: ownerName,
+                ownerBundleIdentifier: ownerBundleIdentifier,
+                layer: layer,
+                frame: appKitFrame,
+                isOnScreen: true,
+                isOwnWindow: ownerProcessIdentifier == ownProcessIdentifier
+            )
+        }
+    }
+
     private func nsAppearance(for appearance: HUDThemeAppearance) -> NSAppearance? {
         switch appearance {
         case .dark: return NSAppearance(named: .darkAqua)
@@ -698,31 +780,39 @@ final class FloatingHUDPanelController: NSObject {
         synchronizeQuotaRowCount(for: panel)
         switch position(panel, beside: codexApp) {
         case .positioned:
+            let didPromoteWindowLevel = reconcileWindowLevel(panel)
             panel.alphaValue = 1.0
             // Re-ordering the hosting panel while a SwiftUI context menu is
             // open makes AppKit recalculate the menu anchor and produces a
             // visible wobble. Only show after a successful first placement.
-            if !panel.isVisible {
+            let wasVisible = panel.isVisible
+            if didPromoteWindowLevel || !wasVisible {
                 panel.orderFrontRegardless()
-                recordPanelVisible(
-                    panel: panel,
-                    trigger: trigger,
-                    requestUptimeNanoseconds: requestUptimeNanoseconds
-                )
+                if !wasVisible {
+                    recordPanelVisible(
+                        panel: panel,
+                        trigger: trigger,
+                        requestUptimeNanoseconds: requestUptimeNanoseconds
+                    )
+                }
             }
         case .retainedExistingPosition:
             guard restoreRetainedPositionIfPossible(panel) else {
                 hideImmediately(panel)
                 return
             }
+            let didPromoteWindowLevel = reconcileWindowLevel(panel)
             panel.alphaValue = 1.0
-            if !panel.isVisible {
+            let wasVisible = panel.isVisible
+            if didPromoteWindowLevel || !wasVisible {
                 panel.orderFrontRegardless()
-                recordPanelVisible(
-                    panel: panel,
-                    trigger: trigger,
-                    requestUptimeNanoseconds: requestUptimeNanoseconds
-                )
+                if !wasVisible {
+                    recordPanelVisible(
+                        panel: panel,
+                        trigger: trigger,
+                        requestUptimeNanoseconds: requestUptimeNanoseconds
+                    )
+                }
             }
         case .unavailable:
             // Without an authenticated safe frame, even a currently visible
@@ -1057,6 +1147,7 @@ final class FloatingHUDPanelController: NSObject {
     }
 
     private func hideAndInvalidatePositioningSession(_ panel: NSPanel) {
+        restoreBaseWindowLevel(panel)
         panel.orderOut(nil)
         invalidatePositioningSession(clearProcessID: true)
         layoutState.isCodexFocused = false
@@ -1072,6 +1163,7 @@ final class FloatingHUDPanelController: NSObject {
     private func handleApplicationTermination(_ application: NSRunningApplication) {
         guard let trackedProcessID = lastCodexProcessID,
               trackedProcessID == application.processIdentifier else { return }
+        if let panel { restoreBaseWindowLevel(panel) }
         panel?.orderOut(nil)
         invalidatePositioningSession(clearProcessID: true)
         layoutState.isCodexFocused = false
@@ -1313,6 +1405,7 @@ final class FloatingHUDPanelController: NSObject {
             self.focusLossTask = nil
             self.focusLossGeneration &+= 1
             self.layoutState.isCodexFocused = false
+            self.restoreBaseWindowLevel(panel)
             panel.orderOut(nil)
             self.pendingMeaningfulRender = nil
         }
@@ -1327,6 +1420,7 @@ final class FloatingHUDPanelController: NSObject {
     private func hideImmediately(_ panel: NSPanel) {
         cancelFocusLoss()
         layoutState.isCodexFocused = false
+        restoreBaseWindowLevel(panel)
         panel.orderOut(nil)
         pendingMeaningfulRender = nil
     }

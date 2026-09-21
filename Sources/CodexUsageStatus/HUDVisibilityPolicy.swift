@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 enum HUDPositionResult: Equatable {
@@ -183,5 +184,73 @@ enum HUDVisibilityRefreshPolicy {
         shouldPromote
             ? rateLimitDelayNanoseconds
             : max(coalescingFloorNanoseconds, rateLimitDelayNanoseconds)
+    }
+}
+
+/// A small, presentation-only description of an on-screen window that may
+/// occlude the persistent HUD.  The controller supplies the owner metadata
+/// from Quartz/AppKit; keeping the decision pure makes the z-order contract
+/// deterministic and testable without creating a second authority store.
+struct HUDWindowLayerDescriptor {
+    let ownerName: String?
+    let ownerBundleIdentifier: String?
+    let layer: Int
+    let frame: CGRect
+    let isOnScreen: Bool
+    let isOwnWindow: Bool
+}
+
+/// Computes the minimum bounded window level needed for a known PlanLoop/
+/// ego-lite overlay to stop occluding the HUD.  This is deliberately scoped:
+/// ordinary application windows, system UI, and unrelated overlays never cause
+/// the HUD to climb above `.floating`.  When the overlay disappears the base
+/// level is restored, so the HUD is not permanently topmost.
+enum HUDWindowLevelPolicy {
+    /// `NSWindow.Level.floating` on macOS.  The policy uses raw levels so the
+    /// pure test target does not need to instantiate an AppKit window.
+    static let floatingLevel = 3
+
+    /// `.popUpMenu` is the highest level this bounded repair may request.  We
+    /// never promote to `.screenSaver` or another system-reserved level.
+    static let maximumPromotedLevel = 101
+
+    static func targetLevel(
+        baseLevel: Int = floatingLevel,
+        panelFrame: CGRect,
+        windows: [HUDWindowLayerDescriptor],
+        maximumLevel: Int = maximumPromotedLevel
+    ) -> Int {
+        let highestOccludingOverlay = windows
+            .filter { window in
+                window.isOnScreen
+                    && !window.isOwnWindow
+                    && window.layer > baseLevel
+                    && window.frame.intersects(panelFrame)
+                    && isKnownSessionOverlay(
+                        ownerName: window.ownerName,
+                        ownerBundleIdentifier: window.ownerBundleIdentifier
+                    )
+            }
+            .map(\.layer)
+            .max()
+
+        guard let highestOccludingOverlay else { return baseLevel }
+        let promotedLevel = highestOccludingOverlay + 1
+        guard promotedLevel <= maximumLevel else {
+            // A level outside the bounded contract is not safe to guess.  The
+            // caller keeps the normal floating level and remains fail-closed.
+            return baseLevel
+        }
+        return max(baseLevel, promotedLevel)
+    }
+
+    static func isKnownSessionOverlay(
+        ownerName: String?,
+        ownerBundleIdentifier: String?
+    ) -> Bool {
+        let identity = [ownerName, ownerBundleIdentifier]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .joined(separator: " ")
+        return identity.contains("ego") || identity.contains("planloop")
     }
 }

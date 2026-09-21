@@ -21,6 +21,7 @@ enum ClipboardPasteService {
         performPaste(
             processID: processID,
             submitAfterPaste: false,
+            operation: "paste",
             completion: completion
         )
     }
@@ -35,6 +36,7 @@ enum ClipboardPasteService {
         performPaste(
             processID: processID,
             submitAfterPaste: true,
+            operation: "paste-and-submit",
             completion: completion
         )
     }
@@ -48,9 +50,11 @@ enum ClipboardPasteService {
         processID: pid_t?,
         completion: @escaping (Bool) -> Void = { _ in }
     ) {
+        let timing = ClipboardPasteTimingProbe(operation: "temporary-\(shortcut.rawValue)")
         guard ClipboardTemporaryOperationPolicy.canStart(
             isOperationInFlight: activeTemporaryOperationToken != nil
         ) else {
+            timing.mark("aborted", detail: "operation_already_in_flight")
             completion(false)
             return
         }
@@ -58,11 +62,13 @@ enum ClipboardPasteService {
         guard let target = processID.flatMap(NSRunningApplication.init)
                 ?? NSWorkspace.shared.runningApplications.first(where: isCodexApplication),
               isCodexApplication(target) else {
+            timing.mark("aborted", detail: "codex_target_unavailable")
             completion(false)
             return
         }
 
         guard isEventPostingAuthorized() else {
+            timing.mark("aborted", detail: "accessibility_not_trusted")
             promptForAccessibilityPermissionIfNeeded()
             completion(false)
             return
@@ -142,6 +148,7 @@ enum ClipboardPasteService {
                   pasteboard.changeCount == preparedChangeCount,
                   pasteboard.string(forType: .string) == shortcut.text,
                   postKey(keyCode: 9, flags: .maskCommand) else {
+                timing.mark("cmdv_post_failed", detail: "temporary")
                 finishTemporaryOperation(
                     token: token,
                     snapshot: snapshot,
@@ -152,6 +159,8 @@ enum ClipboardPasteService {
                 )
                 return
             }
+
+            timing.mark("t2_cmdv_posted", detail: "temporary")
 
             guard shortcut.submitAfterPaste else {
                 // Allow the asynchronous Cmd-V event to be consumed before
@@ -199,9 +208,15 @@ enum ClipboardPasteService {
             }
         }
 
-        if ClipboardPasteDispatchPolicy.decision(
-            targetIsVerifiedFrontmost: isTargetFrontmost(target)
-        ) == .immediateFrontmost {
+        let targetWasFrontmost = isTargetFrontmost(target)
+        let dispatchDecision = ClipboardPasteDispatchPolicy.decision(
+            targetIsVerifiedFrontmost: targetWasFrontmost
+        )
+        timing.mark(
+            "t1_policy_resolved",
+            detail: "frontmost=\(targetWasFrontmost) decision=\(String(describing: dispatchDecision))"
+        )
+        if dispatchDecision == .immediateFrontmost {
             // Preserve the already-published in-flight UI state for one
             // render turn before the fast clipboard dispatch can complete. If
             // focus changes during that turn, keep the existing activation
@@ -210,15 +225,19 @@ enum ClipboardPasteService {
                 if isTargetFrontmost(target) {
                     prepareAndPaste()
                 } else {
+                    timing.mark("fallback_activation_requested", detail: "frontmost_changed_before_dispatch")
                     target.activate(options: [.activateAllWindows])
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+                        timing.mark("fallback_delay_elapsed", detail: "200ms")
                         prepareAndPaste()
                     }
                 }
             }
         } else {
+            timing.mark("fallback_activation_requested", detail: "initial_policy")
             target.activate(options: [.activateAllWindows])
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+                timing.mark("fallback_delay_elapsed", detail: "200ms")
                 prepareAndPaste()
             }
         }
@@ -348,9 +367,12 @@ enum ClipboardPasteService {
     private static func performPaste(
         processID: pid_t?,
         submitAfterPaste: Bool,
+        operation: String,
         completion: ((Bool) -> Void)?
     ) {
+        let timing = ClipboardPasteTimingProbe(operation: operation)
         guard NSPasteboard.general.canReadObject(forClasses: [NSString.self, NSImage.self], options: nil) else {
+            timing.mark("aborted", detail: "clipboard_unreadable")
             showAlert(
                 title: "剪貼簿沒有可貼上的內容",
                 message: "請先複製文字或圖片，再按一次貼上。"
@@ -362,6 +384,7 @@ enum ClipboardPasteService {
         guard let target = processID.flatMap(NSRunningApplication.init)
                 ?? NSWorkspace.shared.runningApplications.first(where: isCodexApplication),
               isCodexApplication(target) else {
+            timing.mark("aborted", detail: "codex_target_unavailable")
             showAlert(
                 title: "找不到 Codex",
                 message: "請先開啟 Codex，再使用剪貼簿貼上。"
@@ -371,6 +394,7 @@ enum ClipboardPasteService {
         }
 
         guard isEventPostingAuthorized() else {
+            timing.mark("aborted", detail: "accessibility_not_trusted")
             promptForAccessibilityPermissionIfNeeded()
             completion?(false)
             return
@@ -378,9 +402,12 @@ enum ClipboardPasteService {
 
         let dispatchIfFrontmost = {
             guard isTargetFrontmost(target) else {
+                timing.mark("fallback_activation_requested", detail: "frontmost_recheck_failed")
                 target.activate(options: [.activateAllWindows])
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                    timing.mark("retry_delay_elapsed", detail: "180ms")
                     guard isTargetFrontmost(target) else {
+                        timing.mark("aborted", detail: "frontmost_retry_failed")
                         showAlert(
                             title: "無法貼上剪貼簿內容",
                             message: "Codex 沒有保持在前景，為安全起見沒有貼上或送出。"
@@ -391,6 +418,7 @@ enum ClipboardPasteService {
                     finishPaste(
                         to: target,
                         submitAfterPaste: submitAfterPaste,
+                        timing: timing,
                         completion: completion
                     )
                 }
@@ -399,13 +427,20 @@ enum ClipboardPasteService {
             finishPaste(
                 to: target,
                 submitAfterPaste: submitAfterPaste,
+                timing: timing,
                 completion: completion
             )
         }
 
-        if ClipboardPasteDispatchPolicy.decision(
-            targetIsVerifiedFrontmost: isTargetFrontmost(target)
-        ) == .immediateFrontmost {
+        let targetWasFrontmost = isTargetFrontmost(target)
+        let dispatchDecision = ClipboardPasteDispatchPolicy.decision(
+            targetIsVerifiedFrontmost: targetWasFrontmost
+        )
+        timing.mark(
+            "t1_policy_resolved",
+            detail: "frontmost=\(targetWasFrontmost) decision=\(String(describing: dispatchDecision))"
+        )
+        if dispatchDecision == .immediateFrontmost {
             // The HUD action has already published its in-flight state. Yield
             // one main-loop turn so SwiftUI can render that acknowledgement
             // before a fast Cmd-V completion clears it.
@@ -416,8 +451,10 @@ enum ClipboardPasteService {
             // The HUD is a non-activating panel. Activate Codex first and then
             // post the shortcut to the active session, so the restored text
             // field receives it even when the original window was rebuilt.
+            timing.mark("fallback_activation_requested", detail: "initial_policy")
             target.activate(options: [.activateAllWindows])
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+                timing.mark("fallback_delay_elapsed", detail: "200ms")
                 dispatchIfFrontmost()
             }
         }
@@ -426,12 +463,14 @@ enum ClipboardPasteService {
     private static func finishPaste(
         to target: NSRunningApplication,
         submitAfterPaste: Bool,
+        timing: ClipboardPasteTimingProbe,
         completion: ((Bool) -> Void)?
     ) {
         // Focus can change between the delayed activation check and this
         // event post. Revalidate both process liveness and signed publisher
         // immediately before Cmd-V so another app cannot receive the paste.
         guard isEventPostingAuthorized(), isTargetFrontmost(target) else {
+            timing.mark("aborted", detail: "final_frontmost_or_accessibility_check_failed")
             showAlert(
                 title: "無法貼上剪貼簿內容",
                 message: "Codex 沒有保持在前景，為安全起見沒有貼上或送出。"
@@ -440,6 +479,7 @@ enum ClipboardPasteService {
             return
         }
         guard postKey(keyCode: 9, flags: .maskCommand) else {
+            timing.mark("cmdv_post_failed", detail: "normal")
             showAlert(
                 title: "無法貼上剪貼簿內容",
                 message: "目前無法建立鍵盤事件。請重新開啟 CodexUsageStatus 後再試一次。"
@@ -448,10 +488,13 @@ enum ClipboardPasteService {
             return
         }
 
+        timing.mark("t2_cmdv_posted", detail: submitAfterPaste ? "normal-submit" : "normal")
+
         guard submitAfterPaste else {
             // The Cmd-V event has been posted and the accepted action can now
             // clear its local acknowledgement state. The focus/safety checks
             // above remain unchanged and still gate the event itself.
+            timing.mark("completion_callback", detail: "cmdv_posted")
             completion?(true)
             return
         }
@@ -461,6 +504,7 @@ enum ClipboardPasteService {
         // an intervening app cannot receive the submit key.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
             guard isEventPostingAuthorized(), !target.isTerminated, isTargetFrontmost(target) else {
+                timing.mark("aborted", detail: "submit_settle_focus_check_failed")
                 showAlert(
                     title: "貼上完成，但尚未送出",
                     message: "Codex 已不是前景視窗，為安全起見沒有發送 Enter。"
@@ -470,6 +514,7 @@ enum ClipboardPasteService {
             }
 
             guard postKey(keyCode: 36) else {
+                timing.mark("return_post_failed", detail: "submit")
                 showAlert(
                     title: "無法送出貼上的內容",
                     message: "目前無法建立 Enter 鍵盤事件。請重新開啟 CodexUsageStatus 後再試一次。"
@@ -477,6 +522,8 @@ enum ClipboardPasteService {
                 completion?(false)
                 return
             }
+            timing.mark("return_posted", detail: "submit")
+            timing.mark("completion_callback", detail: "return_posted")
             completion?(true)
         }
     }
