@@ -5137,6 +5137,15 @@ struct CodexUsageStatusTests {
                 && AccountManagementDisclosurePolicy.showsAllAccounts(isExpanded: true),
             "full account management is collapsed until explicitly expanded"
         )
+        try expect(
+            !AccountManagementDisclosurePolicy.shouldShowAttentionSummary(count: 0)
+                && AccountManagementDisclosurePolicy.shouldShowAttentionSummary(count: 2)
+                && !AccountManagementDisclosurePolicy.includesInOtherAccounts(isCurrent: true)
+                && AccountManagementDisclosurePolicy.includesInOtherAccounts(isCurrent: false)
+                && AccountManagementDisclosurePolicy.otherAccountsLabel(count: 3) == "其他帳號 3"
+                && AccountManagementDisclosurePolicy.otherAccountsLabel(count: -1) == "其他帳號 0",
+            "account management exposes only a warning summary and a non-current disclosure"
+        )
     }
 
     private static func testPopoverInteractionHitTargets() throws {

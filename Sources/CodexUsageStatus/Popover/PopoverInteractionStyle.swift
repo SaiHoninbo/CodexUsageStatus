@@ -28,6 +28,18 @@ enum AccountManagementDisclosurePolicy {
     static func showsAllAccounts(isExpanded: Bool) -> Bool {
         isExpanded
     }
+
+    static func shouldShowAttentionSummary(count: Int) -> Bool {
+        count > 0
+    }
+
+    static func includesInOtherAccounts(isCurrent: Bool) -> Bool {
+        !isCurrent
+    }
+
+    static func otherAccountsLabel(count: Int) -> String {
+        "其他帳號 \(max(0, count))"
+    }
 }
 
 /// Small, local acknowledgement for popover controls. It does not run the

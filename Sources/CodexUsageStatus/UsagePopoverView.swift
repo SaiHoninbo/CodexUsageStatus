@@ -76,11 +76,17 @@ struct UsagePopoverView: View {
             applyPendingSettingsSection()
         }
         .onChange(of: selectionController.selectedTab) { _, tab in
+            if tab == .overview, model.accountScope != .current {
+                model.setAccountScope(.current)
+            }
             DispatchQueue.main.async {
                 PopoverInteractionTrace.firstContentVisible("tab.\(tab.rawValue)")
             }
         }
         .onAppear {
+            if selectedTab == .overview, model.accountScope != .current {
+                model.setAccountScope(.current)
+            }
             syncUpdateDisclosure(with: model.updateState)
         }
         .onChange(of: model.updateState) { _, newState in
@@ -196,11 +202,10 @@ struct UsagePopoverView: View {
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(HUDColorPalette.tertiaryText)
                     }
-                    Text(model.accountDisplayName)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(HUDColorPalette.secondaryText)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    HStack(spacing: 7) {
+                        accountSwitcherMenu
+                        accountManagementButton
+                    }
                 }
                 Spacer(minLength: 0)
                 VStack(alignment: .trailing, spacing: 2) {
@@ -218,14 +223,78 @@ struct UsagePopoverView: View {
                     .font(.caption2)
                 }
             }
-            if selectedTab == .overview {
-                overviewAccountControls
-            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
         .background(HUDColorPalette.elevatedSurface, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
         .overlay { RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(HUDColorPalette.border, lineWidth: 0.7) }
+    }
+
+    private var accountSwitcherMenu: some View {
+        Menu {
+            ForEach(model.accountProfiles) { profile in
+                Button {
+                    acknowledgeAction("正在切換帳號", control: "header.switchAccount")
+                    PopoverInteractionTrace.started("header.switchAccount")
+                    PopoverInteractionTrace.effectDispatched("header.switchAccount")
+                    _ = model.selectProfile(id: profile.id)
+                    model.setAccountScope(.current)
+                    PopoverInteractionTrace.effectCompleted("header.switchAccount", success: true)
+                } label: {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: profile.id == model.currentProfileID ? "checkmark" : (model.accountProfileDisplay(for: profile).isWarning ? "exclamationmark.triangle" : "person"))
+                            .frame(width: 16)
+                        let display = model.accountProfileDisplay(for: profile)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(display.title)
+                            Text(display.subtitle)
+                                .font(.caption)
+                                .foregroundStyle(HUDColorPalette.tertiaryText)
+                        }
+                    }
+                }
+            }
+            if !model.accountProfiles.isEmpty {
+                Divider()
+            }
+            Button("新增受管帳號") {
+                acknowledgeAction("新增帳號已接受", control: "header.createAccount")
+                PopoverInteractionTrace.started("header.createAccount")
+                PopoverInteractionTrace.effectDispatched("header.createAccount")
+                let created = model.createManagedProfile()
+                PopoverInteractionTrace.effectCompleted("header.createAccount", success: created != nil)
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(model.accountDisplayName)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(HUDColorPalette.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(HUDColorPalette.tertiaryText)
+            }
+        }
+        .menuStyle(.borderlessButton)
+        .help("切換目前帳號或建立受管帳號")
+        .accessibilityLabel("目前帳號：\(model.accountDisplayName)")
+    }
+
+    private var accountManagementButton: some View {
+        Button {
+            acknowledgeAction("帳號管理已開啟", control: "header.accountManagement")
+            PopoverInteractionTrace.started("header.accountManagement")
+            selectionController.select(AccountManagementRoute.destination(from: selectedTab))
+            PopoverInteractionTrace.effectDispatched("header.accountManagement")
+            PopoverInteractionTrace.effectCompleted("header.accountManagement", success: true)
+        } label: {
+            Label("管理", systemImage: "person.2")
+                .font(.caption.weight(.semibold))
+        }
+        .buttonStyle(PopoverImmediateButtonStyle(controlID: "header.accountManagement"))
+        .help("開啟帳號管理")
+        .accessibilityLabel("帳號管理")
     }
 
     // Shared formatting belongs to the shell because the alert, Overview, and

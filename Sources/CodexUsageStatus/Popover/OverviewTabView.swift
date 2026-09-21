@@ -381,327 +381,61 @@ extension UsagePopoverView {
         .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(HUDColorPalette.sevenDay.opacity(0.45), lineWidth: 0.8) }
     }
 
-    var overviewAccountControls: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 8) {
-                Picker("檢視", selection: Binding(
-                    get: { model.accountScope },
-                    set: { model.setAccountScope($0) }
-                )) {
-                    ForEach(AccountScope.allCases) { scope in
-                        Text(scope.title).tag(scope)
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityLabel("帳號範圍")
-                .accessibilityHint("切換目前帳號或全部帳號")
-
-                if model.accountScope == .current {
-                    Menu {
-                        ForEach(model.accountProfiles) { profile in
-                            Button {
-                                acknowledgeAction("正在切換帳號", control: "overview.switchAccount")
-                                PopoverInteractionTrace.started("overview.switchAccount")
-                                PopoverInteractionTrace.effectDispatched("overview.switchAccount")
-                                _ = model.selectProfile(id: profile.id)
-                            } label: {
-                                HStack(alignment: .top, spacing: 8) {
-                                    Image(systemName: profile.id == model.currentProfileID ? "checkmark" : (model.accountProfileDisplay(for: profile).isWarning ? "exclamationmark.triangle" : "person"))
-                                        .frame(width: 16)
-                                    accountDisplayStack(profile)
-                                    Spacer(minLength: 0)
-                                }
-                            }
-                        }
-                        Divider()
-                        Button("新增受管帳號") {
-                            acknowledgeAction("新增帳號已接受", control: "overview.createAccount")
-                            PopoverInteractionTrace.started("overview.createAccount")
-                            PopoverInteractionTrace.effectDispatched("overview.createAccount")
-                            let created = model.createManagedProfile()
-                            PopoverInteractionTrace.effectCompleted("overview.createAccount", success: created != nil)
-                        }
-                        .popoverControlPressProbe("overview.createAccount")
-                    } label: {
-                        Label("切換帳號", systemImage: "person.crop.circle.badge.plus")
-                            .font(.caption.weight(.semibold))
-                    }
-                    .menuStyle(.borderlessButton)
-                    .help("切換或建立本機 profile")
-                }
-
-                Button {
-                    acknowledgeAction("帳號管理已開啟", control: "overview.accountManagement")
-                    PopoverInteractionTrace.started("overview.accountManagement")
-                    selectionController.select(AccountManagementRoute.destination(from: selectedTab))
-                    PopoverInteractionTrace.effectDispatched("overview.accountManagement")
-                    PopoverInteractionTrace.effectCompleted("overview.accountManagement", success: true)
-                } label: {
-                    Label("管理", systemImage: "person.2")
-                        .font(.caption.weight(.semibold))
-                }
-                .buttonStyle(PopoverImmediateButtonStyle(controlID: "overview.accountManagement"))
-                .help("開啟完整帳號管理")
-                .accessibilityLabel("帳號管理")
-
-                if model.accountScope == .current {
-                    Text(model.accountHealthState.displayName)
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(HUDColorPalette.secondaryText)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(HUDColorPalette.controlSurface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(HUDColorPalette.border, lineWidth: 0.7) }
-            if model.accountProfiles.contains(where: \.isUnidentified) {
-                Text("未識別帳號不含穩定 Email，可能需要手動分開管理。")
-                    .font(.caption2)
-                    .foregroundStyle(HUDColorPalette.warning)
-                    .lineLimit(2)
-            }
-        }
-    }
-
-    private func accountDisplayStack(_ profile: AccountProfile) -> some View {
-        let display = model.accountProfileDisplay(for: profile)
-        return VStack(alignment: .leading, spacing: 1) {
-            Text(display.title)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(display.subtitle)
-                .font(.caption)
-                .foregroundStyle(HUDColorPalette.tertiaryText)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
     var quotaSummarySection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
                 Label("目前用量", systemImage: "chart.bar.fill")
                     .font(.subheadline.weight(.semibold))
                 Spacer(minLength: 8)
-                Text(model.accountScope == .current ? "目前帳號" : "全部帳號")
+                Text("目前帳號")
                     .font(.caption)
                     .foregroundStyle(HUDColorPalette.tertiaryText)
             }
 
-            if model.accountScope == .current {
-                let presentation = HUDQuotaPresentationPolicy.make(
-                    snapshot: model.snapshot,
-                    profileID: model.currentProfileID
+            let presentation = HUDQuotaPresentationPolicy.make(
+                snapshot: model.snapshot,
+                profileID: model.currentProfileID
+            )
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                quotaSummaryRow(
+                    kind: .fiveHour,
+                    presentation: presentation?.fiveHour,
+                    availability: HUDQuotaPresentationPolicy.availability(
+                        for: .fiveHour,
+                        snapshot: model.snapshot,
+                        presentation: presentation
+                    ),
+                    accent: HUDColorPalette.fiveHour
                 )
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                quotaSummaryRow(
+                    kind: .sevenDay,
+                    presentation: presentation?.sevenDay,
+                    availability: HUDQuotaPresentationPolicy.availability(
+                        for: .sevenDay,
+                        snapshot: model.snapshot,
+                        presentation: presentation
+                    ),
+                    accent: HUDColorPalette.sevenDay
+                )
+                if let thirtyDay = presentation?.thirtyDay {
                     quotaSummaryRow(
-                        kind: .fiveHour,
-                        presentation: presentation?.fiveHour,
-                        availability: HUDQuotaPresentationPolicy.availability(
-                            for: .fiveHour,
-                            snapshot: model.snapshot,
-                            presentation: presentation
-                        ),
-                        accent: HUDColorPalette.fiveHour
-                    )
-                    quotaSummaryRow(
-                        kind: .sevenDay,
-                        presentation: presentation?.sevenDay,
-                        availability: HUDQuotaPresentationPolicy.availability(
-                            for: .sevenDay,
-                            snapshot: model.snapshot,
-                            presentation: presentation
-                        ),
+                        kind: .thirtyDay,
+                        presentation: thirtyDay,
+                        availability: .available,
                         accent: HUDColorPalette.sevenDay
                     )
-                    if let thirtyDay = presentation?.thirtyDay {
-                        quotaSummaryRow(
-                            kind: .thirtyDay,
-                            presentation: thirtyDay,
-                            availability: .available,
-                            accent: HUDColorPalette.sevenDay
-                        )
-                    }
-                    if let reserve = presentation?.gptReserveWeekly {
-                        quotaSummaryRow(
-                            kind: .gptReserveWeekly,
-                            presentation: reserve,
-                            availability: .available,
-                            accent: HUDColorPalette.gptReserveWeekly
-                        )
-                    }
                 }
-            } else {
-                let summary = model.accountScopeSummary
-                if summary.totalAccounts == 0 {
-                    compactEmptyState("尚未取得帳號用量。")
-                } else {
-                    HStack(spacing: 8) {
-                        accountScopeMetric("帳號", summary.totalAccounts, color: HUDColorPalette.sevenDay)
-                        accountScopeMetric("活躍", summary.availableOrActiveAccounts, color: HUDColorPalette.continueAction)
-                        accountScopeMetric("較舊", summary.staleAccounts, color: HUDColorPalette.warning)
-                        accountScopeMetric("未識別", summary.unidentifiedAccounts, color: HUDColorPalette.secondaryText)
-                    }
-                    allAccountsUsageRows
-                    Button {
-                        acknowledgeAction("帳號管理已開啟", control: "overview.accountManagement")
-                        PopoverInteractionTrace.started("overview.accountManagement")
-                        selectionController.select(AccountManagementRoute.destination(from: selectedTab))
-                    } label: {
-                        Label("前往帳號管理", systemImage: "arrow.right")
-                            .frame(maxWidth: .infinity, alignment: .trailing)
-                    }
-                    .buttonStyle(PopoverImmediateButtonStyle(controlID: "overview.accountManagement"))
-                    .font(.caption.weight(.semibold))
-                    .accessibilityHint("前往帳號頁面的完整帳號管理")
+                if let reserve = presentation?.gptReserveWeekly {
+                    quotaSummaryRow(
+                        kind: .gptReserveWeekly,
+                        presentation: reserve,
+                        availability: .available,
+                        accent: HUDColorPalette.gptReserveWeekly
+                    )
                 }
             }
         }
         .padding(.vertical, 2)
-    }
-
-    private var allAccountsUsageRows: some View {
-        let rows = allAccountsUsageRowPresentations
-        return VStack(alignment: .leading, spacing: 6) {
-            Text("帳號用量")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(HUDColorPalette.secondaryText)
-
-            if rows.isEmpty {
-                compactEmptyState("尚未取得各帳號的用量資料。")
-            } else {
-                LazyVStack(spacing: 0) {
-                    ForEach(rows) { row in
-                        allAccountsUsageRow(row)
-                        if row.id != rows.last?.id {
-                            Divider()
-                                .overlay(HUDColorPalette.divider)
-                        }
-                    }
-                }
-                .padding(.horizontal, 9)
-                .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(HUDColorPalette.border, lineWidth: 0.7) }
-            }
-        }
-    }
-
-    private var allAccountsUsageRowPresentations: [AllAccountsUsageRowPresentation] {
-        let summaries = Dictionary(uniqueKeysWithValues: model.profileQuotaSummaries().map { ($0.profile.id, $0) })
-        return AllAccountsUsageRowPresentation.orderedProfiles(model.accountProfiles, currentProfileID: model.currentProfileID).map { profile in
-            AllAccountsUsageRowPresentation.make(
-                profile: profile,
-                display: model.accountProfileDisplay(for: profile),
-                summary: summaries[profile.id],
-                currentProfileID: model.currentProfileID,
-                currentConnectionState: model.connectionState,
-                currentSnapshotAvailable: model.snapshot != nil,
-                currentSnapshotIsStale: model.isStale,
-                currentRemainingPercent: model.menuBarRemainingPercent,
-                now: model.currentDate,
-                localActivity: model.localProfileActivity(for: profile),
-                observedTokenDelta: model.localObservedTokenDelta(for: profile)
-            )
-        }
-    }
-
-    private func allAccountsUsageRow(_ row: AllAccountsUsageRowPresentation) -> some View {
-        HStack(alignment: .center, spacing: 8) {
-            Image(systemName: row.isCurrent ? "checkmark.circle.fill" : (row.isWarning ? "exclamationmark.triangle.fill" : "person.crop.circle"))
-                .foregroundStyle(allAccountsUsageRowColor(row))
-                .frame(width: 18)
-
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 5) {
-                    Text(row.title)
-                        .font(.caption.weight(.semibold))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    if row.isCurrent {
-                        Text("目前")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(HUDColorPalette.continueAction)
-                    }
-                }
-                Text(row.subtitle.isEmpty ? row.freshnessText : "\(row.subtitle) · \(row.freshnessText)")
-                    .font(.caption2)
-                    .foregroundStyle(HUDColorPalette.tertiaryText)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Text(row.activityText)
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(allAccountsActivityColor(row.activityState))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            .layoutPriority(1)
-
-            Spacer(minLength: 4)
-
-            VStack(alignment: .trailing, spacing: 3) {
-                Text(row.remainingPercent.map { "\($0)%" } ?? "—")
-                    .font(.subheadline.weight(.bold).monospacedDigit())
-                    .foregroundStyle(allAccountsUsageRowColor(row))
-                if !row.isCurrent {
-                    Button("切換並刷新") {
-                        acknowledgeAction("正在切換並刷新", control: "overview.switchAndRefresh")
-                        PopoverInteractionTrace.started("overview.switchAndRefresh")
-                        PopoverInteractionTrace.effectDispatched("overview.switchAndRefresh")
-                        _ = model.selectProfile(id: row.profileID)
-                        model.setAccountScope(.current)
-                    }
-                    .buttonStyle(.borderless)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(HUDColorPalette.sevenDay)
-                    .fixedSize()
-                    .popoverControlPressProbe("overview.switchAndRefresh")
-                    .accessibilityLabel("切換到 \(row.title) 並刷新")
-                }
-            }
-        }
-        .padding(.vertical, 7)
-        .accessibilityElement(children: .contain)
-    }
-
-    private func allAccountsUsageRowColor(_ row: AllAccountsUsageRowPresentation) -> Color {
-        switch row.state {
-        case .currentLive: return HUDColorPalette.continueAction
-        case .cached: return HUDColorPalette.sevenDay
-        case .stale: return HUDColorPalette.warning
-        case .unavailable: return HUDColorPalette.tertiaryText
-        }
-    }
-
-    private func allAccountsActivityColor(_ state: AllAccountsLocalActivityState) -> Color {
-        switch state {
-        case .currentLive: return HUDColorPalette.continueAction
-        case .cached: return HUDColorPalette.sevenDay
-        case .stale: return HUDColorPalette.warning
-        case .noData: return HUDColorPalette.tertiaryText
-        }
-    }
-
-    private func accountScopeMetric(_ label: String, _ value: Int, color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label)
-                .font(.caption2)
-                .foregroundStyle(HUDColorPalette.tertiaryText)
-            Text("\(value)")
-                .font(.subheadline.weight(.bold).monospacedDigit())
-                .foregroundStyle(color)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 4)
-    }
-
-    private func compactEmptyState(_ message: String) -> some View {
-        Text(message)
-            .font(.caption)
-            .foregroundStyle(HUDColorPalette.secondaryText)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 6)
     }
 
     @ViewBuilder
@@ -765,7 +499,7 @@ extension UsagePopoverView {
 
     @ViewBuilder
     var overviewTurnActivity: some View {
-        if model.accountScope != .current || !model.activeExecutions.isEmpty {
+        if !model.activeExecutions.isEmpty {
             EmptyView()
         } else {
             switch model.activeTurn.state {
@@ -861,11 +595,6 @@ extension UsagePopoverView {
 
     var resetCreditSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if model.accountScope == .all {
-                Text("請切回目前帳號後操作；不會在全部帳號模式消耗 credit。")
-                    .font(.caption)
-                    .foregroundStyle(HUDColorPalette.tertiaryText)
-            }
             if let credits = model.resetCredits, credits.availableCount > 0 {
                 let details = HUDResetCreditSelectionPolicy.ordered(
                     credits.availableCredits,

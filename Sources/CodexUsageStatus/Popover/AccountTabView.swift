@@ -1,22 +1,17 @@
 import SwiftUI
 
-/// Full account management is a secondary surface. Overview keeps the compact
-/// switcher for daily use, while this surface owns the complete profile list.
+/// Full account management is a secondary surface. The shell owns the current
+/// account switcher; this surface owns the current row and the lazy list of
+/// other profiles without repeating the same account in multiple sections.
 extension UsagePopoverView {
     var accountsTab: some View {
         let summaryRows = accountManagementSummaryRows
         let currentRows = summaryRows.filter(\.isCurrent)
-        let attentionRows = summaryRows.filter { row in
-            !row.isCurrent && (row.isWarning || row.state == .stale || row.state == .unavailable || model.loginStates[row.profileID] != nil)
-        }
-        let recentRows = summaryRows
-            .filter { !$0.isCurrent }
-            .sorted { (lastSeen[$0.profileID] ?? .distantPast) > (lastSeen[$1.profileID] ?? .distantPast) }
-            .prefix(3)
-            .map { $0 }
-        let allRows = AccountManagementDisclosurePolicy.showsAllAccounts(isExpanded: isAllAccountsExpanded)
-            ? accountTabRows
-            : []
+        let otherRows = orderedOtherRows(summaryRows)
+        let attentionCount = otherRows.filter(isAttention).count
+        // The full activity/token projection is intentionally evaluated only
+        // after disclosure, preserving the existing lazy account behavior.
+        let expandedRows = isAllAccountsExpanded ? orderedOtherRows(accountTabRows) : []
 
         return VStack(alignment: .leading, spacing: 9) {
             accountTabHeader
@@ -30,22 +25,15 @@ extension UsagePopoverView {
                     .padding(10)
                     .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             } else {
-                accountManagementSummary(
-                    currentRows: currentRows,
-                    attentionRows: attentionRows,
-                    recentRows: recentRows,
-                    allCount: model.accountProfiles.count
-                )
                 accountManagementSection("目前帳號", rows: currentRows, compact: true)
-                if !attentionRows.isEmpty {
-                    accountManagementSection("需要處理", rows: attentionRows, compact: true)
+                if AccountManagementDisclosurePolicy.shouldShowAttentionSummary(count: attentionCount) {
+                    attentionSummary(count: attentionCount)
                 }
-                if !recentRows.isEmpty {
-                    accountManagementSection("最近使用", rows: recentRows, compact: true)
+                if !otherRows.isEmpty {
+                    otherAccountsDisclosure(count: otherRows.count)
                 }
-                allAccountsDisclosure
                 if isAllAccountsExpanded {
-                    accountManagementSection("全部帳號", rows: allRows, lazy: true)
+                    accountManagementSection("其他帳號 \(otherRows.count)", rows: expandedRows, lazy: true)
                 }
             }
 
@@ -79,13 +67,7 @@ extension UsagePopoverView {
                 }
                 .buttonStyle(PopoverImmediateButtonStyle(controlID: "accounts.backToOverview"))
                 .accessibilityLabel("返回概覽")
-                Text(model.accountHealthState.displayName)
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(model.accountHealthState == .loaded ? HUDColorPalette.continueAction : HUDColorPalette.secondaryText)
             }
-            Text("目前帳號：\(model.accountDisplayName)")
-                .font(.caption)
-                .foregroundStyle(HUDColorPalette.secondaryText)
             if let error = model.accountHealthErrorMessage {
                 Text(error)
                     .font(.caption2)
@@ -96,42 +78,6 @@ extension UsagePopoverView {
         .padding(10)
         .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay { RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(HUDColorPalette.border, lineWidth: 0.7) }
-    }
-
-    private func accountManagementSummary(
-        currentRows: [AllAccountsUsageRowPresentation],
-        attentionRows: [AllAccountsUsageRowPresentation],
-        recentRows: [AllAccountsUsageRowPresentation],
-        allCount: Int
-    ) -> some View {
-        HStack(spacing: 6) {
-            accountManagementMetric("目前帳號", currentRows.count)
-            accountManagementMetric("需要處理", attentionRows.count)
-            accountManagementMetric("最近使用", recentRows.count)
-            accountManagementMetric("全部帳號", allCount)
-        }
-        .padding(.horizontal, 2)
-    }
-
-    private func accountManagementMetric(_ title: String, _ value: Int) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-                .font(.caption2)
-                .foregroundStyle(HUDColorPalette.tertiaryText)
-                .lineLimit(1)
-            Text("\(value)")
-                .font(.caption.weight(.bold).monospacedDigit())
-                .foregroundStyle(HUDColorPalette.primaryText)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 5)
-        .padding(.horizontal, 6)
-        .background(HUDColorPalette.controlSurface, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-    }
-
-    private var lastSeen: [UUID: Date] {
-        let lastSeen = Dictionary(uniqueKeysWithValues: model.accountProfiles.map { ($0.id, $0.lastSeen) })
-        return lastSeen
     }
 
     /// The collapsed management surface only needs identity/freshness/status
@@ -157,34 +103,83 @@ extension UsagePopoverView {
         }
     }
 
-    private var allAccountsDisclosure: some View {
+    private func attentionSummary(count: Int) -> some View {
+        Button {
+            acknowledgeAction("已展開需要處理的帳號", control: "accounts.attentionSummary")
+            PopoverInteractionTrace.started("accounts.attentionSummary")
+            isAllAccountsExpanded = true
+            PopoverInteractionTrace.effectDispatched("accounts.attentionSummary")
+            PopoverInteractionTrace.effectCompleted("accounts.attentionSummary", success: true)
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(HUDColorPalette.warning)
+                Text("\(count) 個帳號需要處理")
+                    .font(.caption.weight(.semibold))
+                Spacer(minLength: 0)
+                Image(systemName: "arrow.right")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(HUDColorPalette.tertiaryText)
+            }
+            .padding(9)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PopoverImmediateButtonStyle(controlID: "accounts.attentionSummary"))
+        .background(HUDColorPalette.warning.opacity(0.12), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(HUDColorPalette.warning.opacity(0.35), lineWidth: 0.7) }
+        .accessibilityLabel("\(count) 個帳號需要處理")
+        .accessibilityHint("展開其他帳號列表")
+    }
+
+    private func otherAccountsDisclosure(count: Int) -> some View {
         Button {
             let expanded = !isAllAccountsExpanded
-                acknowledgeAction(expanded ? "全部帳號已展開" : "全部帳號已收合", control: "accounts.allAccountsDisclosure")
-                PopoverInteractionTrace.started("accounts.allAccountsDisclosure")
-                isAllAccountsExpanded = expanded
-                PopoverInteractionTrace.effectDispatched("accounts.allAccountsDisclosure")
-                PopoverInteractionTrace.effectCompleted("accounts.allAccountsDisclosure", success: true)
+            acknowledgeAction(expanded ? "其他帳號已展開" : "其他帳號已收合", control: "accounts.otherAccountsDisclosure")
+            PopoverInteractionTrace.started("accounts.otherAccountsDisclosure")
+            isAllAccountsExpanded = expanded
+            PopoverInteractionTrace.effectDispatched("accounts.otherAccountsDisclosure")
+            PopoverInteractionTrace.effectCompleted("accounts.otherAccountsDisclosure", success: true)
         } label: {
             HStack(spacing: 7) {
                 Image(systemName: isAllAccountsExpanded ? "chevron.down" : "chevron.right")
                     .font(.caption2.weight(.bold))
                     .frame(width: 12)
-                Label("全部帳號", systemImage: "person.3")
+                Label(AccountManagementDisclosurePolicy.otherAccountsLabel(count: count), systemImage: "person.3")
                     .font(.caption.weight(.semibold))
                 Spacer(minLength: 0)
-                Text("\(model.accountProfiles.count)")
+                Text("\(count)")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(HUDColorPalette.tertiaryText)
             }
             .padding(9)
             .contentShape(Rectangle())
         }
-        .buttonStyle(PopoverImmediateButtonStyle(controlID: "accounts.allAccountsDisclosure"))
+        .buttonStyle(PopoverImmediateButtonStyle(controlID: "accounts.otherAccountsDisclosure"))
         .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(HUDColorPalette.border, lineWidth: 0.7) }
         .accessibilityValue(isAllAccountsExpanded ? "已展開" : "已收合")
-        .accessibilityHint(isAllAccountsExpanded ? "收合完整帳號列表" : "展開完整帳號列表")
+        .accessibilityHint(isAllAccountsExpanded ? "收合其他帳號列表" : "展開其他帳號列表")
+    }
+
+    private func isAttention(_ row: AllAccountsUsageRowPresentation) -> Bool {
+        !row.isCurrent && (
+            row.isWarning ||
+            row.state == .stale ||
+            row.state == .unavailable ||
+            model.loginStates[row.profileID] != nil
+        )
+    }
+
+    private func orderedOtherRows(_ rows: [AllAccountsUsageRowPresentation]) -> [AllAccountsUsageRowPresentation] {
+        rows.enumerated()
+            .filter { AccountManagementDisclosurePolicy.includesInOtherAccounts(isCurrent: $0.element.isCurrent) }
+            .sorted { lhs, rhs in
+                let leftRank = isAttention(lhs.element) ? 0 : 1
+                let rightRank = isAttention(rhs.element) ? 0 : 1
+                if leftRank != rightRank { return leftRank < rightRank }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element)
     }
 
     @ViewBuilder
