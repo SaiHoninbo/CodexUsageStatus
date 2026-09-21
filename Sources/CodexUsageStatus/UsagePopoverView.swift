@@ -29,6 +29,9 @@ struct UsagePopoverView: View {
     @State var isSyncExpanded = false
     @State var isUpdateExpanded = false
     @State var isMetadataExpanded = false
+    // Full account management is intentionally collapsed on entry. This is
+    // view-local presentation state; account authority remains in the model.
+    @State var isAllAccountsExpanded = false
     @State var expandedActiveWorkKeys: Set<CodexExecutionKey> = []
     @State private var autoExpandedUpdateVersion: String?
     @State var actionAcknowledgement: String?
@@ -72,6 +75,11 @@ struct UsagePopoverView: View {
         .onChange(of: selectionController.requestGeneration) { _, _ in
             applyPendingSettingsSection()
         }
+        .onChange(of: selectionController.selectedTab) { _, tab in
+            DispatchQueue.main.async {
+                PopoverInteractionTrace.firstContentVisible("tab.\(tab.rawValue)")
+            }
+        }
         .onAppear {
             syncUpdateDisclosure(with: model.updateState)
         }
@@ -79,13 +87,22 @@ struct UsagePopoverView: View {
             syncUpdateDisclosure(with: newState)
         }
         .alert("清除本機歷史？", isPresented: $showClearHistoryConfirmation) {
-            Button("清除", role: .destructive) { model.clearHistory() }
+            Button("清除", role: .destructive) {
+                PopoverInteractionTrace.accepted("history.clear")
+                PopoverInteractionTrace.effectDispatched("history.clear")
+                model.clearHistory()
+                PopoverInteractionTrace.effectCompleted("history.clear", success: true)
+            }
             Button("取消", role: .cancel) {}
         } message: {
             Text("這會刪除最近 30 天的用量時間序列，不會影響 Codex 或登入狀態。")
         }
         .alert("確認使用 Reset Credit？", isPresented: $showResetCreditConfirmation) {
-            Button("確認使用", role: .destructive) { model.consumeSelectedResetCredit() }
+            Button("確認使用", role: .destructive) {
+                PopoverInteractionTrace.accepted("resetCredit.consume")
+                PopoverInteractionTrace.effectDispatched("resetCredit.consume")
+                model.consumeSelectedResetCredit()
+            }
             Button("取消", role: .cancel) { model.cancelResetCredit() }
         } message: {
             if let credit = model.selectedResetCredit {
@@ -96,8 +113,11 @@ struct UsagePopoverView: View {
         }
         .alert("刪除受管帳號？", isPresented: $showRemoveProfileConfirmation) {
             Button("刪除", role: .destructive) {
+                PopoverInteractionTrace.accepted("accounts.remove")
+                PopoverInteractionTrace.effectDispatched("accounts.remove")
                 if let profilePendingRemoval { model.removeProfile(id: profilePendingRemoval.id) }
                 profilePendingRemoval = nil
+                PopoverInteractionTrace.effectCompleted("accounts.remove", success: true)
             }
             Button("取消", role: .cancel) { profilePendingRemoval = nil }
         } message: {

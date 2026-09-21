@@ -5131,6 +5131,12 @@ struct CodexUsageStatusTests {
             PopoverRefreshPolicy.shouldRefreshOnPresentation(tab: .overview),
             "Overview retains refresh-on-presentation behavior"
         )
+        try expect(
+            !AccountManagementDisclosurePolicy.defaultExpanded
+                && !AccountManagementDisclosurePolicy.showsAllAccounts(isExpanded: false)
+                && AccountManagementDisclosurePolicy.showsAllAccounts(isExpanded: true),
+            "full account management is collapsed until explicitly expanded"
+        )
     }
 
     private static func testPopoverInteractionHitTargets() throws {

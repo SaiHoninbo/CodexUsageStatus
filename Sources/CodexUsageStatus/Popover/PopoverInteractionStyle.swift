@@ -19,6 +19,17 @@ enum PopoverRefreshPolicy {
     }
 }
 
+/// Full account rows are a deliberate opt-in surface. The compact management
+/// summary remains visible, while the potentially large profile projection is
+/// only evaluated after the user expands the disclosure.
+enum AccountManagementDisclosurePolicy {
+    static let defaultExpanded = false
+
+    static func showsAllAccounts(isExpanded: Bool) -> Bool {
+        isExpanded
+    }
+}
+
 /// Small, local acknowledgement for popover controls. It does not run the
 /// action early; it only makes the mouse-down state visible immediately.
 struct PopoverImmediateButtonStyle: ButtonStyle {
@@ -37,6 +48,34 @@ struct PopoverImmediateButtonStyle: ButtonStyle {
             controlID: controlID,
             pressedScale: pressedScale
         )
+    }
+}
+
+/// Adds a mouse-down marker without replacing a native bordered/link/menu
+/// style. This keeps AppKit/SwiftUI activation and mouse-up semantics owned by
+/// the original control while extending the existing privacy-safe trace.
+struct PopoverControlPressProbe: ViewModifier {
+    let controlID: String
+    @State private var hasLoggedPress = false
+
+    func body(content: Content) -> some View {
+        content.simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    guard !hasLoggedPress else { return }
+                    hasLoggedPress = true
+                    PopoverInteractionTrace.pressed(controlID)
+                }
+                .onEnded { _ in
+                    hasLoggedPress = false
+                }
+        )
+    }
+}
+
+extension View {
+    func popoverControlPressProbe(_ controlID: String) -> some View {
+        modifier(PopoverControlPressProbe(controlID: controlID))
     }
 }
 

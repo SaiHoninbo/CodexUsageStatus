@@ -94,6 +94,7 @@ extension UsagePopoverView {
                 .buttonStyle(.link)
                 .font(.caption2.weight(.semibold))
                 .fixedSize()
+                .popoverControlPressProbe("alert.\(alert.id)")
             }
         }
         .padding(.vertical, 3)
@@ -107,22 +108,35 @@ extension UsagePopoverView {
         switch action {
         case .accounts:
             selectionController.select(.accounts)
+            PopoverInteractionTrace.effectDispatched("alert.\(alert.id)")
+            PopoverInteractionTrace.effectCompleted("alert.\(alert.id)", success: true)
         case .accessibility:
             isHUDExpanded = true
+            PopoverInteractionTrace.effectDispatched("alert.\(alert.id)")
             model.openAccessibilitySettings()
         case .notifications:
             isNotificationsExpanded = true
             if model.notificationAuthorizationStatus == .notDetermined {
-                model.requestNotificationPermission()
+                PopoverInteractionTrace.effectDispatched("alert.\(alert.id)")
+                model.requestNotificationPermission { success in
+                    PopoverInteractionTrace.effectCompleted("alert.\(alert.id)", success: success)
+                }
             } else {
+                PopoverInteractionTrace.effectDispatched("alert.\(alert.id)")
                 openNotificationSettings()
             }
         case .update:
             isUpdateExpanded = true
             if case .error = model.updateState {
-                model.checkForUpdates()
+                PopoverInteractionTrace.effectDispatched("alert.\(alert.id)")
+                model.checkForUpdates { success in
+                    PopoverInteractionTrace.effectCompleted("alert.\(alert.id)", success: success)
+                }
+            } else {
+                PopoverInteractionTrace.effectDispatched("alert.\(alert.id)")
             }
         case .refresh:
+            PopoverInteractionTrace.effectDispatched("alert.\(alert.id)")
             model.refresh()
         }
     }
@@ -163,6 +177,11 @@ extension UsagePopoverView {
         }
         .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(HUDColorPalette.border, lineWidth: 0.7) }
+        .onChange(of: isExpanded.wrappedValue) { _, _ in
+            DispatchQueue.main.async {
+                PopoverInteractionTrace.firstContentVisible("disclosure.\(title)")
+            }
+        }
     }
 
     var settingsSectionContent: some View {
@@ -245,18 +264,24 @@ extension UsagePopoverView {
                     Button("開啟系統設定") {
                         acknowledgeAction("正在開啟通知設定", control: "settings.notificationSettings")
                         PopoverInteractionTrace.started("settings.notificationSettings")
+                        PopoverInteractionTrace.effectDispatched("settings.notificationSettings")
                         openNotificationSettings()
                     }
                         .buttonStyle(.link)
                         .font(.caption)
+                        .popoverControlPressProbe("settings.notificationSettings")
                 } else if model.notificationAuthorizationStatus == .notDetermined {
                     Button("允許通知") {
                         acknowledgeAction("通知權限請求已送出", control: "settings.requestNotifications")
                         PopoverInteractionTrace.started("settings.requestNotifications")
-                        model.requestNotificationPermission()
+                        PopoverInteractionTrace.effectDispatched("settings.requestNotifications")
+                        model.requestNotificationPermission { success in
+                            PopoverInteractionTrace.effectCompleted("settings.requestNotifications", success: success)
+                        }
                     }
                         .buttonStyle(.link)
                         .font(.caption)
+                        .popoverControlPressProbe("settings.requestNotifications")
                 }
             }
             .padding(.top, 2)
@@ -285,18 +310,24 @@ extension UsagePopoverView {
             Button("試聽 Reel 音效") {
                 acknowledgeAction("試聽已接受", control: "settings.previewReel")
                 PopoverInteractionTrace.started("settings.previewReel")
+                PopoverInteractionTrace.effectDispatched("settings.previewReel")
                 model.previewTokenReelSound()
+                PopoverInteractionTrace.effectCompleted("settings.previewReel", success: true)
             }
                 .buttonStyle(.link)
                 .font(.caption)
                 .disabled(!model.notificationSoundEnabled || !model.tokenReelSoundEnabled)
+                .popoverControlPressProbe("settings.previewReel")
             Button("重設 HUD 位置") {
                 acknowledgeAction("HUD 位置已重設", control: "settings.resetHUD")
                 PopoverInteractionTrace.started("settings.resetHUD")
+                PopoverInteractionTrace.effectDispatched("settings.resetHUD")
                 resetHUDPosition()
+                PopoverInteractionTrace.effectCompleted("settings.resetHUD", success: true)
             }
                 .buttonStyle(.link)
                 .font(.caption)
+                .popoverControlPressProbe("settings.resetHUD")
             HStack(spacing: 8) {
                 Label("輔助功能", systemImage: model.accessibilityPermissionState == .trusted ? "checkmark.circle.fill" : "exclamationmark.triangle")
                     .foregroundStyle(model.accessibilityPermissionState == .trusted ? HUDColorPalette.continueAction : HUDColorPalette.warning)
@@ -308,10 +339,12 @@ extension UsagePopoverView {
                     Button("開啟設定") {
                         acknowledgeAction("正在開啟輔助功能設定", control: "settings.accessibilitySettings")
                         PopoverInteractionTrace.started("settings.accessibilitySettings")
+                        PopoverInteractionTrace.effectDispatched("settings.accessibilitySettings")
                         model.openAccessibilitySettings()
                     }
                         .buttonStyle(.link)
                         .font(.caption)
+                        .popoverControlPressProbe("settings.accessibilitySettings")
                 }
             }
             Text(model.accessibilityPermissionState == .trusted
@@ -419,17 +452,21 @@ extension UsagePopoverView {
                     Button(AppUpdatePresentationPolicy.installButtonTitle) {
                         acknowledgeAction("正在下載並覆蓋更新", control: "settings.installUpdate")
                         PopoverInteractionTrace.started("settings.installUpdate")
+                        PopoverInteractionTrace.effectDispatched("settings.installUpdate")
                         model.installUpdate(release)
                     }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
+                        .popoverControlPressProbe("settings.installUpdate")
                     Button(AppUpdatePresentationPolicy.releaseButtonTitle) {
                         acknowledgeAction("正在開啟更新內容", control: "settings.release")
                         PopoverInteractionTrace.started("settings.release")
+                        PopoverInteractionTrace.effectDispatched("settings.release")
                         model.openUpdateReleasePage()
                     }
                         .buttonStyle(.link)
                         .font(.subheadline)
+                        .popoverControlPressProbe("settings.release")
                 }
             case .downloading(let release):
                 HStack(spacing: 7) {
@@ -454,17 +491,23 @@ extension UsagePopoverView {
                     Button("重試") {
                         acknowledgeAction("已接受：重新檢查更新", control: "settings.retryUpdate")
                         PopoverInteractionTrace.started("settings.retryUpdate")
-                        model.checkForUpdates()
+                        PopoverInteractionTrace.effectDispatched("settings.retryUpdate")
+                        model.checkForUpdates { success in
+                            PopoverInteractionTrace.effectCompleted("settings.retryUpdate", success: success)
+                        }
                     }
                         .buttonStyle(.link)
                         .font(.subheadline)
+                        .popoverControlPressProbe("settings.retryUpdate")
                     Button("開啟 GitHub") {
                         acknowledgeAction("正在開啟 GitHub", control: "settings.github")
                         PopoverInteractionTrace.started("settings.github")
+                        PopoverInteractionTrace.effectDispatched("settings.github")
                         model.openUpdateReleasePage()
                     }
                         .buttonStyle(.link)
                         .font(.subheadline)
+                        .popoverControlPressProbe("settings.github")
                 }
             }
         }
@@ -524,18 +567,24 @@ extension UsagePopoverView {
             Button("Refresh") {
                 acknowledgeAction("重新整理已接受", control: "settings.refresh")
                 PopoverInteractionTrace.started("settings.refresh")
+                PopoverInteractionTrace.effectDispatched("settings.refresh")
                 model.refresh()
             }
+            .popoverControlPressProbe("settings.refresh")
             Button("Open Codex") {
                 acknowledgeAction("正在開啟 Codex", control: "settings.openCodex")
                 PopoverInteractionTrace.started("settings.openCodex")
+                PopoverInteractionTrace.effectDispatched("settings.openCodex")
                 openCodex()
             }
+            .popoverControlPressProbe("settings.openCodex")
             Spacer()
             Button("Quit") {
                 PopoverInteractionTrace.accepted("settings.quit")
+                PopoverInteractionTrace.effectDispatched("settings.quit")
                 quit()
             }
+            .popoverControlPressProbe("settings.quit")
         }
         .buttonStyle(.bordered)
         .controlSize(.small)

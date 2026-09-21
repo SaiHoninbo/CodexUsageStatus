@@ -573,7 +573,7 @@ final class UsageViewModel: ObservableObject {
         activeClient.refreshAccount()
     }
 
-    func checkForUpdates() {
+    func checkForUpdates(onCompletion: ((Bool) -> Void)? = nil) {
         // Manual checks are explicit user actions and therefore bypass the
         // automatic cadence. Recording the attempt also prevents an immediate
         // foreground/popover lifecycle callback from starting a duplicate
@@ -584,6 +584,11 @@ final class UsageViewModel: ObservableObject {
             self.updateState = state
             if case .available(let release) = state {
                 self.updateNotificationService.notifyIfNeeded(for: release, soundEnabled: self.effectiveNotificationSoundEnabled)
+            }
+            if case .error = state {
+                onCompletion?(false)
+            } else {
+                onCompletion?(true)
             }
         }
         // Publish the service's immediate state as well.  This keeps every
@@ -625,8 +630,9 @@ final class UsageViewModel: ObservableObject {
         currentDate = Date()
     }
 
-    func selectProfile(id: UUID) {
-        guard let profile = profileStore.profile(for: id), currentProfileID != id else { return }
+    @discardableResult
+    func selectProfile(id: UUID) -> Bool {
+        guard let profile = profileStore.profile(for: id), currentProfileID != id else { return false }
         switchToProfile(profile)
         rapidDrainDetector.reset()
         currentProfileID = id
@@ -667,6 +673,7 @@ final class UsageViewModel: ObservableObject {
             client.refreshTokenActivity()
             client.refreshAccount()
         }
+        return true
     }
 
     @discardableResult
@@ -698,8 +705,11 @@ final class UsageViewModel: ObservableObject {
         return profile
     }
 
-    func startOfficialLogin(for profileID: UUID) {
-        guard let profile = profileStore.profile(for: profileID) else { return }
+    func startOfficialLogin(for profileID: UUID, onCompletion: ((Bool) -> Void)? = nil) {
+        guard let profile = profileStore.profile(for: profileID) else {
+            onCompletion?(false)
+            return
+        }
         loginStates[profileID] = "正在啟動官方登入…"
         accountManagementService.startOfficialLogin(profile: profile, codexHomeURL: profileStore.codexHomeURL(for: profile)) { [weak self] result in
             guard let self else { return }
@@ -710,30 +720,35 @@ final class UsageViewModel: ObservableObject {
                 self.ensureManagedWorker(for: profile)
                 self.scheduleManagedWorkers(preferredID: profileID)
                 if self.managedWorkers[profileID]?.isRunning == true { self.managedWorkers[profileID]?.refresh() }
+                onCompletion?(true)
             case .failure(let error):
                 self.loginStates[profileID] = error.localizedDescription
+                onCompletion?(false)
             }
         }
     }
 
-    func importProfileForCurrentAccount() {
+    @discardableResult
+    func importProfileForCurrentAccount() -> Bool {
         let profile: AccountProfile
         if let current = currentProfile, current.isManaged {
             profile = current
         } else {
-            guard let created = createManagedProfile() else { return }
+            guard let created = createManagedProfile() else { return false }
             profile = created
         }
         profileStore.setManaged(true, for: profile.id)
-        guard let source = accountManagementService.chooseCodexHome() else { return }
+        guard let source = accountManagementService.chooseCodexHome() else { return false }
         do {
             try profileStore.importCodexHome(from: source, into: profile)
             loginStates[profile.id] = "已匯入 profile，正在同步…"
             ensureManagedWorker(for: profile)
             scheduleManagedWorkers(preferredID: profile.id)
             if managedWorkers[profile.id]?.isRunning == true { managedWorkers[profile.id]?.refresh() }
+            return true
         } catch {
             loginStates[profile.id] = error.localizedDescription
+            return false
         }
     }
 
@@ -867,13 +882,14 @@ final class UsageViewModel: ObservableObject {
         syncHistoryState()
     }
 
-    func requestNotificationPermission() {
+    func requestNotificationPermission(onCompletion: ((Bool) -> Void)? = nil) {
         notificationService.requestAuthorization { [weak self] status in
             guard let self else { return }
             self.notificationAuthorizationStatus = status
             if status == .authorized || status == .provisional {
                 self.evaluateCurrentSnapshot()
             }
+            onCompletion?(status == .authorized || status == .provisional)
         }
     }
 

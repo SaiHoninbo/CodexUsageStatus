@@ -4,16 +4,19 @@ import SwiftUI
 /// switcher for daily use, while this surface owns the complete profile list.
 extension UsagePopoverView {
     var accountsTab: some View {
-        let rows = accountTabRows
-        let currentRows = rows.filter(\.isCurrent)
-        let attentionRows = rows.filter { row in
+        let summaryRows = accountManagementSummaryRows
+        let currentRows = summaryRows.filter(\.isCurrent)
+        let attentionRows = summaryRows.filter { row in
             !row.isCurrent && (row.isWarning || row.state == .stale || row.state == .unavailable || model.loginStates[row.profileID] != nil)
         }
-        let recentRows = rows
+        let recentRows = summaryRows
             .filter { !$0.isCurrent }
             .sorted { (lastSeen[$0.profileID] ?? .distantPast) > (lastSeen[$1.profileID] ?? .distantPast) }
             .prefix(3)
             .map { $0 }
+        let allRows = AccountManagementDisclosurePolicy.showsAllAccounts(isExpanded: isAllAccountsExpanded)
+            ? accountTabRows
+            : []
 
         return VStack(alignment: .leading, spacing: 9) {
             accountTabHeader
@@ -27,21 +30,34 @@ extension UsagePopoverView {
                     .padding(10)
                     .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             } else {
-                accountManagementSummary(currentRows: currentRows, attentionRows: attentionRows, recentRows: recentRows, allRows: rows)
-                accountManagementSection("目前帳號", rows: currentRows)
+                accountManagementSummary(
+                    currentRows: currentRows,
+                    attentionRows: attentionRows,
+                    recentRows: recentRows,
+                    allCount: model.accountProfiles.count
+                )
+                accountManagementSection("目前帳號", rows: currentRows, compact: true)
                 if !attentionRows.isEmpty {
-                    accountManagementSection("需要處理", rows: attentionRows)
+                    accountManagementSection("需要處理", rows: attentionRows, compact: true)
                 }
                 if !recentRows.isEmpty {
                     accountManagementSection("最近使用", rows: recentRows, compact: true)
                 }
-                accountManagementSection("全部帳號", rows: rows, lazy: true)
+                allAccountsDisclosure
+                if isAllAccountsExpanded {
+                    accountManagementSection("全部帳號", rows: allRows, lazy: true)
+                }
             }
 
             Text("每個帳號使用獨立 CODEX_HOME 與 App Server；切換不會改動系統 ~/.codex。")
                 .font(.caption2)
                 .foregroundStyle(HUDColorPalette.tertiaryText)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+        .onChange(of: isAllAccountsExpanded) { _, _ in
+            DispatchQueue.main.async {
+                PopoverInteractionTrace.firstContentVisible("accounts.allAccountsDisclosure")
+            }
         }
     }
 
@@ -55,6 +71,8 @@ extension UsagePopoverView {
                     acknowledgeAction("已返回概覽", control: "accounts.backToOverview")
                     PopoverInteractionTrace.started("accounts.backToOverview")
                     selectionController.select(.overview)
+                    PopoverInteractionTrace.effectDispatched("accounts.backToOverview")
+                    PopoverInteractionTrace.effectCompleted("accounts.backToOverview", success: true)
                 } label: {
                     Label("返回概覽", systemImage: "chevron.left")
                         .font(.caption2.weight(.semibold))
@@ -84,13 +102,13 @@ extension UsagePopoverView {
         currentRows: [AllAccountsUsageRowPresentation],
         attentionRows: [AllAccountsUsageRowPresentation],
         recentRows: [AllAccountsUsageRowPresentation],
-        allRows: [AllAccountsUsageRowPresentation]
+        allCount: Int
     ) -> some View {
         HStack(spacing: 6) {
             accountManagementMetric("目前帳號", currentRows.count)
             accountManagementMetric("需要處理", attentionRows.count)
             accountManagementMetric("最近使用", recentRows.count)
-            accountManagementMetric("全部帳號", allRows.count)
+            accountManagementMetric("全部帳號", allCount)
         }
         .padding(.horizontal, 2)
     }
@@ -114,6 +132,59 @@ extension UsagePopoverView {
     private var lastSeen: [UUID: Date] {
         let lastSeen = Dictionary(uniqueKeysWithValues: model.accountProfiles.map { ($0.id, $0.lastSeen) })
         return lastSeen
+    }
+
+    /// The collapsed management surface only needs identity/freshness/status
+    /// summaries. Full activity and token-delta derivation is deferred until
+    /// the user explicitly expands the complete account list.
+    private var accountManagementSummaryRows: [AllAccountsUsageRowPresentation] {
+        let summaries = Dictionary(uniqueKeysWithValues: model.profileQuotaSummaries().map { ($0.profile.id, $0) })
+        return AllAccountsUsageRowPresentation.orderedProfiles(
+            model.accountProfiles,
+            currentProfileID: model.currentProfileID
+        ).map { profile in
+            AllAccountsUsageRowPresentation.make(
+                profile: profile,
+                display: model.accountProfileDisplay(for: profile),
+                summary: summaries[profile.id],
+                currentProfileID: model.currentProfileID,
+                currentConnectionState: model.connectionState,
+                currentSnapshotAvailable: model.snapshot != nil,
+                currentSnapshotIsStale: model.isStale,
+                currentRemainingPercent: model.menuBarRemainingPercent,
+                now: model.currentDate
+            )
+        }
+    }
+
+    private var allAccountsDisclosure: some View {
+        Button {
+            let expanded = !isAllAccountsExpanded
+                acknowledgeAction(expanded ? "全部帳號已展開" : "全部帳號已收合", control: "accounts.allAccountsDisclosure")
+                PopoverInteractionTrace.started("accounts.allAccountsDisclosure")
+                isAllAccountsExpanded = expanded
+                PopoverInteractionTrace.effectDispatched("accounts.allAccountsDisclosure")
+                PopoverInteractionTrace.effectCompleted("accounts.allAccountsDisclosure", success: true)
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: isAllAccountsExpanded ? "chevron.down" : "chevron.right")
+                    .font(.caption2.weight(.bold))
+                    .frame(width: 12)
+                Label("全部帳號", systemImage: "person.3")
+                    .font(.caption.weight(.semibold))
+                Spacer(minLength: 0)
+                Text("\(model.accountProfiles.count)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(HUDColorPalette.tertiaryText)
+            }
+            .padding(9)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PopoverImmediateButtonStyle(controlID: "accounts.allAccountsDisclosure"))
+        .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(HUDColorPalette.border, lineWidth: 0.7) }
+        .accessibilityValue(isAllAccountsExpanded ? "已展開" : "已收合")
+        .accessibilityHint(isAllAccountsExpanded ? "收合完整帳號列表" : "展開完整帳號列表")
     }
 
     @ViewBuilder
@@ -160,22 +231,28 @@ extension UsagePopoverView {
             Button {
                 acknowledgeAction("新增帳號已接受", control: "accounts.create")
                 PopoverInteractionTrace.started("accounts.create")
-                _ = model.createManagedProfile()
+                PopoverInteractionTrace.effectDispatched("accounts.create")
+                let created = model.createManagedProfile()
+                PopoverInteractionTrace.effectCompleted("accounts.create", success: created != nil)
             } label: {
                 Label("新增帳號", systemImage: "person.badge.plus")
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+            .popoverControlPressProbe("accounts.create")
 
             Button {
                 acknowledgeAction("匯入已接受", control: "accounts.import")
                 PopoverInteractionTrace.started("accounts.import")
-                model.importProfileForCurrentAccount()
+                PopoverInteractionTrace.effectDispatched("accounts.import")
+                let imported = model.importProfileForCurrentAccount()
+                PopoverInteractionTrace.effectCompleted("accounts.import", success: imported)
             } label: {
                 Label("匯入 Codex profile", systemImage: "square.and.arrow.down")
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+            .popoverControlPressProbe("accounts.import")
         }
     }
 
@@ -250,23 +327,29 @@ extension UsagePopoverView {
                     Button("切換並刷新") {
                         acknowledgeAction("正在切換並刷新", control: "accounts.switch")
                         PopoverInteractionTrace.started("accounts.switch")
-                        model.selectProfile(id: row.profileID)
+                        PopoverInteractionTrace.effectDispatched("accounts.switch")
+                        _ = model.selectProfile(id: row.profileID)
                         model.setAccountScope(.current)
                     }
                     .buttonStyle(.borderless)
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(HUDColorPalette.sevenDay)
                     .fixedSize()
+                    .popoverControlPressProbe("accounts.switch")
                 }
                 if let profile, profile.isManaged {
                     HStack(spacing: 6) {
                         Button("登入") {
                             acknowledgeAction("登入已接受", control: "accounts.login")
                             PopoverInteractionTrace.started("accounts.login")
-                            model.startOfficialLogin(for: profile.id)
+                            PopoverInteractionTrace.effectDispatched("accounts.login")
+                            model.startOfficialLogin(for: profile.id) { success in
+                                PopoverInteractionTrace.effectCompleted("accounts.login", success: success)
+                            }
                         }
                             .buttonStyle(.link)
                             .font(.caption2)
+                            .popoverControlPressProbe("accounts.login")
                             .disabled(model.loginStates[profile.id]?.hasPrefix("正在") == true)
                         Button(role: .destructive) {
                             PopoverInteractionTrace.accepted("accounts.remove")
@@ -277,6 +360,7 @@ extension UsagePopoverView {
                         }
                         .buttonStyle(.plain)
                         .help("刪除受管帳號")
+                        .popoverControlPressProbe("accounts.remove")
                     }
                 }
             }

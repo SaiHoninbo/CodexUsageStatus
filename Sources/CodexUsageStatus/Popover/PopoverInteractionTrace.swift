@@ -25,6 +25,13 @@ enum PopoverInteractionTrace {
         logger.info("popover_interaction control=\(control, privacy: .public) phase=t3_first_visible_response")
     }
 
+    /// Content-specific marker used when the acknowledgement is not the
+    /// meaningful response—for example a tab body, disclosure section, or
+    /// account-management destination becoming visible.
+    static func firstContentVisible(_ control: String) {
+        logger.info("popover_interaction control=\(control, privacy: .public) phase=t3_first_content_visible")
+    }
+
     static func effectDispatched(_ control: String) {
         logger.info("popover_interaction control=\(control, privacy: .public) phase=t4_effect_dispatched")
     }

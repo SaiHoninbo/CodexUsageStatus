@@ -193,9 +193,12 @@ extension UsagePopoverView {
                     acknowledgeAction("已開啟清除歷史確認", control: "history.clearConfirmation")
                     PopoverInteractionTrace.started("history.clearConfirmation")
                     showClearHistoryConfirmation = true
+                    PopoverInteractionTrace.effectDispatched("history.clearConfirmation")
+                    PopoverInteractionTrace.effectCompleted("history.clearConfirmation", success: true)
                 }
                 .buttonStyle(.link)
                 .font(.caption)
+                .popoverControlPressProbe("history.clearConfirmation")
             }
             if let error = model.historyErrorMessage {
                 Text(error)
