@@ -13,7 +13,16 @@ extension UsagePopoverView {
         let expandedRows = isAllAccountsExpanded ? orderedOtherRows(accountTabRows) : []
 
         return VStack(alignment: .leading, spacing: 9) {
-            accountTabHeader
+            if let error = model.accountHealthErrorMessage {
+                Text(error)
+                    .font(.caption2)
+                    .foregroundStyle(HUDColorPalette.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(9)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(HUDColorPalette.warning.opacity(0.12), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .overlay { RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(HUDColorPalette.warning.opacity(0.35), lineWidth: 0.7) }
+            }
             accountTabActions
 
             if model.accountProfiles.isEmpty {
@@ -43,37 +52,6 @@ extension UsagePopoverView {
                 PopoverInteractionTrace.firstContentVisible("accounts.otherAccountsDisclosure")
             }
         }
-    }
-
-    private var accountTabHeader: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 7) {
-                Label("帳號與連線", systemImage: "person.2")
-                    .font(.subheadline.weight(.semibold))
-                Spacer(minLength: 0)
-                Button {
-                    acknowledgeAction("已返回概覽", control: "accounts.backToOverview")
-                    PopoverInteractionTrace.started("accounts.backToOverview")
-                    selectionController.select(.overview)
-                    PopoverInteractionTrace.effectDispatched("accounts.backToOverview")
-                    PopoverInteractionTrace.effectCompleted("accounts.backToOverview", success: true)
-                } label: {
-                    Label("返回概覽", systemImage: "chevron.left")
-                        .font(.caption2.weight(.semibold))
-                }
-                .buttonStyle(PopoverImmediateButtonStyle(controlID: "accounts.backToOverview"))
-                .accessibilityLabel("返回概覽")
-            }
-            if let error = model.accountHealthErrorMessage {
-                Text(error)
-                    .font(.caption2)
-                    .foregroundStyle(HUDColorPalette.warning)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .padding(10)
-        .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay { RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(HUDColorPalette.border, lineWidth: 0.7) }
     }
 
     /// The collapsed management surface only needs identity/freshness/status

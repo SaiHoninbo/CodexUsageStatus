@@ -5103,10 +5103,10 @@ struct CodexUsageStatusTests {
 
     private static func testUsagePopoverTabsAndAppVersion() throws {
         try expect(
-            UsagePopoverTab.allCases.map(\.rawValue) == ["overview", "history", "settings"],
-            "usage popover keeps only the high-frequency product tabs in primary navigation"
+            UsagePopoverTab.allCases.map(\.rawValue) == ["overview", "history", "accounts", "settings"],
+            "usage popover exposes Overview, History, Accounts, and Settings in primary navigation"
         )
-        try expect(UsagePopoverTab.accounts.title == "帳號", "account management retains a secondary destination")
+        try expect(UsagePopoverTab.accounts.title == "帳號", "account management has a primary destination")
         try expect(UsagePopoverTab.settings.title == "設定", "settings has a dedicated tab")
         try expect(UsagePopoverTab.overview.title == "概覽", "overview is the default product tab")
         try expect(AppVersion.label == "v\(AppVersion.current)", "app version label is derived from bundle version")
@@ -5121,7 +5121,7 @@ struct CodexUsageStatusTests {
         )
         try expect(
             AccountManagementRoute.destination(from: .overview) == .accounts,
-            "Overview management entry routes to the secondary account surface"
+            "account management routes to the existing account surface"
         )
         try expect(
             !PopoverRefreshPolicy.shouldRefreshOnPresentation(tab: .accounts),

@@ -9,13 +9,11 @@ enum UsagePopoverTab: String, CaseIterable, Identifiable {
     case accounts
     case settings
 
-    /// Accounts remains a value-semantic destination so alerts and the
-    /// Overview management entry can route to the existing authority, but it
-    /// is intentionally not part of the permanent primary navigation. Account
-    /// switching stays in Overview; full management is a low-frequency
-    /// secondary surface.
+    /// Accounts is a normal primary destination. The tab opens the existing
+    /// management surface directly; account authority and row actions remain
+    /// owned by the existing model/service path.
     static var allCases: [UsagePopoverTab] {
-        [.overview, .history, .settings]
+        [.overview, .history, .accounts, .settings]
     }
 
     var id: String { rawValue }

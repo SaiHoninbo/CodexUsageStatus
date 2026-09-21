@@ -590,6 +590,18 @@ extension UsagePopoverView {
             .buttonStyle(.bordered)
             .controlSize(.small)
             .popoverControlPressProbe("overview.openCodex")
+
+            Button {
+                PopoverInteractionTrace.accepted("overview.quit")
+                PopoverInteractionTrace.effectDispatched("overview.quit")
+                quit()
+            } label: {
+                Label("關閉", systemImage: "power")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .popoverControlPressProbe("overview.quit")
         }
     }
 
