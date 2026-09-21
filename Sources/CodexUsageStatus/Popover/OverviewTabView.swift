@@ -409,6 +409,18 @@ extension UsagePopoverView {
                     .help("切換或建立本機 profile")
                 }
 
+                Button {
+                    acknowledgeAction("帳號管理已開啟", control: "overview.accountManagement")
+                    PopoverInteractionTrace.started("overview.accountManagement")
+                    selectionController.select(AccountManagementRoute.destination(from: selectedTab))
+                } label: {
+                    Label("管理", systemImage: "person.2")
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(PopoverImmediateButtonStyle(controlID: "overview.accountManagement"))
+                .help("開啟完整帳號管理")
+                .accessibilityLabel("帳號管理")
+
                 if model.accountScope == .current {
                     Text(model.accountHealthState.displayName)
                         .font(.caption2.weight(.medium))
@@ -509,12 +521,14 @@ extension UsagePopoverView {
                     }
                     allAccountsUsageRows
                     Button {
-                        selectionController.select(.accounts)
+                        acknowledgeAction("帳號管理已開啟", control: "overview.accountManagement")
+                        PopoverInteractionTrace.started("overview.accountManagement")
+                        selectionController.select(AccountManagementRoute.destination(from: selectedTab))
                     } label: {
                         Label("前往帳號管理", systemImage: "arrow.right")
                             .frame(maxWidth: .infinity, alignment: .trailing)
                     }
-                    .buttonStyle(.link)
+                    .buttonStyle(PopoverImmediateButtonStyle(controlID: "overview.accountManagement"))
                     .font(.caption.weight(.semibold))
                     .accessibilityHint("前往帳號頁面的完整帳號管理")
                 }
@@ -533,7 +547,7 @@ extension UsagePopoverView {
             if rows.isEmpty {
                 compactEmptyState("尚未取得各帳號的用量資料。")
             } else {
-                VStack(spacing: 0) {
+                LazyVStack(spacing: 0) {
                     ForEach(rows) { row in
                         allAccountsUsageRow(row)
                         if row.id != rows.last?.id {

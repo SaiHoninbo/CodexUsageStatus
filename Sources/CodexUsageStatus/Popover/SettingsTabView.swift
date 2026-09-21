@@ -1,9 +1,10 @@
 import AppKit
 import SwiftUI
 
-/// Settings owns account management and all low-frequency controls. Disclosure
-/// state remains view-local so this surface stays compact without creating a
-/// persistent product preference.
+/// Settings owns low-frequency preferences and remediation controls. Full
+/// account management is a separate secondary surface reached from Overview;
+/// disclosure state remains view-local so this surface stays compact without
+/// creating a persistent product preference.
 extension UsagePopoverView {
     var settingsTab: some View {
         VStack(alignment: .leading, spacing: 7) {

@@ -121,6 +121,11 @@ final class UsageViewModel: ObservableObject {
     private var localUsageObserver: CodexLocalUsageObserver?
     private var activeTurnSourceKey: String?
     private let profileStore: AccountProfileStore
+    /// Profile-scoped history is disk-backed. Cache the compact account list
+    /// projection between semantic profile/history changes so opening the
+    /// secondary management surface never scans every history file per SwiftUI
+    /// body evaluation.
+    private var profileQuotaSummaryCache: [ProfileQuotaSummary]?
     private let legacyHistoryURL: URL
     private let legacyTokenActivityURL: URL
     private let notificationService = UsageNotificationService()
@@ -271,6 +276,7 @@ final class UsageViewModel: ObservableObject {
 
             if (state == .offline || state == .error), let snapshot = self.snapshot {
                 self.historyStore.record(snapshot: snapshot, connectionState: state, now: Date())
+                self.invalidateProfileQuotaSummaryCache()
                 self.syncHistoryState()
             }
         }
@@ -294,6 +300,7 @@ final class UsageViewModel: ObservableObject {
             // .connected immediately after invoking this callback.  History is
             // written only after the semantic quota payload changes.
             self.historyStore.record(snapshot: snapshot, connectionState: .connected, now: snapshot.receivedAt)
+            self.invalidateProfileQuotaSummaryCache()
             self.syncHistoryState()
             self.evaluateLiveNotifications(
                 snapshot: snapshot,
@@ -459,6 +466,7 @@ final class UsageViewModel: ObservableObject {
         localStoresLoaded = true
         defaultClientEnabled = true
         accountProfiles = profileStore.accountProfiles()
+        invalidateProfileQuotaSummaryCache()
         refreshHUDTokenActivitySummary()
         if let savedID = defaults.string(forKey: PreferenceKey.activeProfile),
            let id = UUID(uuidString: savedID),
@@ -624,6 +632,7 @@ final class UsageViewModel: ObservableObject {
         currentProfileID = id
         defaults.set(id.uuidString, forKey: PreferenceKey.activeProfile)
         accountProfiles = profileStore.accountProfiles()
+        invalidateProfileQuotaSummaryCache()
         refreshLocalUsageObserverRoots()
         activeTurn = .unknownSnapshot()
         activeTurnSourceKey = nil
@@ -667,6 +676,7 @@ final class UsageViewModel: ObservableObject {
         switchToProfile(profile)
         currentProfileID = profile.id
         accountProfiles = profileStore.accountProfiles()
+        invalidateProfileQuotaSummaryCache()
         refreshLocalUsageObserverRoots()
         activeTurn = .unknownSnapshot()
         activeTurnSourceKey = nil
@@ -773,6 +783,7 @@ final class UsageViewModel: ObservableObject {
         managedAccountHealth[id] = nil
         guard profileStore.deleteProfile(id: id) else { return }
         accountProfiles = profileStore.accountProfiles()
+        invalidateProfileQuotaSummaryCache()
         refreshHUDTokenActivitySummary()
         if currentProfileID == id {
             currentProfileID = nil
@@ -1106,6 +1117,7 @@ final class UsageViewModel: ObservableObject {
             if semanticChange {
                 let store = HistoryStore(fileURL: self.profileStore.historyURL(for: profile))
                 _ = store.record(snapshot: snapshot, connectionState: .connected, now: snapshot.receivedAt)
+                self.invalidateProfileQuotaSummaryCache()
             }
             if self.currentProfileID == id {
                 guard self.applySnapshot(snapshot, to: self) else { return }
@@ -1165,6 +1177,7 @@ final class UsageViewModel: ObservableObject {
             }
             self.profileStore.updateProfile(id, authMode: health.identity.authMode, accountType: health.identity.accountType)
             self.accountProfiles = self.profileStore.accountProfiles()
+            self.invalidateProfileQuotaSummaryCache()
             if self.currentProfileID == id {
                 self.accountHealth = health
                 self.accountHealthState = .loaded
@@ -1249,6 +1262,7 @@ final class UsageViewModel: ObservableObject {
         reconcileSelectedResetCredit()
         historyStore = HistoryStore(fileURL: profileStore.historyURL(for: profile))
         _ = historyStore.record(snapshot: snapshot, connectionState: .connected, now: snapshot.receivedAt)
+        invalidateProfileQuotaSummaryCache()
         syncHistoryState()
         return true
     }
@@ -1257,11 +1271,20 @@ final class UsageViewModel: ObservableObject {
         historyStore.samples(for: historyRange, now: currentDate)
     }
 
+    private func invalidateProfileQuotaSummaryCache() {
+        profileQuotaSummaryCache = nil
+    }
+
     func profileQuotaSummaries() -> [ProfileQuotaSummary] {
-        profileStore.accountProfiles().map { profile in
+        if let profileQuotaSummaryCache {
+            return profileQuotaSummaryCache
+        }
+        let summaries = profileStore.accountProfiles().map { profile in
             let store = HistoryStore(fileURL: profileStore.historyURL(for: profile))
             return ProfileQuotaSummary(profile: profile, latestSample: store.samples.last)
         }
+        profileQuotaSummaryCache = summaries
+        return summaries
     }
 
     var accountScopeSummary: AccountScopeSummary {
@@ -2198,6 +2221,7 @@ final class UsageViewModel: ObservableObject {
         }
         currentProfileID = selection.profile.id
         accountProfiles = profileStore.accountProfiles()
+        invalidateProfileQuotaSummaryCache()
         refreshLocalUsageObserverRoots()
         accountHealth = health
         accountHealthState = .loaded

@@ -224,6 +224,13 @@ struct UsagePopoverView: View {
         actionAcknowledgement = message
         let token = UUID()
         actionAcknowledgementToken = token
+        // Keep the acknowledgement out of the measured content tree and mark
+        // the first visible response after SwiftUI receives the state change.
+        // This is intentionally a next-turn observation; it does not move any
+        // action earlier than the existing mouse-up handler.
+        DispatchQueue.main.async {
+            PopoverInteractionTrace.firstVisible(control)
+        }
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 900_000_000)
             guard actionAcknowledgementToken == token else { return }

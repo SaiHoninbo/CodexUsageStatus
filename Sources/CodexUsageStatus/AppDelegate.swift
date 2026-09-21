@@ -203,7 +203,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             PopoverPresentationPolicy.apply(to: popover)
             installOutsideClickMonitor()
-            model.refresh()
+            if PopoverRefreshPolicy.shouldRefreshOnPresentation(tab: tab) {
+                model.refresh()
+            }
             model.checkForUpdatesIfNeeded()
         }
     }

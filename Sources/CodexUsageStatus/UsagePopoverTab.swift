@@ -9,6 +9,15 @@ enum UsagePopoverTab: String, CaseIterable, Identifiable {
     case accounts
     case settings
 
+    /// Accounts remains a value-semantic destination so alerts and the
+    /// Overview management entry can route to the existing authority, but it
+    /// is intentionally not part of the permanent primary navigation. Account
+    /// switching stays in Overview; full management is a low-frequency
+    /// secondary surface.
+    static var allCases: [UsagePopoverTab] {
+        [.overview, .history, .settings]
+    }
+
     var id: String { rawValue }
 
     var title: String {
@@ -51,6 +60,14 @@ enum ProductSettingsRoute {
     static func destination(from currentTab: UsagePopoverTab) -> UsagePopoverTab {
         _ = currentTab
         return targetTab
+    }
+}
+
+enum AccountManagementRoute {
+    static let targetTab: UsagePopoverTab = .accounts
+
+    static func destination(from _: UsagePopoverTab) -> UsagePopoverTab {
+        targetTab
     }
 }
 

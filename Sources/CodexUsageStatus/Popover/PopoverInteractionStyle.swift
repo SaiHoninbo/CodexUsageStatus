@@ -9,6 +9,16 @@ enum PopoverInteractionPolicy {
     static let actionExecutesOnMouseUp = true
 }
 
+/// Opening a low-frequency management surface must not implicitly fan out a
+/// new App Server refresh. Overview and Settings retain their existing
+/// refresh-on-presentation behavior; account management renders the already
+/// authoritative profile/cache state first and lets explicit actions refresh.
+enum PopoverRefreshPolicy {
+    static func shouldRefreshOnPresentation(tab: UsagePopoverTab) -> Bool {
+        tab != .accounts
+    }
+}
+
 /// Small, local acknowledgement for popover controls. It does not run the
 /// action early; it only makes the mouse-down state visible immediately.
 struct PopoverImmediateButtonStyle: ButtonStyle {
