@@ -150,6 +150,12 @@ final class FloatingHUDPanelController: NSObject {
         let durationMilliseconds: Double
     }
 
+    private struct CodexWindowDiagnostics {
+        let focusedBoundsAvailable: Bool
+        let quartzCandidateCount: Int
+        let matchedWindow: Bool
+    }
+
     private let model: UsageViewModel
     var onShowDetails: (() -> Void)?
     var onOpenSettingsForAlert: ((HUDAlertPresentation) -> Void)?
@@ -181,6 +187,7 @@ final class FloatingHUDPanelController: NSObject {
     private var lastCodexWindowFrame: NSRect?
     private var lastCodexVisibleFrame: NSRect?
     private var lastCodexProcessID: pid_t?
+    private var lastCodexWindowDiagnostics: CodexWindowDiagnostics?
     private var trustedCodexApplicationIdentity: TrustedApplicationCacheEntry?
     private var lastPositionedCodexWindowFrame: NSRect?
     private var lastPositionedVisibleFrame: NSRect?
@@ -761,6 +768,18 @@ final class FloatingHUDPanelController: NSObject {
             return
         }
         guard isCodexApplication(frontmostApplication, trigger: trigger) else {
+            if CodexApplicationPolicy.isCodexApplication(bundleIdentifier: frontmostApplication.bundleIdentifier) {
+                // Trust validation can fail or remain pending before the
+                // positioning path is entered. Capture that state without
+                // reusing window diagnostics from an older Codex session.
+                lastCodexWindowDiagnostics = nil
+                logRuntimeDiagnostics(
+                    application: frontmostApplication,
+                    trustState: trustValidationState(for: frontmostApplication),
+                    positionResult: nil,
+                    panel: panel
+                )
+            }
             scheduleFocusLoss(panel)
             return
         }
@@ -778,7 +797,14 @@ final class FloatingHUDPanelController: NSObject {
         }
         lastCodexProcessID = codexApp.processIdentifier
         synchronizeQuotaRowCount(for: panel)
-        switch position(panel, beside: codexApp) {
+        let positionResult = position(panel, beside: codexApp)
+        logRuntimeDiagnostics(
+            application: codexApp,
+            trustState: "trusted",
+            positionResult: positionResult,
+            panel: panel
+        )
+        switch positionResult {
         case .positioned:
             let didPromoteWindowLevel = reconcileWindowLevel(panel)
             panel.alphaValue = 1.0
@@ -1623,7 +1649,14 @@ final class FloatingHUDPanelController: NSObject {
         // focused Codex window may be reported outside the active Space.
         // Identity remains fail-closed through PID/layer/size and AX geometry.
         let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
-        guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return nil }
+        guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+            lastCodexWindowDiagnostics = CodexWindowDiagnostics(
+                focusedBoundsAvailable: focusedBounds != nil,
+                quartzCandidateCount: 0,
+                matchedWindow: false
+            )
+            return nil
+        }
         let candidates = windows.compactMap { info -> CGRect? in
             guard let ownerPID = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
                   ownerPID == processID,
@@ -1640,9 +1673,76 @@ final class FloatingHUDPanelController: NSObject {
         // space. Require exactly one close match so two windows cannot be
         // cross-wired; when AX is unavailable, only a single filtered Quartz
         // candidate is accepted, preserving the same fail-closed behavior.
-        return HUDVisibilityPolicy.uniqueQuartzWindowMatch(
+        let matchedWindow = HUDVisibilityPolicy.uniqueQuartzWindowMatch(
             focusedBounds: focusedBounds,
             candidates: candidates
         )
+        lastCodexWindowDiagnostics = CodexWindowDiagnostics(
+            focusedBoundsAvailable: focusedBounds != nil,
+            quartzCandidateCount: candidates.count,
+            matchedWindow: matchedWindow != nil
+        )
+        return matchedWindow
+    }
+
+    /// Emits a bounded, app-owned diagnostic packet for the exact candidate
+    /// currently being considered. This is observation only: it never prompts
+    /// for Accessibility, changes window state, or persists user content.
+    private func logRuntimeDiagnostics(
+        application: NSRunningApplication,
+        trustState: String,
+        positionResult: HUDPositionResult?,
+        panel: NSPanel
+    ) {
+        let diagnostics = lastCodexWindowDiagnostics
+        let axTrusted = AXIsProcessTrusted()
+        let eventPostingAuthorized = CGPreflightPostEventAccess()
+        let frame = panel.frame
+        let focusedBounds = diagnostics.map { String($0.focusedBoundsAvailable) } ?? "not_attempted"
+        let quartzCandidates = diagnostics.map { String($0.quartzCandidateCount) } ?? "not_attempted"
+        let matchedWindow = diagnostics.map { String($0.matchedWindow) } ?? "not_attempted"
+        let position = positionResult.map(String.init(describing:)) ?? "not_attempted"
+        let diagnosticMessage = [
+            "HUD runtime diagnostics",
+            "pid=\(application.processIdentifier)",
+            "bundle_id=\(application.bundleIdentifier ?? "unknown")",
+            "trust_state=\(trustState)",
+            "ax_trusted=\(axTrusted)",
+            "event_posting_authorized=\(eventPostingAuthorized)",
+            "focused_bounds=\(focusedBounds)",
+            "quartz_candidates=\(quartzCandidates)",
+            "matched_window=\(matchedWindow)",
+            "position=\(position)",
+            "panel_visible=\(panel.isVisible)",
+            "panel_frame=\(frame.origin.x),\(frame.origin.y),\(frame.width),\(frame.height)"
+        ].joined(separator: " ")
+        Self.performanceLogger.info("\(diagnosticMessage, privacy: .public)")
+    }
+
+    private func trustValidationState(for application: NSRunningApplication) -> String {
+        guard let launchDate = application.launchDate,
+              let bundleURL = application.bundleURL else {
+            return "missing_identity"
+        }
+        let identity = TrustValidationIdentity(
+            processIdentifier: application.processIdentifier,
+            launchDate: launchDate,
+            bundleURL: bundleURL
+        )
+        if let trustedCodexApplicationIdentity,
+           trustedCodexApplicationIdentity.matches(
+               processIdentifier: application.processIdentifier,
+               launchDate: launchDate,
+               bundleURL: bundleURL
+           ) {
+            return "trusted"
+        }
+        if rejectedTrustValidationIdentity == identity {
+            return "rejected"
+        }
+        if pendingTrustValidationIdentity == identity {
+            return "validating"
+        }
+        return "unvalidated"
     }
 }

@@ -1,5 +1,13 @@
 import SwiftUI
 
+private enum PopoverQuotaLayout {
+    /// Both available and unavailable quota states occupy the same compact
+    /// card contract. Without this shared floor, a missing 5-hour window
+    /// collapses to a short label row while the adjacent 7-day card retains
+    /// its progress content, leaving an asymmetric blank region in the grid.
+    static let cardMinimumHeight: CGFloat = 64
+}
+
 /// Overview owns the current-state composition and its account/quota helpers.
 /// Historical Token detail remains isolated in History.
 extension UsagePopoverView {
@@ -687,6 +695,11 @@ extension UsagePopoverView {
                     .foregroundStyle(HUDColorPalette.tertiaryText)
             }
             .padding(9)
+            .frame(
+                maxWidth: .infinity,
+                minHeight: PopoverQuotaLayout.cardMinimumHeight,
+                alignment: .topLeading
+            )
             .background(HUDColorPalette.controlSurface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay { RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(accent.opacity(0.34), lineWidth: 0.7) }
         } else {
@@ -700,6 +713,11 @@ extension UsagePopoverView {
                 }
             }
             .padding(9)
+            .frame(
+                maxWidth: .infinity,
+                minHeight: PopoverQuotaLayout.cardMinimumHeight,
+                alignment: .leading
+            )
             .background(HUDColorPalette.controlSurface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
     }
