@@ -5894,7 +5894,7 @@ struct CodexUsageStatusTests {
 
         let artifactURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("outputs/CodexUsageStatus.app.zip")
-        let expectedArtifactVersion = "2.4.115"
+        let expectedArtifactVersion = "2.4.116"
         let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, expectedArtifactVersion])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 
@@ -6001,16 +6001,17 @@ struct CodexUsageStatusTests {
     private static func testCodexPromptShortcuts() throws {
         let shortcuts = CodexPromptShortcut.allCases
         try expect(shortcuts == [.continueTask, .fixUntilDone, .fullVerification, .commitAndPush], "workflow shortcuts preserve the four-case order")
-        try expect(shortcuts.map(\.rawValue) == ["繼續", "修到完成", "完整驗證", "Commit + Push"], "visible labels stay separate from payloads")
+        try expect(shortcuts.map(\.rawValue) == ["繼續", "修到完成", "完整驗證", "提交並推送"], "workflow labels use the Chinese product language")
         try expect(shortcuts.map(\.text) == [
             "go on",
-            "Continue the current task using the latest repo reality. Fix repairable issues automatically, rerun affected verification, and keep going until the task is complete or a true material blocker is found. Do not stop for routine approvals or previously decided matters.",
-            "Verify the current implementation against the latest repo reality. Run the relevant tests, build, diff checks, and necessary runtime verification. Auto-repair repairable failures and rerun affected checks. Finish with a concise verification result and remaining declared limits.",
-            "Review the current repository, branch, working tree, diff, verification status, and sensitive-content risk. If the current change is safe and sufficiently verified, create an appropriate commit and push it to the existing upstream. Stop only for a true material risk such as repository identity mismatch, unexpected branch or remote target, secret exposure, destructive Git, or material scope mismatch."
-        ], "workflow payloads match the fixed transport contract")
-        try expect(shortcuts.allSatisfy { $0.submitAfterPaste }, "every workflow shortcut submits after paste")
+            "請依目前最新的 Repo 狀態繼續處理目前工作。自動修復可修復問題、重新執行受影響的驗證，持續完成工作；只有遇到真正的重大阻塞才停止。不要因例行批准或已決定事項停止。",
+            "請依目前最新的 Repo 狀態驗證實作。執行相關測試、建置、diff 檢查與必要的 runtime 驗證；自動修復可修復失敗並重新執行受影響的檢查。最後用精簡內容回報驗證結果與仍存在的限制。",
+            "請檢查目前 Repo、分支、working tree、diff、驗證狀態與敏感內容風險。若目前變更安全且驗證充分，建立適當的 commit 並推送到既有 upstream。若遇到 Repo 身分不符、分支或遠端目標異常、秘密外洩、破壞性 Git 操作或範圍不符等重大風險，請停止並回報。"
+        ], "workflow payloads use Chinese instructions")
+        try expect(shortcuts.map(\.submitAfterPaste) == [true, false, false, false], "bottom three workflow shortcuts paste without submitting")
         try expect(shortcuts.allSatisfy { $0.accessibilityLabel == $0.rawValue }, "accessibility uses concise labels")
-        try expect(CodexPromptShortcut.commitAndPush.helpText.contains("不會執行 Git"), "Commit + Push explains that Usage App never runs Git")
+        try expect(CodexPromptShortcut.commitAndPush.helpText.contains("不會自動送出"), "submit-sensitive workflow explains paste-only behavior")
+        try expect(CodexPromptShortcut.commitAndPush.helpText.contains("不會執行 Git"), "提交並推送 explains that Usage App never runs Git")
     }
 
     private static func testCodexApplicationIdentity() throws {
