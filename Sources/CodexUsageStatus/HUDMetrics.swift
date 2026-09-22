@@ -26,12 +26,13 @@ struct HUDMetrics: Equatable {
     static let canonicalActionHeight: CGFloat = 38.4
     static let canonicalWorkflowActionGap: CGFloat = 5
     // Credits and Reset Credits share a non-progress account-information row.
-    // Its dividers and breathing room are included so AppKit and SwiftUI keep
-    // one shared height contract.
-    // Reserve enough room for the two fractional divider strokes even at the
-    // smallest .64 scale. The row itself may stay at its 32pt readability
-    // floor without bleeding into the following section gap.
-    static let canonicalAccountInfoSectionHeight: CGFloat = 52
+    // Both columns use a vertical label/value hierarchy. The Reset Credit
+    // column can therefore show count, exact expiry, and countdown without
+    // compressing them into one unreadable line. The section is deliberately
+    // derived from the three-line content contract rather than the old
+    // two-line 52pt row.
+    static let canonicalAccountInfoSectionHeight: CGFloat = 72
+    static let canonicalAccountInfoMinimumRowHeight: CGFloat = 42
     static let canonicalActionSpacing: CGFloat = 8
     static let canonicalCornerRadius: CGFloat = 15.2
     static let canonicalPanelSize = CGSize(
@@ -94,7 +95,15 @@ struct HUDMetrics: Equatable {
     var tokenSummaryGap: CGFloat { Self.canonicalTokenSummaryGap * factor }
     var workflowActionGap: CGFloat { Self.canonicalWorkflowActionGap * factor }
     var accountInfoSectionHeight: CGFloat { Self.canonicalAccountInfoSectionHeight * factor }
-    var accountInfoRowHeight: CGFloat { max(32, accountInfoSectionHeight - (sectionGap * 0.85)) }
+    // Text floors are intentionally physical-size aware. At the compact
+    // levels the section scales down, but never below the height required for
+    // the label plus exact-expiry plus countdown lines.
+    var accountInfoRowHeight: CGFloat {
+        max(
+            Self.canonicalAccountInfoMinimumRowHeight,
+            accountInfoSectionHeight - (sectionGap * 0.85)
+        )
+    }
     var actionSpacing: CGFloat { Self.canonicalActionSpacing * factor }
     var cornerRadius: CGFloat { Self.canonicalCornerRadius * factor }
     var contentWidth: CGFloat {

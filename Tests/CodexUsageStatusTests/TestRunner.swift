@@ -5425,6 +5425,8 @@ struct CodexUsageStatusTests {
         try expect(standard.tokenSummaryHeight >= 78, "Token hero has room for idle reel cells and secondary metrics")
         try expectApproximately(standard.workflowActionHeight, standard.actionHeight, "workflow cards share the primary action height")
         try expectApproximately(standard.verticalContentHeight + standard.outerPadding * 2, standard.panelSize.height, "canonical height closes from derived tokens")
+        try expectApproximately(standard.accountInfoSectionHeight, 72, "account information section reserves the vertical three-line contract")
+        try expect(standard.accountInfoRowHeight >= HUDMetrics.canonicalAccountInfoMinimumRowHeight, "account information row keeps its readable minimum")
         try expect(standard.panelSize(quotaRowCount: 1).height < standard.panelSize(quotaRowCount: 2).height, "one quota row removes empty vertical space")
         try expect(standard.panelSize(quotaRowCount: 3).height > standard.panelSize(quotaRowCount: 2).height, "three quota rows grow only by quota height")
         try expect(standard.panelSize(quotaRowCount: 2, includesAccountInfoRow: true).height > standard.panelSize(quotaRowCount: 2).height, "account information adds its shared section")
@@ -5442,6 +5444,14 @@ struct CodexUsageStatusTests {
             try expect(
                 3 * metrics.actionCardWidth + (metrics.actionSpacing * 2) <= metrics.contentWidth + 0.01,
                 "action cards fit three columns at every scale level"
+            )
+            try expect(
+                metrics.accountInfoRowHeight + (2 * max(0.6, 0.8 * metrics.factor)) <= metrics.accountInfoSectionHeight + 0.01,
+                "vertical account-information content stays inside its section at \(level.displayName)"
+            )
+            try expect(
+                metrics.accountInfoRowHeight >= HUDMetrics.canonicalAccountInfoMinimumRowHeight,
+                "vertical account-information row keeps its readable minimum at \(level.displayName)"
             )
             try expectApproximately(metrics.workflowActionHeight, metrics.actionHeight, "workflow row shares action height at \(level.displayName)")
             try expect(metrics.tokenSummaryHeight >= 40 * metrics.factor, "token summary keeps two rows within the scaled cell budget at \(level.displayName)")

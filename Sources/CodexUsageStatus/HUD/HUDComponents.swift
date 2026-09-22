@@ -196,23 +196,22 @@ struct HUDAccountInfoRow: View {
     }
 
     private var creditsContent: some View {
-        HStack(spacing: max(5, 7 * scaleFactor)) {
-            Image(systemName: "wallet.pass")
-                .font(.system(size: max(14, 19 * scaleFactor), weight: .semibold))
-                .foregroundStyle(palette.credits)
-            Text("Credits")
-                .font(.system(size: max(12, 15 * scaleFactor), weight: .semibold, design: .rounded))
-                .foregroundStyle(palette.credits)
-            Spacer(minLength: 3)
+        VStack(alignment: .leading, spacing: max(1, 2 * scaleFactor)) {
+            HStack(spacing: max(5, 7 * scaleFactor)) {
+                Image(systemName: "wallet.pass")
+                    .font(.system(size: max(14, 19 * scaleFactor), weight: .semibold))
+                    .foregroundStyle(palette.credits)
+                Text("Credits")
+                    .font(.system(size: max(12, 15 * scaleFactor), weight: .semibold, design: .rounded))
+                    .foregroundStyle(palette.credits)
+            }
             Text(balanceText)
                 .font(.system(size: max(15, 21 * scaleFactor), weight: .bold, design: .rounded))
                 .foregroundStyle(palette.primaryText)
                 .monospacedDigit()
                 .lineLimit(1)
-                .minimumScaleFactor(0.62)
-            Text("餘額")
-                .font(.system(size: max(9, 11 * scaleFactor), weight: .medium, design: .rounded))
-                .foregroundStyle(palette.secondaryText)
+                .minimumScaleFactor(0.88)
+                .allowsTightening(true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -231,16 +230,21 @@ struct HUDAccountInfoRow: View {
                         .monospacedDigit()
                 }
                 .foregroundStyle(resetColor)
-                if count > 0,
-                   let timingText = HUDResetCreditDisplayPolicy.timingText(
-                       countdownText: resetCreditCountdownText,
-                       exactExpiryText: resetCreditExactExpiryText
-                   ) {
-                    Text(timingText)
-                        .font(.system(size: max(8, 10 * scaleFactor), weight: .medium, design: .rounded))
+                if count > 0, let exactExpiryText = resetCreditExactExpiryText {
+                    Text(exactExpiryText)
+                        .font(.system(size: max(11.5, 13 * scaleFactor), weight: .medium, design: .rounded))
                         .foregroundStyle(palette.secondaryText)
                         .lineLimit(1)
-                        .minimumScaleFactor(0.72)
+                        .minimumScaleFactor(0.9)
+                        .allowsTightening(true)
+                }
+                if count > 0, let countdownText = resetCreditCountdownText {
+                    Text(countdownText)
+                        .font(.system(size: max(10, 11 * scaleFactor), weight: .medium, design: .rounded))
+                        .foregroundStyle(palette.secondaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.9)
+                        .allowsTightening(true)
                 }
             }
         }
