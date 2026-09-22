@@ -5124,12 +5124,37 @@ struct CodexUsageStatusTests {
             "account management routes to the existing account surface"
         )
         try expect(
-            !PopoverRefreshPolicy.shouldRefreshOnPresentation(tab: .accounts),
+            !PopoverRefreshPolicy.shouldRefreshOnPresentation(
+                tab: .accounts,
+                hasAuthoritativeSnapshot: false,
+                isStale: true
+            ),
             "opening account management does not fan out an App Server refresh"
         )
         try expect(
-            PopoverRefreshPolicy.shouldRefreshOnPresentation(tab: .overview),
-            "Overview retains refresh-on-presentation behavior"
+            !PopoverRefreshPolicy.shouldRefreshOnPresentation(
+                tab: .overview,
+                hasAuthoritativeSnapshot: true,
+                isStale: false
+            )
+            && PopoverRefreshPolicy.shouldRefreshOnPresentation(
+                tab: .overview,
+                hasAuthoritativeSnapshot: true,
+                isStale: true
+            )
+            && PopoverRefreshPolicy.shouldRefreshOnPresentation(
+                tab: .overview,
+                hasAuthoritativeSnapshot: false,
+                isStale: true
+            ),
+            "Popover renders fresh state immediately and refreshes only stale/unavailable data"
+        )
+        try expect(
+            !PopoverAcknowledgementPolicy.shouldShow(for: "tab.overview")
+                && !PopoverAcknowledgementPolicy.shouldShow(for: "disclosure.HUD")
+                && !PopoverAcknowledgementPolicy.shouldShow(for: "accounts.otherAccountsDisclosure")
+                && PopoverAcknowledgementPolicy.shouldShow(for: "settings.refresh"),
+            "immediate navigation/disclosure omits feedback chrome while explicit refresh keeps it"
         )
         try expect(
             !AccountManagementDisclosurePolicy.defaultExpanded

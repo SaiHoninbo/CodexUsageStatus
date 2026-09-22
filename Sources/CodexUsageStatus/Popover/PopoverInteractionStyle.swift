@@ -9,13 +9,31 @@ enum PopoverInteractionPolicy {
     static let actionExecutesOnMouseUp = true
 }
 
-/// Opening a low-frequency management surface must not implicitly fan out a
-/// new App Server refresh. Overview and Settings retain their existing
-/// refresh-on-presentation behavior; account management renders the already
-/// authoritative profile/cache state first and lets explicit actions refresh.
+/// Opening a Popover renders the existing authoritative/cache snapshot first.
+/// A background refresh is only needed when the snapshot is unavailable or
+/// stale; account management keeps its existing no-fan-out behavior because
+/// its compact surface is backed by the local profile/cache projection.
 enum PopoverRefreshPolicy {
-    static func shouldRefreshOnPresentation(tab: UsagePopoverTab) -> Bool {
-        tab != .accounts
+    static func shouldRefreshOnPresentation(
+        tab: UsagePopoverTab,
+        hasAuthoritativeSnapshot: Bool = false,
+        isStale: Bool = true
+    ) -> Bool {
+        guard tab != .accounts else { return false }
+        return !hasAuthoritativeSnapshot || isStale
+    }
+}
+
+/// Immediate navigation/disclosure changes are already visible in the
+/// selected state or expanded content. Keeping the acknowledgement policy in
+/// one place prevents a future call site from reintroducing a transient
+/// overlay that adds visual churn without adding information.
+enum PopoverAcknowledgementPolicy {
+    static func shouldShow(for control: String) -> Bool {
+        guard !control.hasPrefix("tab."), !control.hasPrefix("disclosure.") else {
+            return false
+        }
+        return control != "accounts.otherAccountsDisclosure"
     }
 }
 

@@ -149,9 +149,12 @@ extension UsagePopoverView {
     ) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
-                acknowledgeAction(isExpanded.wrappedValue ? "\(title)已收合" : "\(title)已展開", control: "disclosure.\(title)")
-                PopoverInteractionTrace.started("disclosure.\(title)")
+                let control = "disclosure.\(title)"
+                PopoverInteractionTrace.accepted(control)
+                PopoverInteractionTrace.started(control)
                 isExpanded.wrappedValue.toggle()
+                PopoverInteractionTrace.effectDispatched(control)
+                PopoverInteractionTrace.effectCompleted(control, success: true)
             } label: {
                 HStack(spacing: 7) {
                     Image(systemName: isExpanded.wrappedValue ? "chevron.down" : "chevron.right")

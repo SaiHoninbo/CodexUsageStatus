@@ -203,8 +203,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             PopoverPresentationPolicy.apply(to: popover)
             installOutsideClickMonitor()
-            if PopoverRefreshPolicy.shouldRefreshOnPresentation(tab: tab) {
-                model.refresh()
+            if PopoverRefreshPolicy.shouldRefreshOnPresentation(
+                tab: tab,
+                hasAuthoritativeSnapshot: model.snapshot != nil,
+                isStale: model.isStale
+            ) {
+                // Let AppKit complete the first visible presentation before
+                // starting any stale/unavailable data refresh. The current
+                // snapshot remains the immediate source of truth; this task
+                // only replaces it when the client publishes a fresh result.
+                Task { @MainActor [weak model] in
+                    await Task.yield()
+                    guard !Task.isCancelled else { return }
+                    model?.refresh()
+                }
             }
             model.checkForUpdatesIfNeeded()
         }

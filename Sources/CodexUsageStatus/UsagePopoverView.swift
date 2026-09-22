@@ -135,7 +135,7 @@ struct UsagePopoverView: View {
         HStack(spacing: 4) {
             ForEach(UsagePopoverTab.allCases) { tab in
                 Button {
-                    acknowledgeAction("\(tab.title)已開啟", control: "tab.\(tab.rawValue)")
+                    recordImmediateNavigation(control: "tab.\(tab.rawValue)")
                     selectionController.select(tab)
                 } label: {
                     Label(tab.title, systemImage: tab.systemImage)
@@ -238,6 +238,7 @@ struct UsagePopoverView: View {
     }
 
     func acknowledgeAction(_ message: String, control: String) {
+        guard PopoverAcknowledgementPolicy.shouldShow(for: control) else { return }
         PopoverInteractionTrace.accepted(control)
         actionAcknowledgement = message
         let token = UUID()
@@ -255,6 +256,16 @@ struct UsagePopoverView: View {
             withAnimation(.easeOut(duration: 0.12)) {
                 actionAcknowledgement = nil
             }
+        }
+    }
+
+    /// Navigation is its own visible response: the selected tab and its body
+    /// change on mouse-up, so an additional acknowledgement capsule would only
+    /// obscure the content and trigger avoidable SwiftUI churn.
+    func recordImmediateNavigation(control: String) {
+        PopoverInteractionTrace.accepted(control)
+        DispatchQueue.main.async {
+            PopoverInteractionTrace.firstVisible(control)
         }
     }
 

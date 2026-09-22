@@ -80,7 +80,7 @@ extension UsagePopoverView {
     private func otherAccountsDisclosure(count: Int) -> some View {
         Button {
             let expanded = !isAllAccountsExpanded
-            acknowledgeAction(expanded ? "其他帳號已展開" : "其他帳號已收合", control: "accounts.otherAccountsDisclosure")
+            PopoverInteractionTrace.accepted("accounts.otherAccountsDisclosure")
             PopoverInteractionTrace.started("accounts.otherAccountsDisclosure")
             isAllAccountsExpanded = expanded
             PopoverInteractionTrace.effectDispatched("accounts.otherAccountsDisclosure")
