@@ -7,6 +7,17 @@ enum RefreshCadenceDefaults {
     static let accountSeconds = 30 * 60
 }
 
+enum CodexCredentialPolicy {
+    static let missingProfileMessage = "目前 Codex profile 缺少 auth.json，請在「帳號」頁匯入 Codex profile。"
+
+    static func hasReadableAuth(
+        at codexHomeURL: URL,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        fileManager.isReadableFile(atPath: codexHomeURL.appendingPathComponent("auth.json").path)
+    }
+}
+
 enum AppServerRetryPolicy {
     static let initializationWatchdogNanoseconds: UInt64 = 8_000_000_000
     static let automaticRetryDelaysNanoseconds: [UInt64] = [
@@ -359,6 +370,16 @@ final class CodexAppServerClient {
         guard let executable = resolveCodexExecutable() else {
             publish(.error, "找不到 Codex CLI。請確認 ChatGPT.app 已安裝，或設定 CODEX_CLI_PATH。")
             onTokenActivityState?(.error, "找不到 Codex CLI。")
+            return
+        }
+        guard CodexCredentialPolicy.hasReadableAuth(at: effectiveCodexHomeURL, fileManager: fileManager) else {
+            // A managed worker owns an isolated CODEX_HOME. Do not silently
+            // borrow the global ~/.codex credential: that would cross account
+            // boundaries. The credential watcher will reconnect automatically
+            // after the user imports auth.json into this profile.
+            publish(.error, CodexCredentialPolicy.missingProfileMessage)
+            onTokenActivityState?(.error, CodexCredentialPolicy.missingProfileMessage)
+            onAccountHealthState?(.error, CodexCredentialPolicy.missingProfileMessage)
             return
         }
 

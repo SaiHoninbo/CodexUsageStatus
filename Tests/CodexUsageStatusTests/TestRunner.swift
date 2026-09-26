@@ -290,6 +290,8 @@ struct CodexUsageStatusTests {
             ,("account refresh dependency policy", testAccountRefreshDependencyPolicy)
             ,("App Server replacement admission", testAppServerReplacementAdmission)
             ,("managed worker admission", testManagedWorkerAdmission)
+            ,("Codex CLI resolver supports bundled layout", testCodexCLIResolverSupportsBundledLayout)
+            ,("missing Codex profile credential policy", testMissingCodexProfileCredentialPolicy)
             ,("bounded termination flush", testBoundedTerminationFlush)
             ,("termination reply gate", testTerminationReplyGate)
         ]
@@ -334,6 +336,43 @@ struct CodexUsageStatusTests {
         }
         print("\(tests.count + 4 - failures)/\(tests.count + 4) tests passed")
         if failures > 0 { exit(1) }
+    }
+
+    private static func testCodexCLIResolverSupportsBundledLayout() throws {
+        let paths = CodexCLIResolver.candidatePaths(environment: ["PATH": "/usr/bin:/bin"])
+        try expect(
+            paths.contains("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"),
+            "resolver should include the current ChatGPT bundled CLI layout"
+        )
+        guard let newPathIndex = paths.firstIndex(of: "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"),
+              let legacyPathIndex = paths.firstIndex(of: "/Applications/ChatGPT.app/Contents/Resources/codex") else {
+            throw HarnessError.assertion("resolver should retain both bundled CLI paths")
+        }
+        try expect(newPathIndex < legacyPathIndex, "current bundled CLI path should be preferred")
+        try expect(
+            newPathIndex < (paths.firstIndex(of: "/opt/homebrew/bin/codex") ?? .max),
+            "bundled ChatGPT CLI should be preferred over a machine-wide install"
+        )
+        try expect(
+            CodexCLIResolver.candidatePaths(environment: ["CODEX_CLI_PATH": "/tmp/custom-codex"])[0] == "/tmp/custom-codex",
+            "explicit CODEX_CLI_PATH should retain highest priority"
+        )
+    }
+
+    private static func testMissingCodexProfileCredentialPolicy() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-profile-credential-policy-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try expect(
+            !CodexCredentialPolicy.hasReadableAuth(at: root),
+            "a managed profile without auth.json must be reported as unavailable"
+        )
+        try Data("{}\n".utf8).write(to: root.appendingPathComponent("auth.json"))
+        try expect(
+            CodexCredentialPolicy.hasReadableAuth(at: root),
+            "an imported auth.json should make the profile credential available"
+        )
     }
 
     private static func testFullSnapshotPrefersCodexBucket() throws {
