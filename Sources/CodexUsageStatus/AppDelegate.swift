@@ -200,6 +200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // material immediately, then pin the appearance before the
             // backing window is created.
             PopoverPresentationPolicy.prepareForPresentation(application: NSApp, popover: popover)
+            PopoverInteractionTrace.coldOpenAction()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             PopoverPresentationPolicy.apply(to: popover)
             installOutsideClickMonitor()
@@ -351,6 +352,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: NSPopoverDelegate {
     func popoverDidShow(_ notification: Notification) {
+        PopoverInteractionTrace.coldOpenPanelVisible()
         guard PopoverPresentationPolicy.reappliesAfterPopoverDidShow,
               popover.contentViewController?.view != nil else { return }
         // NSPopover creates its backing window during show(). Reapply after

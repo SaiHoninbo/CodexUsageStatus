@@ -269,6 +269,7 @@ struct CodexUsageStatusTests {
             ("HUD alert projection", testHUDAlertProjection),
             ("first click event delivery", testFirstClickEventDelivery),
             ("HUD paste acknowledgement policy", testHUDPasteAcknowledgementPolicy),
+            ("cold-open presentation policy", testColdOpenPresentationPolicy),
             ("popover presentation appearance policy", testPopoverPresentationAppearancePolicy),
             ("HUD scale levels", testHUDScaleLevels),
             ("HUD themes and rotation policy", testHUDThemesAndRotationPolicy),
@@ -5361,6 +5362,49 @@ struct CodexUsageStatusTests {
         )
     }
 
+    private static func testColdOpenPresentationPolicy() throws {
+        try expect(
+            ColdOpenPresentationPolicy.shouldShowLoadingState(hasSnapshot: false),
+            "a cold open without a snapshot renders an explicit loading state"
+        )
+        try expect(
+            !ColdOpenPresentationPolicy.shouldShowLoadingState(hasSnapshot: true),
+            "an authoritative snapshot skips the loading replacement"
+        )
+        try expect(
+            ColdOpenPresentationPolicy.renderState(hasSnapshot: false) == "loading",
+            "cold render state is classified as loading"
+        )
+        try expect(
+            ColdOpenPresentationPolicy.renderState(hasSnapshot: true) == "snapshot",
+            "warm render state is classified as snapshot"
+        )
+
+        let baseline = Date(timeIntervalSince1970: 1_000)
+        try expect(
+            !ColdOpenPresentationPolicy.didFreshDataArrive(after: baseline, current: baseline),
+            "an already-present cached snapshot is not counted as fresh data"
+        )
+        try expect(
+            ColdOpenPresentationPolicy.didFreshDataArrive(
+                after: baseline,
+                current: baseline.addingTimeInterval(0.001)
+            ),
+            "a snapshot timestamp updated after opening is counted as fresh data"
+        )
+        try expect(
+            !ColdOpenPresentationPolicy.didFreshDataArrive(after: nil, current: nil),
+            "missing snapshot timestamps do not count as fresh data"
+        )
+        try expect(
+            ColdOpenPresentationPolicy.didFreshDataArrive(
+                after: nil,
+                current: baseline
+            ),
+            "first data received after an empty cold open is counted as fresh"
+        )
+    }
+
 
     private static func testPopoverPresentationAppearancePolicy() throws {
         let appearance = PopoverPresentationPolicy.makeAppearance()
@@ -5958,7 +6002,10 @@ struct CodexUsageStatusTests {
 
         let artifactURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("outputs/CodexUsageStatus.app.zip")
-        let expectedArtifactVersion = "2.4.117"
+        // The core-test executable has no release bundle, so AppVersion.current
+        // resolves to "dev". Validate the canonical artifact against the
+        // release version baked into the current packaging script instead.
+        let expectedArtifactVersion = "2.4.119"
         let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, expectedArtifactVersion])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 

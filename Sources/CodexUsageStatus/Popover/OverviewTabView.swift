@@ -396,46 +396,84 @@ extension UsagePopoverView {
                 snapshot: model.snapshot,
                 profileID: model.currentProfileID
             )
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
-                quotaSummaryRow(
-                    kind: .fiveHour,
-                    presentation: presentation?.fiveHour,
-                    availability: HUDQuotaPresentationPolicy.availability(
-                        for: .fiveHour,
-                        snapshot: model.snapshot,
-                        presentation: presentation
-                    ),
-                    accent: HUDColorPalette.fiveHour
-                )
-                quotaSummaryRow(
-                    kind: .sevenDay,
-                    presentation: presentation?.sevenDay,
-                    availability: HUDQuotaPresentationPolicy.availability(
-                        for: .sevenDay,
-                        snapshot: model.snapshot,
-                        presentation: presentation
-                    ),
-                    accent: HUDColorPalette.sevenDay
-                )
-                if let thirtyDay = presentation?.thirtyDay {
+            if ColdOpenPresentationPolicy.shouldShowLoadingState(hasSnapshot: model.snapshot != nil) {
+                quotaLoadingCard
+            } else {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
                     quotaSummaryRow(
-                        kind: .thirtyDay,
-                        presentation: thirtyDay,
-                        availability: .available,
+                        kind: .fiveHour,
+                        presentation: presentation?.fiveHour,
+                        availability: HUDQuotaPresentationPolicy.availability(
+                            for: .fiveHour,
+                            snapshot: model.snapshot,
+                            presentation: presentation
+                        ),
+                        accent: HUDColorPalette.fiveHour
+                    )
+                    quotaSummaryRow(
+                        kind: .sevenDay,
+                        presentation: presentation?.sevenDay,
+                        availability: HUDQuotaPresentationPolicy.availability(
+                            for: .sevenDay,
+                            snapshot: model.snapshot,
+                            presentation: presentation
+                        ),
                         accent: HUDColorPalette.sevenDay
                     )
-                }
-                if let reserve = presentation?.gptReserveWeekly {
-                    quotaSummaryRow(
-                        kind: .gptReserveWeekly,
-                        presentation: reserve,
-                        availability: .available,
-                        accent: HUDColorPalette.gptReserveWeekly
-                    )
+                    if let thirtyDay = presentation?.thirtyDay {
+                        quotaSummaryRow(
+                            kind: .thirtyDay,
+                            presentation: thirtyDay,
+                            availability: .available,
+                            accent: HUDColorPalette.sevenDay
+                        )
+                    }
+                    if let reserve = presentation?.gptReserveWeekly {
+                        quotaSummaryRow(
+                            kind: .gptReserveWeekly,
+                            presentation: reserve,
+                            availability: .available,
+                            accent: HUDColorPalette.gptReserveWeekly
+                        )
+                    }
                 }
             }
         }
         .padding(.vertical, 2)
+    }
+
+    private var quotaLoadingCard: some View {
+        HStack(alignment: .top, spacing: 10) {
+            ProgressView()
+                .controlSize(.small)
+                .tint(HUDColorPalette.sevenDay)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(ColdOpenPresentationPolicy.loadingTitle)
+                    .font(.subheadline.weight(.semibold))
+                Text(ColdOpenPresentationPolicy.loadingDetail)
+                    .font(.caption2)
+                    .foregroundStyle(HUDColorPalette.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        // Match the two-card quota grid (two 64pt cards plus its gap) so the
+        // fresh snapshot can replace this state without a cold-open jump.
+        .frame(
+            maxWidth: .infinity,
+            minHeight: (PopoverQuotaLayout.cardMinimumHeight * 2) + 8,
+            alignment: .leading
+        )
+        .background(HUDColorPalette.controlSurface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(HUDColorPalette.sevenDay.opacity(0.34), lineWidth: 0.7)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(ColdOpenPresentationPolicy.loadingTitle)
+        .accessibilityValue(ColdOpenPresentationPolicy.loadingDetail)
     }
 
     @ViewBuilder

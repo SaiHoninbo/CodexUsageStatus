@@ -77,12 +77,12 @@ final class CodexAppServerClient {
     var onTurnPlanUpdated: ((TurnPlanEnvelope) -> Void)?
     var onTurnTokenUsage: ((String, String, Int64?) -> Void)?
 
-    private enum PendingRequest {
-        case initialize
-        case rateLimitsRead
-        case usageRead
-        case resetCreditConsume
-        case accountRead
+    private enum PendingRequest: String {
+        case initialize = "initialize"
+        case rateLimitsRead = "rate_limits_read"
+        case usageRead = "usage_read"
+        case resetCreditConsume = "reset_credit_consume"
+        case accountRead = "account_read"
     }
 
     private let fileManager = FileManager.default
@@ -99,6 +99,8 @@ final class CodexAppServerClient {
     private var lineBuffer = JSONLineBuffer()
     private var nextRequestID = 1
     private var pendingRequests: [Int: PendingRequest] = [:]
+    private var requestStartedAtUptimeNanoseconds: [Int: UInt64] = [:]
+    private var connectionStartedAtUptimeNanoseconds: UInt64?
     private var reconnectTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
     private var usageRefreshTask: Task<Void, Never>?
@@ -248,6 +250,7 @@ final class CodexAppServerClient {
         reconnectTask?.cancel()
         reconnectTask = nil
         pendingRequests.removeAll()
+        requestStartedAtUptimeNanoseconds.removeAll()
         let oldProcess = process
         detachProcess()
         publish(.stopped, nil)
@@ -276,6 +279,7 @@ final class CodexAppServerClient {
         processReplacementTask = nil
         reconnectTask?.cancel()
         pendingRequests.removeAll()
+        requestStartedAtUptimeNanoseconds.removeAll()
         detachProcess()
         publish(.stopped, nil)
     }
@@ -385,6 +389,7 @@ final class CodexAppServerClient {
 
         detachProcess()
         hasCompletedInitialization = false
+        connectionStartedAtUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
         publish(.connecting, nil)
         lineBuffer = JSONLineBuffer()
 
@@ -429,6 +434,9 @@ final class CodexAppServerClient {
 
         do {
             try process.run()
+            if let connectionStartedAtUptimeNanoseconds {
+                logTiming(phase: "server_spawn_ms", startedAt: connectionStartedAtUptimeNanoseconds)
+            }
         } catch {
             publish(.error, "無法啟動 Codex App Server：\(error.localizedDescription)")
             scheduleReconnect()
@@ -459,6 +467,7 @@ final class CodexAppServerClient {
                   !self.hasCompletedInitialization,
                   self.process === process else { return }
             self.pendingRequests.removeAll()
+            self.requestStartedAtUptimeNanoseconds.removeAll()
             self.detachProcess()
             self.publish(.error, "Codex App Server 初始化逾時，正在重試。")
             self.scheduleReconnect()
@@ -537,7 +546,12 @@ final class CodexAppServerClient {
             return
         }
 
-        guard let id = message.id, let kind = pendingRequests.removeValue(forKey: id) else { return }
+        guard let id = message.id else { return }
+        let requestStartedAt = requestStartedAtUptimeNanoseconds.removeValue(forKey: id)
+        guard let kind = pendingRequests.removeValue(forKey: id) else { return }
+        if let requestStartedAt {
+            logTiming(phase: kind.rawValue + "_ms", startedAt: requestStartedAt)
+        }
         if case .resetCreditConsume = kind { resetTimeoutTask?.cancel(); resetTimeoutTask = nil }
         if let error = message.errorMessage {
             handleError(error, for: kind)
@@ -549,6 +563,9 @@ final class CodexAppServerClient {
             initializeWatchdogTask?.cancel()
             initializeWatchdogTask = nil
             hasCompletedInitialization = true
+            if let connectionStartedAtUptimeNanoseconds {
+                logTiming(phase: "server_ready_ms", startedAt: connectionStartedAtUptimeNanoseconds)
+            }
             reconnectAttempt = 0
             automaticRetryExhausted = false
             sendNotification(method: "initialized")
@@ -696,6 +713,7 @@ final class CodexAppServerClient {
         do {
             let data = try JSONRPCCodec.encodeRequest(id: id, method: method, params: params)
             pendingRequests[id] = kind
+            requestStartedAtUptimeNanoseconds[id] = DispatchTime.now().uptimeNanoseconds
             try stdin.write(contentsOf: data)
             if case .resetCreditConsume = kind {
                 resetTimeoutTask?.cancel()
@@ -703,6 +721,7 @@ final class CodexAppServerClient {
                     try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)
                     guard !Task.isCancelled else { return }
                     guard let self, self.pendingRequests.removeValue(forKey: id) != nil else { return }
+                    self.requestStartedAtUptimeNanoseconds.removeValue(forKey: id)
                     self.onResetCreditResult?(.unknown("Reset credit 結果逾時且不明；請 Refresh 確認，未自動重試。"))
                     self.resetTimeoutTask = nil
                 }
@@ -710,6 +729,7 @@ final class CodexAppServerClient {
             return id
         } catch {
             pendingRequests.removeValue(forKey: id)
+            requestStartedAtUptimeNanoseconds.removeValue(forKey: id)
             logger.error("App Server request write failed")
             if case .usageRead = kind {
                 onTokenActivityState?(.error, "無法傳送 Token Activity 請求：\(error.localizedDescription)")
@@ -732,6 +752,7 @@ final class CodexAppServerClient {
             return false
         }
         pendingRequests.removeAll()
+        requestStartedAtUptimeNanoseconds.removeAll()
         resetTimeoutTask?.cancel()
         resetTimeoutTask = nil
         detachProcess()
@@ -774,6 +795,7 @@ final class CodexAppServerClient {
         latestAuthMode = nil
         latestAccountIdentityKey = nil
         pendingRequests.removeAll()
+        requestStartedAtUptimeNanoseconds.removeAll()
         resetTimeoutTask?.cancel()
         resetTimeoutTask = nil
         reconnectTask?.cancel()
@@ -821,9 +843,19 @@ final class CodexAppServerClient {
         connect()
     }
 
+    private func logTiming(phase: String, startedAt: UInt64) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let elapsedNanoseconds = now >= startedAt ? now - startedAt : 0
+        let elapsedMilliseconds = Double(elapsedNanoseconds) / 1_000_000.0
+        logger.info(
+            "app_server_timing phase=\(phase, privacy: .public) elapsed_ms=\(elapsedMilliseconds, privacy: .public)"
+        )
+    }
+
     private func detachProcess() {
         processGeneration = UUID()
         hasCompletedInitialization = false
+        requestStartedAtUptimeNanoseconds.removeAll()
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
         process?.terminationHandler = nil

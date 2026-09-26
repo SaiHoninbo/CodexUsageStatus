@@ -137,10 +137,11 @@ struct CodexFloatingHUDView: View {
                 }
                 .equatable()
             } else {
-                // Before the first valid quota, keep the host at its normal
-                // size while the controller waits for a verified position.
-                Color.clear
-                    .frame(width: layoutState.size.width, height: layoutState.size.height)
+                // A cold HUD must never be an informationless transparent
+                // surface. Keep the established panel geometry and show an
+                // explicit loading state until the first quota snapshot can
+                // replace it in place.
+                hudLoadingContainer
             }
 
             // A borderless, non-activating NSPanel cannot reliably present a
@@ -378,6 +379,45 @@ struct CodexFloatingHUDView: View {
         case .available: return .orange
         case .error: return .red
         }
+    }
+
+    private var hudLoadingContainer: some View {
+        let size = layoutState.size
+        let cornerRadius = FloatingHUDLayout.cornerRadius(for: layoutState.scaleLevel)
+        let factor = layoutState.scaleLevel.scaleFactor
+        return VStack(spacing: max(6, 8 * factor)) {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: max(14, 18 * factor), weight: .semibold))
+                .foregroundStyle(selectedHUDPalette.sevenDay)
+            Text(ColdOpenPresentationPolicy.loadingTitle)
+                .font(.system(size: max(13, 16 * factor), weight: .semibold, design: .rounded))
+            ProgressView()
+                .controlSize(.small)
+                .tint(selectedHUDPalette.sevenDay)
+            Text(ColdOpenPresentationPolicy.loadingDetail)
+                .font(.system(size: max(9, 11 * factor), weight: .medium, design: .rounded))
+                .foregroundStyle(selectedHUDPalette.secondaryText)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .minimumScaleFactor(0.72)
+                .allowsTightening(true)
+        }
+        .padding(max(10, 14 * factor))
+        .frame(width: max(1, size.width), height: max(1, size.height))
+        .background {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(.regularMaterial)
+                .overlay { RoundedRectangle(cornerRadius: cornerRadius, style: .continuous).fill(selectedHUDPalette.panelSurface) }
+                .overlay { RoundedRectangle(cornerRadius: cornerRadius, style: .continuous).fill(selectedHUDPalette.panelTint) }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .stroke(selectedHUDPalette.panelBorder, lineWidth: 1.0)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(ColdOpenPresentationPolicy.loadingTitle)
+        .accessibilityValue(ColdOpenPresentationPolicy.loadingDetail)
     }
 
     @ViewBuilder

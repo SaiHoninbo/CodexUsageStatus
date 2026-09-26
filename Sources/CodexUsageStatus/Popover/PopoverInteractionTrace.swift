@@ -6,6 +6,25 @@ import OSLog
 enum PopoverInteractionTrace {
     private static let logger = Logger(subsystem: "com.openai.codex-usage-status", category: "popover-interaction")
 
+    /// Cold-open markers deliberately carry only phase/state metadata. They
+    /// let us separate AppKit presentation from the first meaningful render
+    /// and the eventual fresh snapshot without logging account or quota data.
+    static func coldOpenAction() {
+        logger.info("popover_cold_open phase=t0_action")
+    }
+
+    static func coldOpenPanelVisible() {
+        logger.info("popover_cold_open phase=t1_panel_visible")
+    }
+
+    static func coldOpenMeaningfulRender(state: String) {
+        logger.info("popover_cold_open phase=t2_meaningful_render state=\(state, privacy: .public)")
+    }
+
+    static func coldOpenFreshData() {
+        logger.info("popover_cold_open phase=t3_fresh_data")
+    }
+
     static func pressed(_ control: String) {
         logger.info("popover_interaction control=\(control, privacy: .public) phase=t0_mouse_down")
     }

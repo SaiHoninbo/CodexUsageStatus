@@ -34,6 +34,8 @@ struct UsagePopoverView: View {
     @State var isAllAccountsExpanded = false
     @State var expandedActiveWorkKeys: Set<CodexExecutionKey> = []
     @State private var autoExpandedUpdateVersion: String?
+    @State private var didLogColdOpenFreshData = false
+    @State private var coldOpenBaselineLastUpdated: Date?
     @State var actionAcknowledgement: String?
     @State var actionAcknowledgementToken = UUID()
 
@@ -84,10 +86,25 @@ struct UsagePopoverView: View {
             }
         }
         .onAppear {
+            didLogColdOpenFreshData = false
+            coldOpenBaselineLastUpdated = model.lastUpdated
             if selectedTab == .overview, model.accountScope != .current {
                 model.setAccountScope(.current)
             }
             syncUpdateDisclosure(with: model.updateState)
+            DispatchQueue.main.async {
+                PopoverInteractionTrace.coldOpenMeaningfulRender(
+                    state: ColdOpenPresentationPolicy.renderState(hasSnapshot: model.snapshot != nil)
+                )
+            }
+        }
+        .onChange(of: model.lastUpdated) { _, updatedAt in
+            guard ColdOpenPresentationPolicy.didFreshDataArrive(
+                after: coldOpenBaselineLastUpdated,
+                current: updatedAt
+            ), !didLogColdOpenFreshData else { return }
+            didLogColdOpenFreshData = true
+            PopoverInteractionTrace.coldOpenFreshData()
         }
         .onChange(of: model.updateState) { _, newState in
             syncUpdateDisclosure(with: newState)
@@ -209,6 +226,11 @@ struct UsagePopoverView: View {
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(model.shouldShowOfflineBadge ? HUDColorPalette.warning : HUDColorPalette.continueAction)
                     HStack(spacing: 5) {
+                        if model.snapshot != nil,
+                           model.connectionState == .connecting || model.isStale {
+                            Label("更新中", systemImage: "arrow.triangle.2.circlepath")
+                                .foregroundStyle(HUDColorPalette.sevenDay)
+                        }
                         if let remaining = model.menuBarRemainingPercent {
                             Text("目前 \(remaining)%")
                                 .foregroundStyle(model.menuBarColor)

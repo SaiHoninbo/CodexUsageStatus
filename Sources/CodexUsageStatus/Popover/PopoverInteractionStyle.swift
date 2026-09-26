@@ -24,6 +24,28 @@ enum PopoverRefreshPolicy {
     }
 }
 
+/// Cold opening must always produce an intentional render. A cached snapshot
+/// is preferred, but when none exists the shell uses a bounded loading card
+/// with the same quota-area height so fresh data can replace it in place.
+enum ColdOpenPresentationPolicy {
+    static let loadingTitle = "正在更新用量"
+    static let loadingDetail = "正在連線到 Codex，最新資料到達後會自動更新。"
+
+    static func shouldShowLoadingState(hasSnapshot: Bool) -> Bool {
+        !hasSnapshot
+    }
+
+    static func renderState(hasSnapshot: Bool) -> String {
+        hasSnapshot ? "snapshot" : "loading"
+    }
+
+    static func didFreshDataArrive(after baseline: Date?, current: Date?) -> Bool {
+        guard let current else { return false }
+        guard let baseline else { return true }
+        return current != baseline
+    }
+}
+
 /// Immediate navigation/disclosure changes are already visible in the
 /// selected state or expanded content. Keeping the acknowledgement policy in
 /// one place prevents a future call site from reintroducing a transient
