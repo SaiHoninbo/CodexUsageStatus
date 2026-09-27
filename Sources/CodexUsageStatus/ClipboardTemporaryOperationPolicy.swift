@@ -45,12 +45,13 @@ enum WorkflowPromptAXInsertionDecision: Equatable {
     case clipboardFallback(WorkflowPromptAXInsertionFailureReason)
 }
 
-/// Pure policy for the narrowly scoped, app-generated workflow prompt path.
+/// Pure policy for the experimental app-generated workflow prompt AX path.
+/// AX insertion remains disabled until there is a semantic confirmation
+/// contract; an AX set-attribute acknowledgement alone is not sufficient.
 /// Normal user-clipboard actions never opt into AX insertion.
 enum WorkflowPromptAXInsertionPolicy {
-    static func usesAXFastPath(for action: CodexPromptInputAction) -> Bool {
-        if case .workflowShortcut = action { return true }
-        return false
+    static func usesAXFastPath(for _: CodexPromptInputAction) -> Bool {
+        false
     }
 
     static func decision(
@@ -83,8 +84,11 @@ enum WorkflowPromptAXInsertionPolicy {
         return .attemptAXInsertion
     }
 
-    static func shouldUseClipboardFallback(afterAXInsertionSucceeded: Bool) -> Bool {
-        !afterAXInsertionSucceeded
+    static func shouldUseClipboardFallback(
+        afterAXInsertionSucceeded: Bool,
+        semanticInsertionConfirmed: Bool
+    ) -> Bool {
+        !afterAXInsertionSucceeded || !semanticInsertionConfirmed
     }
 
     static func shouldSubmit(

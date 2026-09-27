@@ -6036,7 +6036,7 @@ struct CodexUsageStatusTests {
         // The core-test executable has no release bundle, so AppVersion.current
         // resolves to "dev". Validate the canonical artifact against the
         // release version baked into the current packaging script instead.
-        let expectedArtifactVersion = "2.4.123"
+        let expectedArtifactVersion = "2.4.124"
         let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, expectedArtifactVersion])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 
@@ -6223,18 +6223,31 @@ struct CodexUsageStatusTests {
             "unsettable selected-text attribute falls back"
         )
         try expect(
-            WorkflowPromptAXInsertionPolicy.shouldUseClipboardFallback(afterAXInsertionSucceeded: false),
+            WorkflowPromptAXInsertionPolicy.shouldUseClipboardFallback(
+                afterAXInsertionSucceeded: false,
+                semanticInsertionConfirmed: false
+            ),
             "AX set failure falls back to clipboard insertion"
         )
         try expect(
-            !WorkflowPromptAXInsertionPolicy.shouldUseClipboardFallback(afterAXInsertionSucceeded: true),
-            "AX success avoids clipboard snapshot, mutation, and restore"
+            WorkflowPromptAXInsertionPolicy.shouldUseClipboardFallback(
+                afterAXInsertionSucceeded: true,
+                semanticInsertionConfirmed: false
+            ),
+            "AX acknowledgement without semantic confirmation cannot suppress clipboard fallback"
+        )
+        try expect(
+            !WorkflowPromptAXInsertionPolicy.shouldUseClipboardFallback(
+                afterAXInsertionSucceeded: true,
+                semanticInsertionConfirmed: true
+            ),
+            "only a semantically confirmed AX insertion can suppress clipboard fallback"
         )
 
         for shortcut in CodexPromptShortcut.allCases {
             try expect(
-                WorkflowPromptAXInsertionPolicy.usesAXFastPath(for: .workflowShortcut(shortcut)),
-                "only app-generated workflow shortcuts use the AX fast path"
+                !WorkflowPromptAXInsertionPolicy.usesAXFastPath(for: .workflowShortcut(shortcut)),
+                "workflow shortcuts stay on clipboard transport until AX semantic confirmation is proven"
             )
         }
         try expect(

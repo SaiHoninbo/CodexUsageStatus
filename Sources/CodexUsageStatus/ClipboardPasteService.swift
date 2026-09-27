@@ -191,7 +191,10 @@ enum ClipboardPasteService {
                 timing: timing
             )
             if WorkflowPromptAXInsertionPolicy.shouldUseClipboardFallback(
-                afterAXInsertionSucceeded: axAttempt.succeeded
+                afterAXInsertionSucceeded: axAttempt.succeeded,
+                // The AX API result confirms only that the attribute write was
+                // accepted. No composer semantic-confirmation contract exists.
+                semanticInsertionConfirmed: false
             ) {
                 timing.mark(
                     "clipboard_fallback_begin",
