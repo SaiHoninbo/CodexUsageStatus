@@ -662,7 +662,7 @@ enum AppUpdateInstaller {
         _ = try run("/usr/bin/ditto", arguments: ["-x", "-k", archiveURL.path, extractionURL.path])
         let newBundleURL = extractionURL.appendingPathComponent("CodexUsageStatus.app", isDirectory: true)
         guard let bundle = Bundle(url: newBundleURL),
-              bundle.bundleIdentifier == AccessibilityPermissionContinuityPolicy.bundleIdentifier,
+              bundle.bundleIdentifier == AppSettingsSchema.stableBundleIdentifier,
               bundle.executableURL?.lastPathComponent == "CodexUsageStatus",
               bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String == release.version,
               AppVersionComparator.isNewer(release.version, than: AppVersion.current) else {

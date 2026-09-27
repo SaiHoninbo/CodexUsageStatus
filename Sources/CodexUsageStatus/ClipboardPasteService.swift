@@ -181,6 +181,50 @@ enum ClipboardPasteService {
             return
         }
 
+        if WorkflowPromptAXInsertionPolicy.usesAXFastPath(
+            for: .workflowShortcut(shortcut)
+        ) {
+            let axAttempt = attemptWorkflowAXInsertion(
+                shortcut,
+                into: target,
+                requestedProcessID: processID,
+                timing: timing
+            )
+            if WorkflowPromptAXInsertionPolicy.shouldUseClipboardFallback(
+                afterAXInsertionSucceeded: axAttempt.succeeded
+            ) {
+                timing.mark(
+                    "clipboard_fallback_begin",
+                    detail: "reason=\(axAttempt.failureReason?.rawValue ?? "unknown") target_match=\(axAttempt.targetMatched)"
+                )
+            } else {
+                if WorkflowPromptAXInsertionPolicy.shouldSubmit(
+                    shortcut: shortcut,
+                    axInsertionSucceeded: true
+                ) {
+                    guard let insertedElement = axAttempt.insertedElement else {
+                        timing.mark(
+                            "ax_return_aborted",
+                            detail: "reason=inserted_element_unavailable target_match=false"
+                        )
+                        completion(false)
+                        return
+                    }
+                    submitAXInsertedContinue(
+                        shortcut,
+                        to: target,
+                        insertedElement: insertedElement,
+                        timing: timing,
+                        completion: completion
+                    )
+                } else {
+                    timing.mark("completion_callback", detail: "ax_insert_succeeded")
+                    completion(true)
+                }
+                return
+            }
+        }
+
         guard isEventPostingAuthorized() else {
             timing.mark("aborted", detail: "accessibility_not_trusted")
             promptForAccessibilityPermissionIfNeeded()
@@ -412,6 +456,372 @@ enum ClipboardPasteService {
                 prepareAndPaste()
             }
         }
+    }
+
+    private struct AXWorkflowInsertionAttempt {
+        let succeeded: Bool
+        let failureReason: WorkflowPromptAXInsertionFailureReason?
+        let targetMatched: Bool
+        let insertedElement: AXUIElement?
+    }
+
+    private static func attemptWorkflowAXInsertion(
+        _ shortcut: CodexPromptShortcut,
+        into target: NSRunningApplication,
+        requestedProcessID: pid_t?,
+        timing: ClipboardPasteTimingProbe
+    ) -> AXWorkflowInsertionAttempt {
+        let attemptStartedAt = DispatchTime.now().uptimeNanoseconds
+        let processIdentityMatches = isCurrentTargetProcess(target)
+        let requestedProcessMatches = requestedProcessID == nil
+            || requestedProcessID == target.processIdentifier
+        let targetIsCodex = isCodexApplication(target)
+        let initiallyFrontmost = isTargetFrontmost(target)
+        let initialTargetMatch = processIdentityMatches
+            && requestedProcessMatches
+            && targetIsCodex
+            && initiallyFrontmost
+        timing.mark("ax_fast_path_begin", detail: "target_match=\(initialTargetMatch)")
+
+        func failed(
+            _ reason: WorkflowPromptAXInsertionFailureReason,
+            axErrorCode: Int32? = nil,
+            targetMatched: Bool = false,
+            focusedResolutionAlreadyLogged: Bool = false
+        ) -> AXWorkflowInsertionAttempt {
+            if !focusedResolutionAlreadyLogged {
+                timing.mark(
+                    "ax_focused_element_resolved",
+                    detail: "resolved=false reason=\(reason.rawValue) target_match=\(targetMatched)"
+                )
+            }
+            let errorDetail = axErrorCode.map { " ax_error_code=\($0)" } ?? ""
+            timing.markDuration(
+                "ax_insert_failed",
+                startedAtUptimeNanoseconds: attemptStartedAt,
+                detail: "reason=\(reason.rawValue)\(errorDetail) target_match=\(targetMatched)"
+            )
+            return AXWorkflowInsertionAttempt(
+                succeeded: false,
+                failureReason: reason,
+                targetMatched: targetMatched,
+                insertedElement: nil
+            )
+        }
+
+        guard processIdentityMatches else {
+            return failed(.targetUnavailable)
+        }
+        guard requestedProcessMatches else {
+            return failed(.targetUnavailable)
+        }
+        guard targetIsCodex else {
+            return failed(.wrongApplication)
+        }
+        guard initiallyFrontmost else {
+            return failed(.targetNotFrontmost)
+        }
+        guard AXIsProcessTrusted() else {
+            return failed(.accessibilityUntrusted)
+        }
+
+        let focusedResolutionStartedAt = DispatchTime.now().uptimeNanoseconds
+        let applicationElement = AXUIElementCreateApplication(target.processIdentifier)
+        var focusedElementValue: CFTypeRef?
+        let focusedElementError = AXUIElementCopyAttributeValue(
+            applicationElement,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedElementValue
+        )
+        guard focusedElementError == .success else {
+            timing.markDuration(
+                "ax_focused_element_resolved",
+                startedAtUptimeNanoseconds: focusedResolutionStartedAt,
+                detail: "resolved=false reason=\(WorkflowPromptAXInsertionFailureReason.focusedElementUnavailable.rawValue) target_match=false"
+            )
+            return failed(
+                .focusedElementUnavailable,
+                axErrorCode: Int32(focusedElementError.rawValue),
+                focusedResolutionAlreadyLogged: true
+            )
+        }
+        guard let focusedElementValue,
+              CFGetTypeID(focusedElementValue) == AXUIElementGetTypeID() else {
+            timing.markDuration(
+                "ax_focused_element_resolved",
+                startedAtUptimeNanoseconds: focusedResolutionStartedAt,
+                detail: "resolved=false reason=\(WorkflowPromptAXInsertionFailureReason.focusedElementUnavailable.rawValue) target_match=false"
+            )
+            return failed(
+                .focusedElementUnavailable,
+                focusedResolutionAlreadyLogged: true
+            )
+        }
+        let focusedElement = unsafeBitCast(focusedElementValue, to: AXUIElement.self)
+
+        var focusedElementPID: pid_t = 0
+        let focusedElementPIDError = AXUIElementGetPid(focusedElement, &focusedElementPID)
+        let focusedElementMatchesTarget = focusedElementPIDError == .success
+            && focusedElementPID == target.processIdentifier
+        timing.markDuration(
+            "ax_focused_element_resolved",
+            startedAtUptimeNanoseconds: focusedResolutionStartedAt,
+            detail: "resolved=true target_match=\(focusedElementMatchesTarget)"
+        )
+        guard focusedElementPIDError == .success else {
+            return failed(
+                .focusedElementUnavailable,
+                axErrorCode: Int32(focusedElementPIDError.rawValue),
+                targetMatched: false,
+                focusedResolutionAlreadyLogged: true
+            )
+        }
+        guard focusedElementMatchesTarget else {
+            return failed(
+                .targetPIDMismatch,
+                targetMatched: false,
+                focusedResolutionAlreadyLogged: true
+            )
+        }
+
+        var selectedTextSettable = DarwinBoolean(false)
+        let settableError = AXUIElementIsAttributeSettable(
+            focusedElement,
+            kAXSelectedTextAttribute as CFString,
+            &selectedTextSettable
+        )
+        let eligibility = WorkflowPromptAXInsertionEligibility(
+            targetIsAvailable: isCurrentTargetProcess(target),
+            targetPIDMatchesRequest: requestedProcessID == nil
+                || requestedProcessID == target.processIdentifier,
+            targetIsCodex: isCodexApplication(target),
+            targetIsFrontmost: isTargetFrontmost(target),
+            accessibilityTrusted: AXIsProcessTrusted(),
+            focusedElementResolved: true,
+            focusedElementPIDMatchesTarget: focusedElementMatchesTarget,
+            selectedTextAttributeSettable: settableError == .success && selectedTextSettable.boolValue
+        )
+        switch WorkflowPromptAXInsertionPolicy.decision(for: eligibility) {
+        case .attemptAXInsertion:
+            break
+        case .clipboardFallback(let reason):
+            let reportedReason: WorkflowPromptAXInsertionFailureReason
+            if reason == .selectedTextNotSettable, settableError != .success {
+                reportedReason = .selectedTextNotSettable
+            } else {
+                reportedReason = reason
+            }
+            return failed(
+                reportedReason,
+                axErrorCode: settableError == .success ? nil : Int32(settableError.rawValue),
+                targetMatched: focusedElementMatchesTarget,
+                focusedResolutionAlreadyLogged: true
+            )
+        }
+
+        // Revalidate the exact running Codex identity and focus immediately
+        // before writing. No composer text is read at any point.
+        guard isCurrentTargetProcess(target) else {
+            return failed(
+                .targetUnavailable,
+                targetMatched: focusedElementMatchesTarget,
+                focusedResolutionAlreadyLogged: true
+            )
+        }
+        guard isTargetFrontmost(target) else {
+            return failed(
+                .targetNotFrontmost,
+                targetMatched: focusedElementMatchesTarget,
+                focusedResolutionAlreadyLogged: true
+            )
+        }
+        guard AXIsProcessTrusted() else {
+            return failed(
+                .accessibilityUntrusted,
+                targetMatched: focusedElementMatchesTarget,
+                focusedResolutionAlreadyLogged: true
+            )
+        }
+
+        let insertionError = AXUIElementSetAttributeValue(
+            focusedElement,
+            kAXSelectedTextAttribute as CFString,
+            shortcut.text as CFString
+        )
+        guard insertionError == .success else {
+            return failed(
+                .insertionFailed,
+                axErrorCode: Int32(insertionError.rawValue),
+                targetMatched: focusedElementMatchesTarget,
+                focusedResolutionAlreadyLogged: true
+            )
+        }
+
+        timing.markDuration(
+            "ax_insert_succeeded",
+            startedAtUptimeNanoseconds: attemptStartedAt,
+            detail: "target_match=true"
+        )
+        return AXWorkflowInsertionAttempt(
+            succeeded: true,
+            failureReason: nil,
+            targetMatched: true,
+            insertedElement: focusedElement
+        )
+    }
+
+    private static func submitAXInsertedContinue(
+        _ shortcut: CodexPromptShortcut,
+        to target: NSRunningApplication,
+        insertedElement: AXUIElement,
+        timing: ClipboardPasteTimingProbe,
+        completion: @escaping (Bool) -> Void
+    ) {
+        let token = UUID()
+        activeTemporaryOperationToken = token
+        let settle = ClipboardPasteSettlePolicy.temporarySubmitSettle(for: shortcut)
+        timing.mark(
+            "submit_settle_policy_resolved",
+            detail: "kind=ax_workflow_text delay_ms=\(Int((settle * 1_000).rounded()))"
+        )
+        DispatchQueue.main.asyncAfter(deadline: .now() + settle) {
+            guard activeTemporaryOperationToken == token else {
+                timing.mark("ax_return_aborted", detail: "reason=operation_no_longer_owned target_match=false")
+                completion(false)
+                return
+            }
+
+            let processMatches = isCurrentTargetProcess(target)
+            let frontmostMatches = isTargetFrontmost(target)
+            let accessibilityTrusted = AXIsProcessTrusted()
+            let eventPostingAuthorized = isEventPostingAuthorized()
+            let focusedTarget = focusedElementCanReceiveWorkflowText(
+                for: target,
+                matching: insertedElement
+            )
+            guard WorkflowPromptAXInsertionPolicy.mayPostReturn(
+                    shortcut: shortcut,
+                    axInsertionSucceeded: true,
+                    focusedElementMatchesInsertion: focusedTarget.matches
+                  ),
+                  processMatches,
+                  frontmostMatches,
+                  accessibilityTrusted,
+                  focusedTarget.selectedTextSettable,
+                  eventPostingAuthorized else {
+                let reason: String
+                if !processMatches {
+                    reason = "target_process_changed"
+                } else if !frontmostMatches {
+                    reason = "target_not_frontmost"
+                } else if !accessibilityTrusted {
+                    reason = "ax_untrusted"
+                } else if !focusedTarget.matches {
+                    reason = focusedTarget.reason.rawValue
+                } else if !focusedTarget.selectedTextSettable {
+                    reason = WorkflowPromptAXInsertionFailureReason.selectedTextNotSettable.rawValue
+                } else {
+                    reason = "event_posting_unavailable"
+                }
+                activeTemporaryOperationToken = nil
+                timing.mark(
+                    "ax_return_aborted",
+                    detail: "reason=\(reason) target_match=\(focusedTarget.matches)"
+                )
+                completion(false)
+                return
+            }
+
+            guard postKey(keyCode: 36) else {
+                activeTemporaryOperationToken = nil
+                timing.mark("ax_return_post_failed", detail: "target_match=true")
+                completion(false)
+                return
+            }
+            activeTemporaryOperationToken = nil
+            timing.mark("ax_return_posted", detail: "target_match=true")
+            timing.mark("completion_callback", detail: "ax_insert_then_return")
+            completion(true)
+        }
+    }
+
+    private struct FocusedWorkflowTextTarget {
+        let matches: Bool
+        let selectedTextSettable: Bool
+        let reason: WorkflowPromptAXInsertionFailureReason
+    }
+
+    private static func focusedElementCanReceiveWorkflowText(
+        for target: NSRunningApplication,
+        matching insertedElement: AXUIElement
+    ) -> FocusedWorkflowTextTarget {
+        guard AXIsProcessTrusted() else {
+            return FocusedWorkflowTextTarget(
+                matches: false,
+                selectedTextSettable: false,
+                reason: .accessibilityUntrusted
+            )
+        }
+        let applicationElement = AXUIElementCreateApplication(target.processIdentifier)
+        var focusedElementValue: CFTypeRef?
+        let focusedElementError = AXUIElementCopyAttributeValue(
+            applicationElement,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedElementValue
+        )
+        guard focusedElementError == .success,
+              let focusedElementValue,
+              CFGetTypeID(focusedElementValue) == AXUIElementGetTypeID() else {
+            return FocusedWorkflowTextTarget(
+                matches: false,
+                selectedTextSettable: false,
+                reason: .focusedElementUnavailable
+            )
+        }
+        let focusedElement = unsafeBitCast(focusedElementValue, to: AXUIElement.self)
+        var focusedPID: pid_t = 0
+        let pidError = AXUIElementGetPid(focusedElement, &focusedPID)
+        let matches = pidError == .success && focusedPID == target.processIdentifier
+        guard matches else {
+            return FocusedWorkflowTextTarget(
+                matches: false,
+                selectedTextSettable: false,
+                reason: .targetPIDMismatch
+            )
+        }
+        // AXUIElementRef supports CFEqual; fail closed if focus moved after
+        // insertion, even when the newly focused control belongs to Codex.
+        guard CFEqual(focusedElement, insertedElement) else {
+            return FocusedWorkflowTextTarget(
+                matches: false,
+                selectedTextSettable: false,
+                reason: .focusedElementChanged
+            )
+        }
+        var settable = DarwinBoolean(false)
+        let settableError = AXUIElementIsAttributeSettable(
+            focusedElement,
+            kAXSelectedTextAttribute as CFString,
+            &settable
+        )
+        return FocusedWorkflowTextTarget(
+            matches: true,
+            selectedTextSettable: settableError == .success && settable.boolValue,
+            reason: .selectedTextNotSettable
+        )
+    }
+
+    private static func isCurrentTargetProcess(_ target: NSRunningApplication) -> Bool {
+        guard !target.isTerminated,
+              let expectedLaunchDate = target.launchDate,
+              let expectedBundleURL = target.bundleURL?.standardizedFileURL,
+              let current = NSRunningApplication(processIdentifier: target.processIdentifier),
+              !current.isTerminated,
+              current.launchDate == expectedLaunchDate,
+              current.bundleURL?.standardizedFileURL == expectedBundleURL else {
+            return false
+        }
+        return isCodexApplication(current)
     }
 
     /// `setString` is allowed to leave NSPasteboard.changeCount unchanged on

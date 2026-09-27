@@ -279,7 +279,7 @@ struct CodexUsageStatusTests {
             ("release signing policy", testReleaseSigningPolicy),
             ("release artifact validation", testReleaseArtifactValidation),
             ("accessibility permission policy", testAccessibilityPermissionPolicy),
-            ("accessibility permission continuity", testAccessibilityPermissionContinuity),
+            ("accessibility install identity policy", testAccessibilityPermissionInstallIdentityPolicy),
             ("cross-version sound settings", testCrossVersionSoundSettings),
             ("HUD context menu policy", testHUDContextMenuPolicy),
             ("usage popover tabs and app version", testUsagePopoverTabsAndAppVersion),
@@ -303,6 +303,7 @@ struct CodexUsageStatusTests {
             ("HUD trust cache invalidates on process change and termination", testHUDTrustCacheInvalidatesOnProcessChangeAndTermination),
             ("HUD trust validation missing launch date", testHUDTrustValidationMissingLaunchDate),
             ("Codex prompt shortcuts", testCodexPromptShortcuts),
+            ("workflow prompt AX insertion policy", testWorkflowPromptAXInsertionPolicy),
             ("temporary clipboard guards", testClipboardTemporaryOperationPolicy),
             ("verified-frontmost clipboard immediate dispatch policy", testVerifiedFrontmostClipboardImmediateDispatchPolicy),
             ("clipboard latency and activation policies", testClipboardLatencyAndActivationPolicies),
@@ -6034,7 +6035,7 @@ struct CodexUsageStatusTests {
         // The core-test executable has no release bundle, so AppVersion.current
         // resolves to "dev". Validate the canonical artifact against the
         // release version baked into the current packaging script instead.
-        let expectedArtifactVersion = "2.4.121"
+        let expectedArtifactVersion = "2.4.122"
         let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, expectedArtifactVersion])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 
@@ -6075,32 +6076,32 @@ struct CodexUsageStatusTests {
         )
     }
 
-    private static func testAccessibilityPermissionContinuity() throws {
-        let canonicalURL = URL(fileURLWithPath: AccessibilityPermissionContinuityPolicy.canonicalInstallPath)
+    private static func testAccessibilityPermissionInstallIdentityPolicy() throws {
+        let canonicalURL = URL(fileURLWithPath: AccessibilityPermissionInstallIdentityPolicy.canonicalInstallPath)
         try expect(
-            AccessibilityPermissionContinuityPolicy.preservesTCCIdentity(
-                bundleIdentifier: AccessibilityPermissionContinuityPolicy.bundleIdentifier,
+            AccessibilityPermissionInstallIdentityPolicy.matchesCanonicalInstall(
+                bundleIdentifier: AccessibilityPermissionInstallIdentityPolicy.bundleIdentifier,
                 bundleURL: canonicalURL
             ),
-            "canonical bundle identity and install path preserve TCC continuity"
+            "canonical bundle identifier and install path match the intended installation"
         )
         try expect(
-            !AccessibilityPermissionContinuityPolicy.preservesTCCIdentity(
+            !AccessibilityPermissionInstallIdentityPolicy.matchesCanonicalInstall(
                 bundleIdentifier: "com.example.spoof",
                 bundleURL: canonicalURL
             ),
-            "bundle identity changes cannot claim TCC continuity"
+            "a different bundle identifier does not match the intended installation"
         )
         try expect(
-            !AccessibilityPermissionContinuityPolicy.preservesTCCIdentity(
-                bundleIdentifier: AccessibilityPermissionContinuityPolicy.bundleIdentifier,
+            !AccessibilityPermissionInstallIdentityPolicy.matchesCanonicalInstall(
+                bundleIdentifier: AccessibilityPermissionInstallIdentityPolicy.bundleIdentifier,
                 bundleURL: URL(fileURLWithPath: "/tmp/CodexUsageStatus.app")
             ),
-            "a different install path cannot claim TCC continuity"
+            "a different install path does not match the intended installation"
         )
         try expect(
-            AccessibilityPermissionContinuityPolicy.requiresLiveRefreshAfterLaunch,
-            "permission continuity always re-reads live TCC state"
+            AccessibilityPermissionInstallIdentityPolicy.requiresLiveRefreshAfterLaunch,
+            "live TCC state is re-read instead of inferred from bundle identity or path"
         )
     }
 
@@ -6152,6 +6153,143 @@ struct CodexUsageStatusTests {
         try expect(shortcuts.allSatisfy { $0.accessibilityLabel == $0.rawValue }, "accessibility uses concise labels")
         try expect(CodexPromptShortcut.commitAndPush.helpText.contains("不會自動送出"), "submit-sensitive workflow explains paste-only behavior")
         try expect(CodexPromptShortcut.commitAndPush.helpText.contains("不會執行 Git"), "提交並推送 explains that Usage App never runs Git")
+    }
+
+    private static func testWorkflowPromptAXInsertionPolicy() throws {
+        func eligible(
+            targetIsAvailable: Bool = true,
+            targetPIDMatchesRequest: Bool = true,
+            targetIsCodex: Bool = true,
+            targetIsFrontmost: Bool = true,
+            accessibilityTrusted: Bool = true,
+            focusedElementResolved: Bool = true,
+            focusedElementPIDMatchesTarget: Bool = true,
+            selectedTextAttributeSettable: Bool = true
+        ) -> WorkflowPromptAXInsertionEligibility {
+            WorkflowPromptAXInsertionEligibility(
+                targetIsAvailable: targetIsAvailable,
+                targetPIDMatchesRequest: targetPIDMatchesRequest,
+                targetIsCodex: targetIsCodex,
+                targetIsFrontmost: targetIsFrontmost,
+                accessibilityTrusted: accessibilityTrusted,
+                focusedElementResolved: focusedElementResolved,
+                focusedElementPIDMatchesTarget: focusedElementPIDMatchesTarget,
+                selectedTextAttributeSettable: selectedTextAttributeSettable
+            )
+        }
+        try expect(
+            WorkflowPromptAXInsertionPolicy.decision(for: eligible()) == .attemptAXInsertion,
+            "direct insertion requires every target, trust, focus, PID, and settable gate"
+        )
+        try expect(
+            WorkflowPromptAXInsertionPolicy.decision(for: eligible(targetIsAvailable: false))
+                == .clipboardFallback(.targetUnavailable),
+            "terminated or stale target falls back to the existing clipboard path"
+        )
+        try expect(
+            WorkflowPromptAXInsertionPolicy.decision(for: eligible(targetPIDMatchesRequest: false))
+                == .clipboardFallback(.targetUnavailable),
+            "a stale or different requested process ID falls back"
+        )
+        try expect(
+            WorkflowPromptAXInsertionPolicy.decision(for: eligible(targetIsCodex: false))
+                == .clipboardFallback(.wrongApplication),
+            "a non-Codex target falls back"
+        )
+        try expect(
+            WorkflowPromptAXInsertionPolicy.decision(for: eligible(targetIsFrontmost: false))
+                == .clipboardFallback(.targetNotFrontmost),
+            "non-frontmost Codex never receives direct AX insertion"
+        )
+        try expect(
+            WorkflowPromptAXInsertionPolicy.decision(for: eligible(accessibilityTrusted: false))
+                == .clipboardFallback(.accessibilityUntrusted),
+            "AX trust false falls back without direct composer access"
+        )
+        try expect(
+            WorkflowPromptAXInsertionPolicy.decision(for: eligible(focusedElementResolved: false))
+                == .clipboardFallback(.focusedElementUnavailable),
+            "missing focused element falls back"
+        )
+        try expect(
+            WorkflowPromptAXInsertionPolicy.decision(for: eligible(focusedElementPIDMatchesTarget: false))
+                == .clipboardFallback(.targetPIDMismatch),
+            "focused AX element from a different PID is rejected"
+        )
+        try expect(
+            WorkflowPromptAXInsertionPolicy.decision(for: eligible(selectedTextAttributeSettable: false))
+                == .clipboardFallback(.selectedTextNotSettable),
+            "unsettable selected-text attribute falls back"
+        )
+        try expect(
+            WorkflowPromptAXInsertionPolicy.shouldUseClipboardFallback(afterAXInsertionSucceeded: false),
+            "AX set failure falls back to clipboard insertion"
+        )
+        try expect(
+            !WorkflowPromptAXInsertionPolicy.shouldUseClipboardFallback(afterAXInsertionSucceeded: true),
+            "AX success avoids clipboard snapshot, mutation, and restore"
+        )
+
+        for shortcut in CodexPromptShortcut.allCases {
+            try expect(
+                WorkflowPromptAXInsertionPolicy.usesAXFastPath(for: .workflowShortcut(shortcut)),
+                "only app-generated workflow shortcuts use the AX fast path"
+            )
+        }
+        try expect(
+            !WorkflowPromptAXInsertionPolicy.usesAXFastPath(for: .userClipboardPaste)
+                && !WorkflowPromptAXInsertionPolicy.usesAXFastPath(for: .userClipboardPasteAndSubmit),
+            "normal Paste and Paste-and-Submit remain on user clipboard transport"
+        )
+
+        try expect(
+            WorkflowPromptAXInsertionPolicy.shouldSubmit(
+                shortcut: .continueTask,
+                axInsertionSucceeded: true
+            ),
+            "Continue submits after a successful direct insertion"
+        )
+        try expect(
+            !WorkflowPromptAXInsertionPolicy.shouldSubmit(
+                shortcut: .continueTask,
+                axInsertionSucceeded: false
+            ),
+            "Continue never submits when direct insertion failed"
+        )
+        try expect(
+            !WorkflowPromptAXInsertionPolicy.mayPostReturn(
+                shortcut: .continueTask,
+                axInsertionSucceeded: true,
+                focusedElementMatchesInsertion: false
+            ),
+            "Continue does not send Return if focus moved to a different AX element"
+        )
+        try expect(
+            WorkflowPromptAXInsertionPolicy.mayPostReturn(
+                shortcut: .continueTask,
+                axInsertionSucceeded: true,
+                focusedElementMatchesInsertion: true
+            ),
+            "Continue may send Return when focus remains on the inserted AX element"
+        )
+        try expect(
+            !WorkflowPromptAXInsertionPolicy.mayPostReturn(
+                shortcut: .fixUntilDone,
+                axInsertionSucceeded: true,
+                focusedElementMatchesInsertion: true
+            ),
+            "paste-only workflow shortcuts never send Return"
+        )
+
+        for shortcut in [CodexPromptShortcut.fixUntilDone, .fullVerification, .commitAndPush] {
+            try expect(
+                !WorkflowPromptAXInsertionPolicy.shouldSubmit(
+                    shortcut: shortcut,
+                    axInsertionSucceeded: true
+                ),
+                "paste-only workflow shortcuts never submit after direct insertion"
+            )
+        }
     }
 
     private static func testCodexApplicationIdentity() throws {

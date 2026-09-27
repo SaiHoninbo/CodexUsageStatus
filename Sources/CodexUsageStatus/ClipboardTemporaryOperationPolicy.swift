@@ -11,6 +11,99 @@ enum ClipboardPasteDispatchPolicy {
     }
 }
 
+enum CodexPromptInputAction: Equatable {
+    case workflowShortcut(CodexPromptShortcut)
+    case userClipboardPaste
+    case userClipboardPasteAndSubmit
+}
+
+enum WorkflowPromptAXInsertionFailureReason: String, Equatable {
+    case targetUnavailable = "target_unavailable"
+    case wrongApplication = "wrong_application"
+    case targetNotFrontmost = "target_not_frontmost"
+    case accessibilityUntrusted = "ax_untrusted"
+    case focusedElementUnavailable = "focused_element_unavailable"
+    case targetPIDMismatch = "target_pid_mismatch"
+    case focusedElementChanged = "focused_element_changed"
+    case selectedTextNotSettable = "selected_text_not_settable"
+    case insertionFailed = "ax_set_failed"
+}
+
+struct WorkflowPromptAXInsertionEligibility: Equatable {
+    let targetIsAvailable: Bool
+    let targetPIDMatchesRequest: Bool
+    let targetIsCodex: Bool
+    let targetIsFrontmost: Bool
+    let accessibilityTrusted: Bool
+    let focusedElementResolved: Bool
+    let focusedElementPIDMatchesTarget: Bool
+    let selectedTextAttributeSettable: Bool
+}
+
+enum WorkflowPromptAXInsertionDecision: Equatable {
+    case attemptAXInsertion
+    case clipboardFallback(WorkflowPromptAXInsertionFailureReason)
+}
+
+/// Pure policy for the narrowly scoped, app-generated workflow prompt path.
+/// Normal user-clipboard actions never opt into AX insertion.
+enum WorkflowPromptAXInsertionPolicy {
+    static func usesAXFastPath(for action: CodexPromptInputAction) -> Bool {
+        if case .workflowShortcut = action { return true }
+        return false
+    }
+
+    static func decision(
+        for eligibility: WorkflowPromptAXInsertionEligibility
+    ) -> WorkflowPromptAXInsertionDecision {
+        guard eligibility.targetIsAvailable else {
+            return .clipboardFallback(.targetUnavailable)
+        }
+        guard eligibility.targetPIDMatchesRequest else {
+            return .clipboardFallback(.targetUnavailable)
+        }
+        guard eligibility.targetIsCodex else {
+            return .clipboardFallback(.wrongApplication)
+        }
+        guard eligibility.targetIsFrontmost else {
+            return .clipboardFallback(.targetNotFrontmost)
+        }
+        guard eligibility.accessibilityTrusted else {
+            return .clipboardFallback(.accessibilityUntrusted)
+        }
+        guard eligibility.focusedElementResolved else {
+            return .clipboardFallback(.focusedElementUnavailable)
+        }
+        guard eligibility.focusedElementPIDMatchesTarget else {
+            return .clipboardFallback(.targetPIDMismatch)
+        }
+        guard eligibility.selectedTextAttributeSettable else {
+            return .clipboardFallback(.selectedTextNotSettable)
+        }
+        return .attemptAXInsertion
+    }
+
+    static func shouldUseClipboardFallback(afterAXInsertionSucceeded: Bool) -> Bool {
+        !afterAXInsertionSucceeded
+    }
+
+    static func shouldSubmit(
+        shortcut: CodexPromptShortcut,
+        axInsertionSucceeded: Bool
+    ) -> Bool {
+        axInsertionSucceeded && shortcut.submitAfterPaste
+    }
+
+    static func mayPostReturn(
+        shortcut: CodexPromptShortcut,
+        axInsertionSucceeded: Bool,
+        focusedElementMatchesInsertion: Bool
+    ) -> Bool {
+        shouldSubmit(shortcut: shortcut, axInsertionSucceeded: axInsertionSucceeded)
+            && focusedElementMatchesInsertion
+    }
+}
+
 enum ClipboardPasteSettlePolicy {
     static let shortTextSettle: TimeInterval = 0.03
     static let safeRichContentSettle: TimeInterval = 0.18
