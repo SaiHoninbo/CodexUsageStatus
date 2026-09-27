@@ -132,6 +132,22 @@ private final class HUDTrustValidationRaceProbe {
         pendingIdentity = nil
     }
 
+    func ordinaryFocusLoss() {
+        invalidatePendingValidation()
+    }
+
+    func terminate(_ identity: Identity) {
+        if trustedIdentity == identity {
+            trustedIdentity = nil
+        }
+        if rejectedIdentity == identity {
+            rejectedIdentity = nil
+        }
+        if pendingIdentity == identity {
+            invalidatePendingValidation()
+        }
+    }
+
     @discardableResult
     func complete(
         identity: Identity,
@@ -165,6 +181,9 @@ private final class HUDTrustValidationRaceProbe {
             trustedIdentity = nil
             rejectedIdentity = nil
             return false
+        }
+        if let trustedIdentity, trustedIdentity != identity {
+            self.trustedIdentity = nil
         }
         if trustedIdentity == identity { return true }
         if rejectedIdentity == identity { return false }
@@ -276,10 +295,12 @@ struct CodexUsageStatusTests {
             ("HUD C metrics", testHUDMetrics),
             ("HUD update badge policy", testHUDUpdateBadgePolicy),
             ("Codex application identity", testCodexApplicationIdentity),
-            ("HUD trust validation clears on focus loss", testHUDTrustValidationClearsOnFocusLoss),
+            ("HUD pending trust validation cancels on focus loss", testHUDPendingTrustValidationCancelledOnFocusLoss),
             ("HUD trust validation recovers after focus returns", testHUDTrustValidationRecoversAfterFocusReturns),
             ("HUD trust validation rejects stale results", testHUDTrustValidationRejectsStaleResults),
             ("HUD trust validation stable cache", testHUDTrustValidationStableCache),
+            ("HUD trust cache survives ordinary focus loss", testHUDTrustCacheSurvivesOrdinaryFocusLoss),
+            ("HUD trust cache invalidates on process change and termination", testHUDTrustCacheInvalidatesOnProcessChangeAndTermination),
             ("HUD trust validation missing launch date", testHUDTrustValidationMissingLaunchDate),
             ("Codex prompt shortcuts", testCodexPromptShortcuts),
             ("temporary clipboard guards", testClipboardTemporaryOperationPolicy),
@@ -1029,8 +1050,8 @@ struct CodexUsageStatusTests {
             HUDVisibilityRefreshPolicy.delayNanoseconds(
                 shouldPromote: true,
                 rateLimitDelayNanoseconds: 12_000
-            ) == 12_000,
-            "an explicit activation preserves an active rate-limit delay"
+            ) == 0,
+            "an explicit verified activation bypasses the remaining rate limit"
         )
         try expect(
             HUDVisibilityRefreshPolicy.delayNanoseconds(
@@ -1038,6 +1059,13 @@ struct CodexUsageStatusTests {
                 rateLimitDelayNanoseconds: 0
             ) == 50_000_000,
             "background visibility refreshes retain the 50ms coalescing floor"
+        )
+        try expect(
+            HUDVisibilityRefreshPolicy.delayNanoseconds(
+                shouldPromote: false,
+                rateLimitDelayNanoseconds: 250_000_000
+            ) == 250_000_000,
+            "background visibility refreshes retain an active rate limit"
         )
     }
 
@@ -6005,7 +6033,7 @@ struct CodexUsageStatusTests {
         // The core-test executable has no release bundle, so AppVersion.current
         // resolves to "dev". Validate the canonical artifact against the
         // release version baked into the current packaging script instead.
-        let expectedArtifactVersion = "2.4.119"
+        let expectedArtifactVersion = "2.4.120"
         let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, expectedArtifactVersion])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 
@@ -6207,21 +6235,22 @@ struct CodexUsageStatusTests {
         }
     }
 
-    private static func testHUDTrustValidationClearsOnFocusLoss() throws {
+    private static func testHUDPendingTrustValidationCancelledOnFocusLoss() throws {
         let probe = HUDTrustValidationRaceProbe()
         let codex = HUDTrustValidationRaceProbe.Identity(value: "codex-a")
         let generation = probe.begin(codex)
+        probe.ordinaryFocusLoss()
 
         try expect(
             !probe.complete(
                 identity: codex,
                 expectedGeneration: generation,
-                frontmostMatches: false,
+                frontmostMatches: true,
                 trusted: true
             ),
-            "a validation completed after focus loss must not converge trust"
+            "a validation from the previous focus session cannot converge"
         )
-        try expect(probe.pendingIdentity == nil, "focus loss clears the completed validation's pending identity")
+        try expect(probe.pendingIdentity == nil, "focus loss clears pending validation ownership")
         try expect(probe.trustedIdentity == nil, "focus loss never caches a trusted result")
         try expect(probe.rejectedIdentity == nil, "focus loss never caches a rejected result")
     }
@@ -6230,11 +6259,15 @@ struct CodexUsageStatusTests {
         let probe = HUDTrustValidationRaceProbe()
         let codex = HUDTrustValidationRaceProbe.Identity(value: "codex-a")
         let firstGeneration = probe.begin(codex)
-        _ = probe.complete(
-            identity: codex,
-            expectedGeneration: firstGeneration,
-            frontmostMatches: false,
-            trusted: true
+        probe.ordinaryFocusLoss()
+        try expect(
+            !probe.complete(
+                identity: codex,
+                expectedGeneration: firstGeneration,
+                frontmostMatches: true,
+                trusted: true
+            ),
+            "the previous focus session's result is stale even if Codex returns"
         )
 
         try expect(probe.pendingIdentity == nil, "the first validation must release pending state")
@@ -6298,6 +6331,62 @@ struct CodexUsageStatusTests {
         let validationCount = probe.validationCount
         try expect(probe.refresh(codex), "a stable trusted identity uses the cache")
         try expect(probe.validationCount == validationCount, "a stable identity is validated only once")
+    }
+
+    private static func testHUDTrustCacheSurvivesOrdinaryFocusLoss() throws {
+        let probe = HUDTrustValidationRaceProbe()
+        let codex = HUDTrustValidationRaceProbe.Identity(value: "codex-same-process")
+        let generation = probe.begin(codex)
+        try expect(
+            probe.complete(
+                identity: codex,
+                expectedGeneration: generation,
+                frontmostMatches: true,
+                trusted: true
+            ),
+            "the same running process is initially trusted"
+        )
+
+        let validationCount = probe.validationCount
+        probe.ordinaryFocusLoss()
+        try expect(probe.trustedIdentity == codex, "ordinary focus loss retains the process-bound trust result")
+        try expect(probe.refresh(codex), "returning to the same process reuses its trusted identity")
+        try expect(probe.validationCount == validationCount, "focus-away/focus-return does not repeat trust validation")
+    }
+
+    private static func testHUDTrustCacheInvalidatesOnProcessChangeAndTermination() throws {
+        let probe = HUDTrustValidationRaceProbe()
+        let firstCodex = HUDTrustValidationRaceProbe.Identity(value: "pid-101-launch-a-bundle-a")
+        let replacementCodex = HUDTrustValidationRaceProbe.Identity(value: "pid-202-launch-b-bundle-a")
+        let firstGeneration = probe.begin(firstCodex)
+        try expect(
+            probe.complete(
+                identity: firstCodex,
+                expectedGeneration: firstGeneration,
+                frontmostMatches: true,
+                trusted: true
+            ),
+            "the original process obtains a trusted cache entry"
+        )
+
+        try expect(!probe.refresh(replacementCodex), "a replacement process must be validated separately")
+        try expect(probe.trustedIdentity == nil, "a changed process identity invalidates the previous trust cache")
+        try expect(probe.pendingIdentity == replacementCodex, "the replacement owns the new pending validation")
+        let replacementGeneration = probe.generation
+        try expect(
+            probe.complete(
+                identity: replacementCodex,
+                expectedGeneration: replacementGeneration,
+                frontmostMatches: true,
+                trusted: true
+            ),
+            "the replacement process can become trusted after fresh validation"
+        )
+
+        probe.terminate(replacementCodex)
+        try expect(probe.trustedIdentity == nil, "termination invalidates the terminated process trust cache")
+        try expect(!probe.refresh(replacementCodex), "a later launch requires fresh validation")
+        try expect(probe.validationCount == 3, "termination prevents reuse of the old process trust result")
     }
 
     private static func testHUDTrustValidationMissingLaunchDate() throws {

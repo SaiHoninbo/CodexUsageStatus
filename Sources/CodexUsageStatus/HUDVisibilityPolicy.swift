@@ -182,7 +182,7 @@ enum HUDVisibilityRefreshPolicy {
         rateLimitDelayNanoseconds: UInt64
     ) -> UInt64 {
         shouldPromote
-            ? rateLimitDelayNanoseconds
+            ? 0
             : max(coalescingFloorNanoseconds, rateLimitDelayNanoseconds)
     }
 }

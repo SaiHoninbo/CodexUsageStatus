@@ -1001,16 +1001,24 @@ final class FloatingHUDPanelController: NSObject {
         _ application: NSRunningApplication,
         trigger: VisibilityRefreshTrigger
     ) -> Bool {
-        guard CodexApplicationPolicy.isCodexApplication(bundleIdentifier: application.bundleIdentifier),
-              let bundleURL = application.bundleURL else {
-            // A frontmost non-Codex application invalidates any in-flight
-            // publisher validation.  Without cancelling here, a completed
-            // detached task could leave its identity stranded in the
-            // `validating` state until another unrelated invalidation.
+        guard CodexApplicationPolicy.isCodexApplication(bundleIdentifier: application.bundleIdentifier) else {
+            // Ordinary focus loss cancels only in-flight validation. A trusted
+            // cache remains bound to its exact PID + launch date + bundle URL,
+            // so changing the frontmost app does not change that process's
+            // publisher identity.
             cancelTrustValidation()
-            trustedCodexApplicationIdentity = nil
             Self.performanceLogger.debug(
                 "HUD trust check trigger=\(trigger.rawValue, privacy: .public) cache=invalid bundle_identity=0"
+            )
+            return false
+        }
+
+        guard let bundleURL = application.bundleURL else {
+            cancelTrustValidation()
+            trustedCodexApplicationIdentity = nil
+            rejectedTrustValidationIdentity = nil
+            Self.performanceLogger.debug(
+                "HUD trust check trigger=\(trigger.rawValue, privacy: .public) cache=unproven bundle_url_available=false"
             )
             return false
         }
@@ -1030,16 +1038,22 @@ final class FloatingHUDPanelController: NSObject {
             launchDate: launchDate,
             bundleURL: bundleURL
         )
-        if let trustedCodexApplicationIdentity,
-           trustedCodexApplicationIdentity.matches(
-               processIdentifier: processIdentifier,
-               launchDate: launchDate,
-               bundleURL: bundleURL
+        if let trustedCodexApplicationIdentity {
+            if trustedCodexApplicationIdentity.matches(
+                processIdentifier: processIdentifier,
+                launchDate: launchDate,
+                bundleURL: bundleURL
             ) {
-            Self.performanceLogger.debug(
-                "HUD trust check trigger=\(trigger.rawValue, privacy: .public) cache=hit launch_date_available=true"
-            )
-            return true
+                Self.performanceLogger.debug(
+                    "HUD trust check trigger=\(trigger.rawValue, privacy: .public) cache=hit launch_date_available=true"
+                )
+                return true
+            }
+
+            // A changed PID, launch date, or bundle URL is a new process
+            // identity, not an ordinary focus transition. Drop the old trust
+            // result before considering or validating the replacement.
+            self.trustedCodexApplicationIdentity = nil
         }
 
         if rejectedTrustValidationIdentity == identity {
@@ -1187,12 +1201,51 @@ final class FloatingHUDPanelController: NSObject {
     }
 
     private func handleApplicationTermination(_ application: NSRunningApplication) {
-        guard let trackedProcessID = lastCodexProcessID,
-              trackedProcessID == application.processIdentifier else { return }
-        if let panel { restoreBaseWindowLevel(panel) }
-        panel?.orderOut(nil)
-        invalidatePositioningSession(clearProcessID: true)
-        layoutState.isCodexFocused = false
+        let processIdentifier = application.processIdentifier
+        let terminatedIdentity = application.launchDate.flatMap { launchDate in
+            application.bundleURL.map { bundleURL in
+                TrustValidationIdentity(
+                    processIdentifier: processIdentifier,
+                    launchDate: launchDate,
+                    bundleURL: bundleURL
+                )
+            }
+        }
+        let terminatesTrackedPosition = lastCodexProcessID == processIdentifier
+        let terminatesTrustedIdentity = terminatedIdentity.map { identity in
+            trustedCodexApplicationIdentity?.matches(
+                processIdentifier: identity.processIdentifier,
+                launchDate: identity.launchDate,
+                bundleURL: identity.bundleURL
+            ) ?? false
+        } ?? false
+        let terminatesPendingValidation = terminatedIdentity != nil
+            && pendingTrustValidationIdentity == terminatedIdentity
+        let terminatesRejectedIdentity = terminatedIdentity != nil
+            && rejectedTrustValidationIdentity == terminatedIdentity
+
+        guard terminatesTrackedPosition
+                || terminatesTrustedIdentity
+                || terminatesPendingValidation
+                || terminatesRejectedIdentity else { return }
+
+        if terminatesTrackedPosition {
+            if let panel { restoreBaseWindowLevel(panel) }
+            panel?.orderOut(nil)
+            invalidatePositioningSession(clearProcessID: true)
+            layoutState.isCodexFocused = false
+            return
+        }
+
+        if terminatesTrustedIdentity {
+            trustedCodexApplicationIdentity = nil
+        }
+        if terminatesRejectedIdentity {
+            rejectedTrustValidationIdentity = nil
+        }
+        if terminatesPendingValidation {
+            cancelTrustValidation()
+        }
     }
 
     private func markPositionEstablished(_ panel: NSPanel) {
