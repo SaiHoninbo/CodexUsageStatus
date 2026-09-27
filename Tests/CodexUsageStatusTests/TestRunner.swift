@@ -295,6 +295,7 @@ struct CodexUsageStatusTests {
             ("HUD C metrics", testHUDMetrics),
             ("HUD update badge policy", testHUDUpdateBadgePolicy),
             ("Codex application identity", testCodexApplicationIdentity),
+            ("shared process-bound publisher trust cache", testSharedProcessBoundPublisherTrustCache),
             ("HUD pending trust validation cancels on focus loss", testHUDPendingTrustValidationCancelledOnFocusLoss),
             ("HUD trust validation recovers after focus returns", testHUDTrustValidationRecoversAfterFocusReturns),
             ("HUD trust validation rejects stale results", testHUDTrustValidationRejectsStaleResults),
@@ -6035,7 +6036,7 @@ struct CodexUsageStatusTests {
         // The core-test executable has no release bundle, so AppVersion.current
         // resolves to "dev". Validate the canonical artifact against the
         // release version baked into the current packaging script instead.
-        let expectedArtifactVersion = "2.4.122"
+        let expectedArtifactVersion = "2.4.123"
         let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, expectedArtifactVersion])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 
@@ -6372,6 +6373,83 @@ struct CodexUsageStatusTests {
         if FileManager.default.fileExists(atPath: official.path) {
             try expect(CodexApplicationPolicy.isTrustedBundle(at: official), "official signed Codex bundle should be accepted")
         }
+    }
+
+    private static func testSharedProcessBoundPublisherTrustCache() throws {
+        let cache = CodexApplicationPolicy.ProcessBoundTrustCache()
+        let launchDate = Date(timeIntervalSince1970: 123)
+        let bundleURL = URL(fileURLWithPath: "/Applications/Codex.app", isDirectory: true)
+        let identity = CodexApplicationPolicy.TrustedApplicationIdentity(
+            processIdentifier: 42,
+            launchDate: launchDate,
+            bundleURL: bundleURL
+        )
+        var validationCount = 0
+        func validateTrustedPublisher() -> Bool {
+            validationCount += 1
+            return true
+        }
+
+        try expect(
+            cache.resolve(identity, validate: validateTrustedPublisher),
+            "the first live process identity is publisher-validated"
+        )
+        try expect(
+            cache.resolve(identity, validate: validateTrustedPublisher),
+            "the same process identity reuses its publisher result"
+        )
+        try expect(validationCount == 1, "a stable process runs the full publisher validator once")
+
+        let changedPID = CodexApplicationPolicy.TrustedApplicationIdentity(
+            processIdentifier: 43,
+            launchDate: launchDate,
+            bundleURL: bundleURL
+        )
+        try expect(cache.resolve(changedPID, validate: validateTrustedPublisher), "a changed PID is revalidated")
+        let changedLaunch = CodexApplicationPolicy.TrustedApplicationIdentity(
+            processIdentifier: 43,
+            launchDate: Date(timeIntervalSince1970: 124),
+            bundleURL: bundleURL
+        )
+        try expect(cache.resolve(changedLaunch, validate: validateTrustedPublisher), "a changed launch date is revalidated")
+        let changedBundle = CodexApplicationPolicy.TrustedApplicationIdentity(
+            processIdentifier: 43,
+            launchDate: Date(timeIntervalSince1970: 124),
+            bundleURL: URL(fileURLWithPath: "/Applications/Other.app", isDirectory: true)
+        )
+        try expect(cache.resolve(changedBundle, validate: validateTrustedPublisher), "a changed bundle path is revalidated")
+        try expect(validationCount == 4, "each distinct process identity receives exactly one validation")
+
+        cache.invalidate(changedBundle)
+        try expect(cache.cachedResult(for: changedBundle) == nil, "termination invalidation removes the matching result")
+        try expect(cache.resolve(changedBundle, validate: validateTrustedPublisher), "an invalidated process identity must be checked again")
+        try expect(validationCount == 5, "termination invalidation forces a fresh publisher validation")
+
+        let rejectedIdentity = CodexApplicationPolicy.TrustedApplicationIdentity(
+            processIdentifier: 44,
+            launchDate: Date(timeIntervalSince1970: 125),
+            bundleURL: bundleURL
+        )
+        try expect(!cache.resolve(rejectedIdentity) { validationCount += 1; return false }, "publisher rejection remains fail-closed")
+        try expect(!cache.resolve(rejectedIdentity, validate: validateTrustedPublisher), "a rejected process cannot become trusted through cache reuse")
+        try expect(validationCount == 6, "a rejected process is not repeatedly revalidated on each action")
+
+        let concurrentCache = CodexApplicationPolicy.ProcessBoundTrustCache()
+        let concurrentValidations = LockedCounter()
+        let group = DispatchGroup()
+        for _ in 0..<8 {
+            group.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                _ = concurrentCache.resolve(identity) {
+                    concurrentValidations.increment()
+                    Thread.sleep(forTimeInterval: 0.02)
+                    return true
+                }
+                group.leave()
+            }
+        }
+        group.wait()
+        try expect(concurrentValidations.value == 1, "concurrent HUD and workflow checks share one in-flight validation")
     }
 
     private static func testHUDPendingTrustValidationCancelledOnFocusLoss() throws {

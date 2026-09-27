@@ -119,29 +119,24 @@ final class FloatingHUDPanelController: NSObject {
         var isApplicationActivation: Bool { self == .applicationActivation }
     }
 
-    /// A publisher-bound trust result for one running process. The launch date
-    /// is the process birth identity; without it the HUD cannot safely
-    /// distinguish a reused PID and therefore fails closed.
-    private struct TrustedApplicationCacheEntry {
-        let processIdentifier: pid_t
-        let launchDate: Date
-        let bundleURL: URL
-
-        func matches(
-            processIdentifier: pid_t,
-            launchDate: Date,
-            bundleURL: URL
-        ) -> Bool {
-            self.processIdentifier == processIdentifier
-                && self.launchDate == launchDate
-                && self.bundleURL == bundleURL
-        }
-    }
-
     private struct TrustValidationIdentity: Equatable, Sendable {
         let processIdentifier: pid_t
         let launchDate: Date
         let bundleURL: URL
+
+        init(processIdentifier: pid_t, launchDate: Date, bundleURL: URL) {
+            self.processIdentifier = processIdentifier
+            self.launchDate = launchDate
+            self.bundleURL = bundleURL.standardizedFileURL
+        }
+
+        var applicationPolicyIdentity: CodexApplicationPolicy.TrustedApplicationIdentity {
+            CodexApplicationPolicy.TrustedApplicationIdentity(
+                processIdentifier: processIdentifier,
+                launchDate: launchDate,
+                bundleURL: bundleURL
+            )
+        }
     }
 
     private struct TrustValidationResult: Sendable {
@@ -188,7 +183,6 @@ final class FloatingHUDPanelController: NSObject {
     private var lastCodexVisibleFrame: NSRect?
     private var lastCodexProcessID: pid_t?
     private var lastCodexWindowDiagnostics: CodexWindowDiagnostics?
-    private var trustedCodexApplicationIdentity: TrustedApplicationCacheEntry?
     private var lastPositionedCodexWindowFrame: NSRect?
     private var lastPositionedVisibleFrame: NSRect?
     private var lastPositionedProcessID: pid_t?
@@ -929,13 +923,13 @@ final class FloatingHUDPanelController: NSObject {
               activatedApplication.bundleURL == frontmost.bundleURL,
               CodexApplicationPolicy.isCodexApplication(bundleIdentifier: frontmost.bundleIdentifier),
               let launchDate = frontmost.launchDate,
-              let bundleURL = frontmost.bundleURL,
-              let trusted = trustedCodexApplicationIdentity else { return false }
-        return trusted.matches(
+              let bundleURL = frontmost.bundleURL else { return false }
+        let identity = CodexApplicationPolicy.TrustedApplicationIdentity(
             processIdentifier: frontmost.processIdentifier,
             launchDate: launchDate,
             bundleURL: bundleURL
         )
+        return CodexApplicationPolicy.cachedTrustResult(for: identity) == true
     }
 
     private func recordPanelVisible(
@@ -1015,7 +1009,6 @@ final class FloatingHUDPanelController: NSObject {
 
         guard let bundleURL = application.bundleURL else {
             cancelTrustValidation()
-            trustedCodexApplicationIdentity = nil
             rejectedTrustValidationIdentity = nil
             Self.performanceLogger.debug(
                 "HUD trust check trigger=\(trigger.rawValue, privacy: .public) cache=unproven bundle_url_available=false"
@@ -1026,7 +1019,6 @@ final class FloatingHUDPanelController: NSObject {
         let processIdentifier = application.processIdentifier
         guard let launchDate = application.launchDate else {
             cancelTrustValidation()
-            trustedCodexApplicationIdentity = nil
             rejectedTrustValidationIdentity = nil
             Self.performanceLogger.debug(
                 "HUD trust check trigger=\(trigger.rawValue, privacy: .public) cache=unproven launch_date_available=false"
@@ -1038,22 +1030,21 @@ final class FloatingHUDPanelController: NSObject {
             launchDate: launchDate,
             bundleURL: bundleURL
         )
-        if let trustedCodexApplicationIdentity {
-            if trustedCodexApplicationIdentity.matches(
-                processIdentifier: processIdentifier,
-                launchDate: launchDate,
-                bundleURL: bundleURL
-            ) {
+        if let sharedTrust = CodexApplicationPolicy.cachedTrustResult(
+            for: identity.applicationPolicyIdentity
+        ) {
+            if sharedTrust {
+                rejectedTrustValidationIdentity = nil
                 Self.performanceLogger.debug(
-                    "HUD trust check trigger=\(trigger.rawValue, privacy: .public) cache=hit launch_date_available=true"
+                    "HUD trust check trigger=\(trigger.rawValue, privacy: .public) cache=hit authority=shared launch_date_available=true"
                 )
                 return true
             }
-
-            // A changed PID, launch date, or bundle URL is a new process
-            // identity, not an ordinary focus transition. Drop the old trust
-            // result before considering or validating the replacement.
-            self.trustedCodexApplicationIdentity = nil
+            rejectedTrustValidationIdentity = identity
+            Self.performanceLogger.debug(
+                "HUD trust check trigger=\(trigger.rawValue, privacy: .public) cache=rejected authority=shared"
+            )
+            return false
         }
 
         if rejectedTrustValidationIdentity == identity {
@@ -1086,7 +1077,9 @@ final class FloatingHUDPanelController: NSObject {
         trustValidationTask = Task { @MainActor [weak self] in
             let result = await Task.detached(priority: .utility) {
                 let startedAt = DispatchTime.now().uptimeNanoseconds
-                let trusted = CodexApplicationPolicy.isTrustedBundle(at: identity.bundleURL)
+                let trusted = CodexApplicationPolicy.isTrustedApplication(
+                    identity: identity.applicationPolicyIdentity
+                )
                 let finishedAt = DispatchTime.now().uptimeNanoseconds
                 return TrustValidationResult(
                     identity: identity,
@@ -1113,7 +1106,7 @@ final class FloatingHUDPanelController: NSObject {
                   let frontmost = NSWorkspace.shared.frontmostApplication,
                   frontmost.processIdentifier == result.identity.processIdentifier,
                   frontmost.launchDate == result.identity.launchDate,
-                  frontmost.bundleURL == result.identity.bundleURL,
+                  frontmost.bundleURL?.standardizedFileURL == result.identity.bundleURL,
                   CodexApplicationPolicy.isCodexApplication(bundleIdentifier: frontmost.bundleIdentifier) else {
                 return
             }
@@ -1123,13 +1116,7 @@ final class FloatingHUDPanelController: NSObject {
             )
             if result.trusted {
                 self.rejectedTrustValidationIdentity = nil
-                self.trustedCodexApplicationIdentity = TrustedApplicationCacheEntry(
-                    processIdentifier: result.identity.processIdentifier,
-                    launchDate: result.identity.launchDate,
-                    bundleURL: result.identity.bundleURL
-                )
             } else {
-                self.trustedCodexApplicationIdentity = nil
                 self.rejectedTrustValidationIdentity = result.identity
             }
             self.requestVisibilityRefresh(trigger: .trustValidationCompletion)
@@ -1180,7 +1167,6 @@ final class FloatingHUDPanelController: NSObject {
         lastPositionedPanelSize = nil
         if clearProcessID {
             lastCodexProcessID = nil
-            trustedCodexApplicationIdentity = nil
             rejectedTrustValidationIdentity = nil
             cancelTrustValidation()
         }
@@ -1211,21 +1197,18 @@ final class FloatingHUDPanelController: NSObject {
                 )
             }
         }
+        if let terminatedIdentity {
+            CodexApplicationPolicy.invalidateTrust(
+                for: terminatedIdentity.applicationPolicyIdentity
+            )
+        }
         let terminatesTrackedPosition = lastCodexProcessID == processIdentifier
-        let terminatesTrustedIdentity = terminatedIdentity.map { identity in
-            trustedCodexApplicationIdentity?.matches(
-                processIdentifier: identity.processIdentifier,
-                launchDate: identity.launchDate,
-                bundleURL: identity.bundleURL
-            ) ?? false
-        } ?? false
         let terminatesPendingValidation = terminatedIdentity != nil
             && pendingTrustValidationIdentity == terminatedIdentity
         let terminatesRejectedIdentity = terminatedIdentity != nil
             && rejectedTrustValidationIdentity == terminatedIdentity
 
         guard terminatesTrackedPosition
-                || terminatesTrustedIdentity
                 || terminatesPendingValidation
                 || terminatesRejectedIdentity else { return }
 
@@ -1237,9 +1220,6 @@ final class FloatingHUDPanelController: NSObject {
             return
         }
 
-        if terminatesTrustedIdentity {
-            trustedCodexApplicationIdentity = nil
-        }
         if terminatesRejectedIdentity {
             rejectedTrustValidationIdentity = nil
         }
@@ -1782,13 +1762,10 @@ final class FloatingHUDPanelController: NSObject {
             launchDate: launchDate,
             bundleURL: bundleURL
         )
-        if let trustedCodexApplicationIdentity,
-           trustedCodexApplicationIdentity.matches(
-               processIdentifier: application.processIdentifier,
-               launchDate: launchDate,
-               bundleURL: bundleURL
-           ) {
-            return "trusted"
+        if let sharedTrust = CodexApplicationPolicy.cachedTrustResult(
+            for: identity.applicationPolicyIdentity
+        ) {
+            return sharedTrust ? "trusted" : "rejected"
         }
         if rejectedTrustValidationIdentity == identity {
             return "rejected"
