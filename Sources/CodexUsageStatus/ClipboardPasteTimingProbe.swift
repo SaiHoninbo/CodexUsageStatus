@@ -25,12 +25,41 @@ struct ClipboardPasteTimingProbe {
 
     func mark(_ point: String, detail: String = "") {
         let now = DispatchTime.now().uptimeNanoseconds
+        log(point, now: now, detail: detail, phaseDurationMilliseconds: nil)
+    }
+
+    func markDuration(
+        _ point: String,
+        startedAtUptimeNanoseconds: UInt64,
+        detail: String = ""
+    ) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let durationNanoseconds = now >= startedAtUptimeNanoseconds
+            ? now - startedAtUptimeNanoseconds
+            : 0
+        log(
+            point,
+            now: now,
+            detail: detail,
+            phaseDurationMilliseconds: Double(durationNanoseconds) / 1_000_000.0
+        )
+    }
+
+    private func log(
+        _ point: String,
+        now: UInt64,
+        detail: String,
+        phaseDurationMilliseconds: Double?
+    ) {
         let elapsedNanoseconds = now >= startedAtUptimeNanoseconds
             ? now - startedAtUptimeNanoseconds
             : 0
         let elapsedMilliseconds = Double(elapsedNanoseconds) / 1_000_000.0
+        let phaseDuration = phaseDurationMilliseconds.map {
+            " phase_duration_ms=\($0)"
+        } ?? ""
         Self.logger.debug(
-            "clipboard_timing operation=\(operation, privacy: .public) id=\(operationID.uuidString, privacy: .public) point=\(point, privacy: .public) elapsed_ms=\(elapsedMilliseconds, privacy: .public) detail=\(detail, privacy: .public)"
+            "clipboard_timing operation=\(operation, privacy: .public) id=\(operationID.uuidString, privacy: .public) point=\(point, privacy: .public) elapsed_ms=\(elapsedMilliseconds, privacy: .public)\(phaseDuration, privacy: .public) detail=\(detail, privacy: .public)"
         )
     }
 }

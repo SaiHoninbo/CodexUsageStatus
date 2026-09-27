@@ -305,6 +305,7 @@ struct CodexUsageStatusTests {
             ("Codex prompt shortcuts", testCodexPromptShortcuts),
             ("temporary clipboard guards", testClipboardTemporaryOperationPolicy),
             ("verified-frontmost clipboard immediate dispatch policy", testVerifiedFrontmostClipboardImmediateDispatchPolicy),
+            ("clipboard latency and activation policies", testClipboardLatencyAndActivationPolicies),
             ("retired feature cleanup", testRetiredFeatureCleanup)
             ,("App Server retry policy", testAppServerRetryPolicy)
             ,("refresh request coalescing", testRefreshRequestCoalescing)
@@ -6033,7 +6034,7 @@ struct CodexUsageStatusTests {
         // The core-test executable has no release bundle, so AppVersion.current
         // resolves to "dev". Validate the canonical artifact against the
         // release version baked into the current packaging script instead.
-        let expectedArtifactVersion = "2.4.120"
+        let expectedArtifactVersion = "2.4.121"
         let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, expectedArtifactVersion])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 
@@ -6459,6 +6460,79 @@ struct CodexUsageStatusTests {
         try expect(
             ClipboardPasteDispatchPolicy.decision(targetIsVerifiedFrontmost: false) == .delayedActivationFallback,
             "non-frontmost or unverified Codex uses the activation fallback"
+        )
+    }
+
+    private static func testClipboardLatencyAndActivationPolicies() throws {
+        try expect(
+            ClipboardPasteSettlePolicy.temporarySubmitSettle(for: .continueTask) == 0.03,
+            "known temporary Continue text uses the bounded short submit settle"
+        )
+        try expect(
+            ClipboardPasteSettlePolicy.normalSubmitSettle(
+                itemTypeIdentifiers: [["public.utf8-plain-text"]]
+            ) == ClipboardPasteSettlePolicy.shortTextSettle,
+            "a single plain-text-only clipboard item uses the short submit settle"
+        )
+        try expect(
+            ClipboardPasteSettlePolicy.normalSubmitSettle(
+                itemTypeIdentifiers: [["public.utf8-plain-text", "NSStringPboardType"]]
+            ) == ClipboardPasteSettlePolicy.shortTextSettle,
+            "multiple known plain-text representations remain eligible for the short settle"
+        )
+        for representations in [
+            [["public.utf8-plain-text", "public.html"]],
+            [["public.tiff"]],
+            [["public.utf8-plain-text"], ["public.utf8-plain-text"]],
+            [[String]()]
+        ] {
+            try expect(
+                ClipboardPasteSettlePolicy.normalSubmitSettle(
+                    itemTypeIdentifiers: representations
+                ) == ClipboardPasteSettlePolicy.safeRichContentSettle,
+                "rich, image, multi-item, and unknown clipboard content keeps the safe settle"
+            )
+        }
+
+        let launchDate = Date(timeIntervalSince1970: 1_800_000_000)
+        let target = ClipboardActivationProcessIdentity(
+            processID: 42,
+            launchDate: launchDate,
+            bundleURL: URL(fileURLWithPath: "/Applications/Codex.app")
+        )
+        var successfulWait = ClipboardActivationWaitState(targetIdentity: target)
+        try expect(
+            successfulWait.receiveActivationEvent(identity: target, targetIsFrontmost: true) == .accepted,
+            "the exact activated target immediately resumes the fallback"
+        )
+
+        var wrongProcessWait = ClipboardActivationWaitState(targetIdentity: target)
+        let wrongProcess = ClipboardActivationProcessIdentity(
+            processID: 43,
+            launchDate: launchDate,
+            bundleURL: target.bundleURL
+        )
+        try expect(
+            wrongProcessWait.receiveActivationEvent(identity: wrongProcess, targetIsFrontmost: true)
+                == .ignoredIdentityMismatch,
+            "a different PID cannot satisfy activation"
+        )
+        try expect(!wrongProcessWait.isResolved, "wrong-process activation leaves the wait pending")
+        try expect(!wrongProcessWait.timeOut(targetIsFrontmost: false), "timeout without exact frontmost target fails closed")
+
+        var staleEventWait = ClipboardActivationWaitState(targetIdentity: target)
+        try expect(
+            staleEventWait.receiveActivationEvent(identity: target, targetIsFrontmost: false)
+                == .ignoredNotFrontmost,
+            "a stale exact-process activation event is ignored when another app is frontmost"
+        )
+        try expect(!staleEventWait.timeOut(targetIsFrontmost: false), "stale event cannot turn timeout into success")
+
+        var timedOutWait = ClipboardActivationWaitState(targetIdentity: target)
+        try expect(!timedOutWait.timeOut(targetIsFrontmost: false), "activation timeout fails closed")
+        try expect(
+            timedOutWait.receiveActivationEvent(identity: target, targetIsFrontmost: true) == .alreadyResolved,
+            "a late event cannot resume an already timed-out operation"
         )
     }
 

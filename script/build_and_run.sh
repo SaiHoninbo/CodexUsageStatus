@@ -4,6 +4,8 @@ set -euo pipefail
 MODE="${1:-run}"
 APP_NAME="CodexUsageStatus"
 BUNDLE_ID="com.openai.codex-usage-status"
+APP_VERSION="2.4.121"
+APP_BUILD_NUMBER="136"
 MIN_SYSTEM_VERSION="14.0"
 RELEASE_MODE="${CODEX_RELEASE_MODE:-0}"
 SIGNING_MODE="${CODEX_SIGNING_MODE:-adhoc}"
@@ -207,9 +209,9 @@ cat > "$INFO_PLIST" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>2.4.120</string>
+  <string>$APP_VERSION</string>
   <key>CFBundleVersion</key>
-  <string>135</string>
+  <string>$APP_BUILD_NUMBER</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
   <key>LSUIElement</key>
@@ -279,7 +281,7 @@ if [[ "$SHOULD_PACKAGE" == 1 ]]; then
     PACKAGE_TEMP_ZIP="$PACKAGE_TEMP_DIR/$APP_NAME.app.zip"
     COPYFILE_DISABLE=1 ditto --norsrc -c -k --keepParent "$APP_BUNDLE" "$PACKAGE_TEMP_ZIP"
     "$ROOT_DIR/script/validate_release_artifact.sh" \
-      --public-release-developer-id "$PACKAGE_TEMP_ZIP" "2.4.120" "$EXPECTED_TEAM_ID"
+      --public-release-developer-id "$PACKAGE_TEMP_ZIP" "$APP_VERSION" "$EXPECTED_TEAM_ID"
     mv "$PACKAGE_TEMP_ZIP" "$OUTPUT_ZIP"
     rmdir "$PACKAGE_TEMP_DIR"
     PACKAGE_TEMP_ZIP=""

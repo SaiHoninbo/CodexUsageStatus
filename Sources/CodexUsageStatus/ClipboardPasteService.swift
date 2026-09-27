@@ -8,6 +8,120 @@ enum ClipboardPasteService {
     private static var activeTemporaryOperationToken: UUID?
     private static var completedTemporaryOperationTokens = Set<UUID>()
 
+    @MainActor
+    private final class TargetActivationWaiter {
+        private let target: NSRunningApplication
+        private let timeout: TimeInterval
+        private let timing: ClipboardPasteTimingProbe
+        private let completion: (Bool) -> Void
+        private var state: ClipboardActivationWaitState
+        private var observer: NSObjectProtocol?
+        private var timeoutWorkItem: DispatchWorkItem?
+        private var isFinished = false
+
+        init(
+            target: NSRunningApplication,
+            timeout: TimeInterval,
+            timing: ClipboardPasteTimingProbe,
+            completion: @escaping (Bool) -> Void
+        ) {
+            self.target = target
+            self.timeout = timeout
+            self.timing = timing
+            self.completion = completion
+            self.state = ClipboardActivationWaitState(
+                targetIdentity: Self.identity(for: target)
+            )
+        }
+
+        func start() {
+            let notificationCenter = NSWorkspace.shared.notificationCenter
+            observer = notificationCenter.addObserver(
+                forName: NSWorkspace.didActivateApplicationNotification,
+                object: nil,
+                queue: .main
+            ) { [self] notification in
+                let application = notification.object as? NSRunningApplication
+                Task { @MainActor [self] in
+                    self.receiveActivation(of: application)
+                }
+            }
+
+            target.activate(options: [.activateAllWindows])
+            if ClipboardPasteService.isTargetFrontmost(target) {
+                finish(success: true)
+                return
+            }
+
+            let timeoutWorkItem = DispatchWorkItem { [weak self] in
+                Task { @MainActor [weak self] in
+                    self?.handleTimeout()
+                }
+            }
+            self.timeoutWorkItem = timeoutWorkItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: timeoutWorkItem)
+        }
+
+        private func receiveActivation(of application: NSRunningApplication?) {
+            guard !isFinished else { return }
+            let eventIdentity = application.flatMap { application in
+                ClipboardPasteService.isCodexApplication(application)
+                    ? Self.identity(for: application)
+                    : nil
+            }
+            let disposition = state.receiveActivationEvent(
+                identity: eventIdentity,
+                targetIsFrontmost: ClipboardPasteService.isTargetFrontmost(target)
+            )
+            switch disposition {
+            case .accepted:
+                timing.mark("activation_event_accepted", detail: "exact_target_frontmost")
+                finish(success: true)
+            case .ignoredIdentityMismatch:
+                timing.mark("activation_event_ignored", detail: "identity_mismatch")
+            case .ignoredNotFrontmost:
+                timing.mark("activation_event_ignored", detail: "target_not_frontmost")
+            case .alreadyResolved:
+                break
+            }
+        }
+
+        private func handleTimeout() {
+            guard !isFinished else { return }
+            let targetIsFrontmost = ClipboardPasteService.isTargetFrontmost(target)
+            let shouldProceed = state.timeOut(targetIsFrontmost: targetIsFrontmost)
+            timing.mark(
+                shouldProceed ? "activation_timeout_frontmost" : "activation_timeout",
+                detail: "timeout_ms=\(Int((timeout * 1_000).rounded()))"
+            )
+            finish(success: shouldProceed)
+        }
+
+        private func finish(success: Bool) {
+            guard !isFinished else { return }
+            isFinished = true
+            timeoutWorkItem?.cancel()
+            timeoutWorkItem = nil
+            if let observer {
+                NSWorkspace.shared.notificationCenter.removeObserver(observer)
+                self.observer = nil
+            }
+            let finalFrontmost = success && ClipboardPasteService.isTargetFrontmost(target)
+            if success && !finalFrontmost {
+                timing.mark("activation_final_frontmost_check_failed")
+            }
+            completion(finalFrontmost)
+        }
+
+        private static func identity(for application: NSRunningApplication) -> ClipboardActivationProcessIdentity {
+            ClipboardActivationProcessIdentity(
+                processID: application.processIdentifier,
+                launchDate: application.launchDate,
+                bundleURL: application.bundleURL
+            )
+        }
+    }
+
     /// Exposed for the HUD and core tests.  The lock is process-wide because
     /// NSPasteboard.general is shared by every HUD instance and menu action.
     static var isTemporaryOperationInFlight: Bool {
@@ -75,10 +189,19 @@ enum ClipboardPasteService {
         }
 
         let pasteboard = NSPasteboard.general
+        let snapshotCaptureStartedAt = DispatchTime.now().uptimeNanoseconds
         guard let snapshot = PasteboardSnapshot.capture(from: pasteboard) else {
+            timing.markDuration(
+                "snapshot_capture_failed",
+                startedAtUptimeNanoseconds: snapshotCaptureStartedAt
+            )
             completion(false)
             return
         }
+        timing.markDuration(
+            "snapshot_capture_complete",
+            startedAtUptimeNanoseconds: snapshotCaptureStartedAt
+        )
         let initialChangeCount = pasteboard.changeCount
 
         let token = UUID()
@@ -92,12 +215,14 @@ enum ClipboardPasteService {
                     snapshot: snapshot,
                     preparedChangeCount: nil,
                     expectedText: shortcut.text,
+                    timing: timing,
                     completion: completion,
                     success: false
                 )
                 return
             }
 
+            let prepareStartedAt = DispatchTime.now().uptimeNanoseconds
             let beforeChangeCount = pasteboard.changeCount
             let clearedChangeCount = pasteboard.clearContents()
             guard pasteboard.pasteboardItems?.isEmpty ?? true else {
@@ -106,6 +231,7 @@ enum ClipboardPasteService {
                     snapshot: snapshot,
                     preparedChangeCount: clearedChangeCount,
                     expectedText: shortcut.text,
+                    timing: timing,
                     completion: completion,
                     success: false
                 )
@@ -117,6 +243,7 @@ enum ClipboardPasteService {
                     snapshot: snapshot,
                     preparedChangeCount: pasteboard.changeCount,
                     expectedText: shortcut.text,
+                    timing: timing,
                     completion: completion,
                     success: false
                 )
@@ -137,29 +264,50 @@ enum ClipboardPasteService {
                     snapshot: snapshot,
                     preparedChangeCount: preparedChangeCount,
                     expectedText: shortcut.text,
+                    timing: timing,
                     completion: completion,
                     success: false
                 )
                 return
             }
 
+            timing.markDuration(
+                "temporary_text_prepared",
+                startedAtUptimeNanoseconds: prepareStartedAt
+            )
+
             guard isEventPostingAuthorized(),
                   isTargetFrontmost(target),
                   pasteboard.changeCount == preparedChangeCount,
-                  pasteboard.string(forType: .string) == shortcut.text,
-                  postKey(keyCode: 9, flags: .maskCommand) else {
+                  pasteboard.string(forType: .string) == shortcut.text else {
                 timing.mark("cmdv_post_failed", detail: "temporary")
                 finishTemporaryOperation(
                     token: token,
                     snapshot: snapshot,
                     preparedChangeCount: preparedChangeCount,
                     expectedText: shortcut.text,
+                    timing: timing,
                     completion: completion,
                     success: false
                 )
                 return
             }
 
+            let cmdvPostStartedAt = DispatchTime.now().uptimeNanoseconds
+            guard postKey(keyCode: 9, flags: .maskCommand) else {
+                timing.mark("cmdv_post_failed", detail: "temporary")
+                finishTemporaryOperation(
+                    token: token,
+                    snapshot: snapshot,
+                    preparedChangeCount: preparedChangeCount,
+                    expectedText: shortcut.text,
+                    timing: timing,
+                    completion: completion,
+                    success: false
+                )
+                return
+            }
+            timing.markDuration("cmdv_posted", startedAtUptimeNanoseconds: cmdvPostStartedAt)
             timing.mark("t2_cmdv_posted", detail: "temporary")
 
             guard shortcut.submitAfterPaste else {
@@ -171,6 +319,7 @@ enum ClipboardPasteService {
                         snapshot: snapshot,
                         preparedChangeCount: preparedChangeCount,
                         expectedText: shortcut.text,
+                        timing: timing,
                         completion: completion,
                         success: true
                     )
@@ -178,30 +327,56 @@ enum ClipboardPasteService {
                 return
             }
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+            let submitSettle = ClipboardPasteSettlePolicy.temporarySubmitSettle(for: shortcut)
+            timing.mark(
+                "submit_settle_policy_resolved",
+                detail: "kind=temporary_text delay_ms=\(Int((submitSettle * 1_000).rounded()))"
+            )
+            DispatchQueue.main.asyncAfter(deadline: .now() + submitSettle) {
                 guard isTemporaryOperationOwned(by: token),
                       isEventPostingAuthorized(),
                       !target.isTerminated,
                       isTargetFrontmost(target),
                       pasteboard.changeCount == preparedChangeCount,
-                      pasteboard.string(forType: .string) == shortcut.text,
-                      postKey(keyCode: 36) else {
+                      pasteboard.string(forType: .string) == shortcut.text else {
                     finishTemporaryOperation(
                         token: token,
                         snapshot: snapshot,
                         preparedChangeCount: preparedChangeCount,
                         expectedText: shortcut.text,
+                        timing: timing,
                         completion: completion,
                         success: false
                     )
                     return
                 }
 
+                let returnPostStartedAt = DispatchTime.now().uptimeNanoseconds
+                guard postKey(keyCode: 36) else {
+                    timing.mark("return_post_failed", detail: "temporary")
+                    finishTemporaryOperation(
+                        token: token,
+                        snapshot: snapshot,
+                        preparedChangeCount: preparedChangeCount,
+                        expectedText: shortcut.text,
+                        timing: timing,
+                        completion: completion,
+                        success: false
+                    )
+                    return
+                }
+                timing.markDuration(
+                    "return_posted",
+                    startedAtUptimeNanoseconds: returnPostStartedAt,
+                    detail: "temporary"
+                )
+
                 finishTemporaryOperation(
                     token: token,
                     snapshot: snapshot,
                     preparedChangeCount: preparedChangeCount,
                     expectedText: shortcut.text,
+                    timing: timing,
                     completion: completion,
                     success: true
                 )
@@ -226,18 +401,14 @@ enum ClipboardPasteService {
                     prepareAndPaste()
                 } else {
                     timing.mark("fallback_activation_requested", detail: "frontmost_changed_before_dispatch")
-                    target.activate(options: [.activateAllWindows])
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
-                        timing.mark("fallback_delay_elapsed", detail: "200ms")
+                    waitForTargetActivation(target, timeout: 0.20, timing: timing) { _ in
                         prepareAndPaste()
                     }
                 }
             }
         } else {
             timing.mark("fallback_activation_requested", detail: "initial_policy")
-            target.activate(options: [.activateAllWindows])
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
-                timing.mark("fallback_delay_elapsed", detail: "200ms")
+            waitForTargetActivation(target, timeout: 0.20, timing: timing) { _ in
                 prepareAndPaste()
             }
         }
@@ -270,6 +441,7 @@ enum ClipboardPasteService {
         snapshot: PasteboardSnapshot,
         preparedChangeCount: Int?,
         expectedText: String,
+        timing: ClipboardPasteTimingProbe,
         completion: @escaping (Bool) -> Void,
         success: Bool
     ) -> Bool {
@@ -296,15 +468,26 @@ enum ClipboardPasteService {
                     currentChangeCount: pasteboard.changeCount
                 )
                 if mayRestore {
-                    finalSuccess = snapshot.restore(to: pasteboard) && finalSuccess
+                    let restoreStartedAt = DispatchTime.now().uptimeNanoseconds
+                    let restored = snapshot.restore(to: pasteboard)
+                    timing.markDuration(
+                        "clipboard_restored",
+                        startedAtUptimeNanoseconds: restoreStartedAt,
+                        detail: "success=\(restored)"
+                    )
+                    finalSuccess = restored && finalSuccess
                 } else {
+                    timing.mark("clipboard_restore_skipped", detail: "ownership_changed")
                     finalSuccess = false
                 }
             } else {
                 // The user changed the clipboard after preparation.  Do not
                 // overwrite their newer content with our old snapshot.
+                timing.mark("clipboard_restore_skipped", detail: "external_change")
                 finalSuccess = false
             }
+        } else {
+            timing.mark("clipboard_restore_skipped", detail: "text_not_prepared")
         }
         completedTemporaryOperationTokens.insert(token)
         if completedTemporaryOperationTokens.count > 64 {
@@ -403,10 +586,8 @@ enum ClipboardPasteService {
         let dispatchIfFrontmost = {
             guard isTargetFrontmost(target) else {
                 timing.mark("fallback_activation_requested", detail: "frontmost_recheck_failed")
-                target.activate(options: [.activateAllWindows])
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
-                    timing.mark("retry_delay_elapsed", detail: "180ms")
-                    guard isTargetFrontmost(target) else {
+                waitForTargetActivation(target, timeout: 0.18, timing: timing) { activated in
+                    guard activated, isTargetFrontmost(target) else {
                         timing.mark("aborted", detail: "frontmost_retry_failed")
                         showAlert(
                             title: "無法貼上剪貼簿內容",
@@ -452,9 +633,7 @@ enum ClipboardPasteService {
             // post the shortcut to the active session, so the restored text
             // field receives it even when the original window was rebuilt.
             timing.mark("fallback_activation_requested", detail: "initial_policy")
-            target.activate(options: [.activateAllWindows])
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
-                timing.mark("fallback_delay_elapsed", detail: "200ms")
+            waitForTargetActivation(target, timeout: 0.20, timing: timing) { _ in
                 dispatchIfFrontmost()
             }
         }
@@ -478,6 +657,22 @@ enum ClipboardPasteService {
             completion?(false)
             return
         }
+        let pasteboard = NSPasteboard.general
+        let settleInterval = submitAfterPaste
+            ? ClipboardPasteSettlePolicy.normalSubmitSettle(
+                itemTypeIdentifiers: pasteboardItemTypeIdentifiers(from: pasteboard)
+            )
+            : 0
+        if submitAfterPaste {
+            let settleKind = settleInterval == ClipboardPasteSettlePolicy.shortTextSettle
+                ? "plain_text"
+                : "safe_content"
+            timing.mark(
+                "submit_settle_policy_resolved",
+                detail: "kind=\(settleKind) delay_ms=\(Int((settleInterval * 1_000).rounded()))"
+            )
+        }
+        let cmdvPostStartedAt = DispatchTime.now().uptimeNanoseconds
         guard postKey(keyCode: 9, flags: .maskCommand) else {
             timing.mark("cmdv_post_failed", detail: "normal")
             showAlert(
@@ -488,6 +683,7 @@ enum ClipboardPasteService {
             return
         }
 
+        timing.markDuration("cmdv_posted", startedAtUptimeNanoseconds: cmdvPostStartedAt)
         timing.mark("t2_cmdv_posted", detail: submitAfterPaste ? "normal-submit" : "normal")
 
         guard submitAfterPaste else {
@@ -499,10 +695,11 @@ enum ClipboardPasteService {
             return
         }
 
-        // Cmd-V is asynchronous for rich content such as an image. Leave a
-        // small settling window before sending Return, and re-check focus so
-        // an intervening app cannot receive the submit key.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+        // Plain text gets a bounded short settle; image, rich, multi-item, or
+        // unknown representations keep the existing conservative window.
+        // Focus is still revalidated before Return so an intervening app can
+        // never receive the submit key.
+        DispatchQueue.main.asyncAfter(deadline: .now() + settleInterval) {
             guard isEventPostingAuthorized(), !target.isTerminated, isTargetFrontmost(target) else {
                 timing.mark("aborted", detail: "submit_settle_focus_check_failed")
                 showAlert(
@@ -537,6 +734,28 @@ enum ClipboardPasteService {
             && frontmost.launchDate == target.launchDate
             && frontmost.bundleURL == target.bundleURL
             && isCodexApplication(frontmost)
+    }
+
+    private static func waitForTargetActivation(
+        _ target: NSRunningApplication,
+        timeout: TimeInterval,
+        timing: ClipboardPasteTimingProbe,
+        completion: @escaping (Bool) -> Void
+    ) {
+        TargetActivationWaiter(
+            target: target,
+            timeout: timeout,
+            timing: timing,
+            completion: completion
+        ).start()
+    }
+
+    private static func pasteboardItemTypeIdentifiers(from pasteboard: NSPasteboard) -> [[String]] {
+        if let items = pasteboard.pasteboardItems, !items.isEmpty {
+            return items.map { $0.types.map(\.rawValue) }
+        }
+        guard let types = pasteboard.types, !types.isEmpty else { return [] }
+        return [types.map(\.rawValue)]
     }
 
     private static func postKey(
