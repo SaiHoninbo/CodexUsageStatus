@@ -6036,7 +6036,7 @@ struct CodexUsageStatusTests {
         // The core-test executable has no release bundle, so AppVersion.current
         // resolves to "dev". Validate the canonical artifact against the
         // release version baked into the current packaging script instead.
-        let expectedArtifactVersion = "2.4.124"
+        let expectedArtifactVersion = "2.4.125"
         let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, expectedArtifactVersion])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 
@@ -6143,16 +6143,20 @@ struct CodexUsageStatusTests {
     private static func testCodexPromptShortcuts() throws {
         let shortcuts = CodexPromptShortcut.allCases
         try expect(shortcuts == [.continueTask, .fixUntilDone, .fullVerification, .commitAndPush], "workflow shortcuts preserve the four-case order")
-        try expect(shortcuts.map(\.rawValue) == ["繼續", "修到完成", "完整驗證", "提交並推送"], "workflow labels use the Chinese product language")
+        try expect(shortcuts.map(\.rawValue) == ["繼續執行", "修到完成", "完整驗證", "提交並推送"], "workflow labels use the Chinese product language")
         try expect(shortcuts.map(\.text) == [
             "go on",
             "請依目前最新的 Repo 狀態繼續處理目前工作。自動修復可修復問題、重新執行受影響的驗證，持續完成工作；只有遇到真正的重大阻塞才停止。不要因例行批准或已決定事項停止。",
             "請依目前最新的 Repo 狀態驗證實作。執行相關測試、建置、diff 檢查與必要的 runtime 驗證；自動修復可修復失敗並重新執行受影響的檢查。最後用精簡內容回報驗證結果與仍存在的限制。",
             "請檢查目前 Repo、分支、working tree、diff、驗證狀態與敏感內容風險。若目前變更安全且驗證充分，建立適當的 commit 並推送到既有 upstream。若遇到 Repo 身分不符、分支或遠端目標異常、秘密外洩、破壞性 Git 操作或範圍不符等重大風險，請停止並回報。"
         ], "workflow payloads use Chinese instructions")
-        try expect(shortcuts.map(\.submitAfterPaste) == [true, false, false, false], "bottom three workflow shortcuts paste without submitting")
+        try expect(shortcuts.map(\.submitPolicy) == [.singleReturn, .pasteOnly, .pasteOnly, .pasteOnly], "Continue requests exactly one Return; other workflow shortcuts remain paste-only")
         try expect(shortcuts.allSatisfy { $0.accessibilityLabel == $0.rawValue }, "accessibility uses concise labels")
         try expect(CodexPromptShortcut.commitAndPush.helpText.contains("不會自動送出"), "submit-sensitive workflow explains paste-only behavior")
+        try expect(CodexPromptShortcut.continueTask.helpText.contains("後續動作依目前對話指示與權限決定"), "Continue describes the conversation-level effect without claiming downstream tool actions")
+        // This source-level contract ends at dispatching the text and one
+        // Return event. Codex accepting a continuation turn is a separate
+        // native-runtime acceptance claim and is intentionally not inferred.
         try expect(CodexPromptShortcut.commitAndPush.helpText.contains("不會執行 Git"), "提交並推送 explains that Usage App never runs Git")
     }
 

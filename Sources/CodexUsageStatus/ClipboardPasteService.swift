@@ -357,7 +357,7 @@ enum ClipboardPasteService {
             timing.markDuration("cmdv_posted", startedAtUptimeNanoseconds: cmdvPostStartedAt)
             timing.mark("t2_cmdv_posted", detail: "temporary")
 
-            guard shortcut.submitAfterPaste else {
+            if shortcut.submitPolicy == .pasteOnly {
                 // Allow the asynchronous Cmd-V event to be consumed before
                 // restoring the user's full clipboard snapshot.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
@@ -374,6 +374,9 @@ enum ClipboardPasteService {
                 return
             }
 
+            // `.singleReturn` reaches this branch and posts exactly one Return
+            // below. Posting that key event is not proof Codex accepted a new
+            // continuation turn; that requires native runtime evidence.
             let submitSettle = ClipboardPasteSettlePolicy.temporarySubmitSettle(for: shortcut)
             timing.mark(
                 "submit_settle_policy_resolved",

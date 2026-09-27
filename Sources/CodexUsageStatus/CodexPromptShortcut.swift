@@ -7,8 +7,13 @@ import Foundation
 /// composer for Codex to review. Workflow shortcuts intentionally paste
 /// without submitting so the user can review or edit the Chinese instruction
 /// before sending it.
+enum CodexPromptSubmitPolicy: Equatable {
+    case pasteOnly
+    case singleReturn
+}
+
 enum CodexPromptShortcut: String, CaseIterable, Equatable {
-    case continueTask = "繼續"
+    case continueTask = "繼續執行"
     case fixUntilDone = "修到完成"
     case fullVerification = "完整驗證"
     case commitAndPush = "提交並推送"
@@ -29,7 +34,7 @@ enum CodexPromptShortcut: String, CaseIterable, Equatable {
     var helpText: String {
         switch self {
         case .continueTask:
-            return "go on"
+            return "送出「go on」以繼續目前 Codex 對話；後續動作依目前對話指示與權限決定。"
         case .fixUntilDone:
             return "僅貼上中文指令；不會自動送出。自動修復可修復問題並持續執行，直到完成或遇到真正的重大阻塞。"
         case .fullVerification:
@@ -39,16 +44,16 @@ enum CodexPromptShortcut: String, CaseIterable, Equatable {
         }
     }
 
-    var submitAfterPaste: Bool {
+    var submitPolicy: CodexPromptSubmitPolicy {
         switch self {
         case .continueTask:
-            // The compact Continue action retains its historical one-tap
-            // transport semantics.
-            return true
+            // Continue is a single explicit Return after the prompt paste.
+            return .singleReturn
         case .fixUntilDone, .fullVerification, .commitAndPush:
-            return false
+            return .pasteOnly
         }
     }
+
     /// Keep the semantic control name short; the exact payload is exposed as
     /// help text and remains the value sent to Codex.
     var accessibilityLabel: String { rawValue }

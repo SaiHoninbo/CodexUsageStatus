@@ -95,7 +95,7 @@ enum WorkflowPromptAXInsertionPolicy {
         shortcut: CodexPromptShortcut,
         axInsertionSucceeded: Bool
     ) -> Bool {
-        axInsertionSucceeded && shortcut.submitAfterPaste
+        axInsertionSucceeded && shortcut.submitPolicy == .singleReturn
     }
 
     static func mayPostReturn(
