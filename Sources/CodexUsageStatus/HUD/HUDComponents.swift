@@ -737,8 +737,10 @@ struct HUDActionCard: View {
             switch fillStyle {
             case .neutral:
                 shape.stroke(palette.border, lineWidth: 0.8 * scaleFactor)
+                    .allowsHitTesting(false)
             case .filled(let background, _):
                 shape.stroke(background.opacity(isHovered ? palette.filledActionPressedOpacity : palette.filledActionHoverOpacity), lineWidth: 0.8 * scaleFactor)
+                    .allowsHitTesting(false)
             }
         }
         .contentShape(Rectangle())
