@@ -757,6 +757,7 @@ struct HUDImmediateButtonStyle: ButtonStyle {
     let cornerRadius: CGFloat
     let pressedOverlay: Color
     let pressedOpacity: Double
+    @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -764,6 +765,7 @@ struct HUDImmediateButtonStyle: ButtonStyle {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(pressedOverlay.opacity(configuration.isPressed ? pressedOpacity : 0))
             }
+            .opacity(isEnabled ? 1 : 0.48)
             .scaleEffect(configuration.isPressed ? 0.985 : 1)
             .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
     }

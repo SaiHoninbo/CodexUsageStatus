@@ -778,111 +778,14 @@ struct CodexFloatingHUDView: View {
     }
 
     private func continueShortcutButton(presentation: HUDPresentation, metrics: HUDMetrics) -> some View {
-        let width = metrics.actionCardWidth
-        let height = metrics.actionHeight
-        let menuWidth = min(width * 0.28, 34 * metrics.factor)
-        let foreground = selectedHUDPalette.filledActionForeground
-        let fillColor = selectedHUDPalette.continueAction
-        let isDisabled = presentation.isPromptShortcutInFlight
-            || !presentation.isCodexFocused
-            || !presentation.isAccessibilityTrusted
-            || presentation.clipboardOperationInFlight
-        let helpText = !presentation.isAccessibilityTrusted
-            ? "允許輔助功能後可使用「\(CodexPromptShortcut.continueTask.rawValue)」"
-            : (presentation.isCodexFocused
-                ? CodexPromptShortcut.continueTask.helpText
-                : "切換回 Codex 後可使用「\(CodexPromptShortcut.continueTask.rawValue)」")
-        let cornerRadius = max(5, height * 0.14)
-        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        let pressedOpacity = max(
-            0.10,
-            selectedHUDPalette.filledActionPressedOpacity - selectedHUDPalette.filledActionOpacity
+        workflowShortcutButton(
+            .continueTask,
+            fillColor: selectedHUDPalette.continueAction,
+            metrics: metrics,
+            presentation: presentation,
+            height: metrics.actionHeight,
+            isHovered: $isContinueHovered
         )
-
-        return HStack(spacing: 0) {
-            Button {
-                performPromptShortcut(.continueTask, presentation: presentation)
-            } label: {
-                HStack(spacing: 3 * metrics.factor) {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 12 * metrics.factor, weight: .semibold))
-                    Text(CodexPromptShortcut.continueSplitButtonTitle)
-                        .font(.system(size: 14 * metrics.factor, weight: .semibold, design: .rounded))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.55)
-                        .allowsTightening(true)
-                }
-                .foregroundStyle(foreground)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(HUDImmediateButtonStyle(
-                cornerRadius: 0,
-                pressedOverlay: foreground,
-                pressedOpacity: pressedOpacity
-            ))
-            .disabled(isDisabled)
-            .help(helpText)
-            .accessibilityLabel(CodexPromptShortcut.continueSplitButtonTitle)
-            .accessibilityHint(helpText)
-            .accessibilityIdentifier("codex-usage-status.hud.continue.submit")
-
-            Rectangle()
-                .fill(foreground.opacity(0.34))
-                .frame(width: max(1, metrics.factor), height: height * 0.56)
-                .allowsHitTesting(false)
-
-            Menu {
-                Text("建議下一步")
-                Divider()
-                ForEach(CodexPromptShortcut.recommendationMenuChoices, id: \.rawValue) { shortcut in
-                    Button {
-                        performPromptShortcut(shortcut, presentation: presentation)
-                    } label: {
-                        Label(
-                            shortcut.recommendationMenuTitle,
-                            systemImage: promptShortcutSystemImage(for: shortcut)
-                        )
-                    }
-                    .help(shortcut.helpText)
-                }
-            } label: {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 10 * metrics.factor, weight: .bold))
-                    .foregroundStyle(foreground)
-                    .frame(width: menuWidth, height: height)
-                    .contentShape(Rectangle())
-            }
-            .menuStyle(.borderlessButton)
-            .buttonStyle(HUDImmediateButtonStyle(
-                cornerRadius: 0,
-                pressedOverlay: foreground,
-                pressedOpacity: pressedOpacity
-            ))
-            .disabled(isDisabled)
-            .help("開啟建議下一步選單；選取項目後才會執行該既有動作。")
-            .accessibilityLabel("建議下一步")
-            .accessibilityHint("開啟選單不會執行動作；只會執行你選取的既有快捷指令。")
-            .accessibilityIdentifier("codex-usage-status.hud.continue.recommendations")
-        }
-        .frame(width: width, height: height)
-        .background(
-            fillColor.opacity(isContinueHovered
-                ? selectedHUDPalette.filledActionHoverOpacity
-                : selectedHUDPalette.filledActionOpacity),
-            in: shape
-        )
-        .overlay {
-            shape.stroke(
-                fillColor.opacity(isContinueHovered
-                    ? selectedHUDPalette.filledActionPressedOpacity
-                    : selectedHUDPalette.filledActionHoverOpacity),
-                lineWidth: 0.8 * metrics.factor
-            )
-        }
-        .clipShape(shape)
-        .contentShape(Rectangle())
-        .onHover { isContinueHovered = $0 }
     }
 
     private func workflowShortcutButton(
@@ -896,19 +799,18 @@ struct CodexFloatingHUDView: View {
         let cardHeight = height ?? metrics.workflowActionHeight
         let isDisabled = presentation.isPromptShortcutInFlight
             || !presentation.isCodexFocused
-            || !presentation.isAccessibilityTrusted
             || presentation.clipboardOperationInFlight
-        let helpText = !presentation.isAccessibilityTrusted
-            ? "允許輔助功能後可使用「\(shortcut.rawValue)」"
-            : (presentation.isCodexFocused
-                ? shortcut.helpText
-                : "切換回 Codex 後可使用「\(shortcut.rawValue)」")
+        let helpText = !presentation.isCodexFocused
+            ? "切換回 Codex 後可使用「\(shortcut.rawValue)」"
+            : (!presentation.isAccessibilityTrusted
+                ? "按一下以要求輔助功能權限，才能將「\(shortcut.rawValue)」貼到 Codex"
+                : shortcut.helpText)
         return HUDActionCard(
             title: shortcut.rawValue,
             systemImage: promptShortcutSystemImage(for: shortcut),
             iconSize: 12,
             action: {
-                performPromptShortcut(shortcut, presentation: presentation)
+                performPromptShortcut(shortcut)
             },
             isDisabled: isDisabled,
             helpText: helpText,
@@ -927,10 +829,9 @@ struct CodexFloatingHUDView: View {
         )
     }
 
-    private func performPromptShortcut(_ shortcut: CodexPromptShortcut, presentation: HUDPresentation) {
+    private func performPromptShortcut(_ shortcut: CodexPromptShortcut) {
         guard !isPromptShortcutInFlight,
               layoutState.isCodexFocused,
-              presentation.isAccessibilityTrusted,
               !ClipboardPasteService.isTemporaryOperationInFlight else { return }
         isPromptShortcutInFlight = true
         promptShortcut(shortcut) { _ in

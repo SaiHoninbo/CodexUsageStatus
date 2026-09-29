@@ -18,21 +18,6 @@ enum CodexPromptShortcut: String, CaseIterable, Equatable {
     case fullVerification = "完整驗證"
     case commitAndPush = "提交並推送"
 
-    static let continueSplitButtonTitle = "go on 送出"
-
-    /// The menu exposes only actions that already have a prompt shortcut and
-    /// dispatch path. Opening the menu never runs or authorizes an action.
-    static let recommendationMenuChoices: [CodexPromptShortcut] = [
-        .continueTask,
-        .fixUntilDone,
-        .fullVerification,
-        .commitAndPush
-    ]
-
-    var recommendationMenuTitle: String {
-        self == .continueTask ? "go on" : rawValue
-    }
-
     var text: String {
         switch self {
         case .continueTask:

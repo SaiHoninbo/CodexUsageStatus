@@ -6144,9 +6144,6 @@ struct CodexUsageStatusTests {
         let shortcuts = CodexPromptShortcut.allCases
         try expect(shortcuts == [.continueTask, .fixUntilDone, .fullVerification, .commitAndPush], "workflow shortcuts preserve the four-case order")
         try expect(shortcuts.map(\.rawValue) == ["繼續執行", "修到完成", "完整驗證", "提交並推送"], "workflow labels use the Chinese product language")
-        try expect(CodexPromptShortcut.continueSplitButtonTitle == "go on 送出", "Continue split-button main action is explicit")
-        try expect(CodexPromptShortcut.recommendationMenuChoices == [.continueTask, .fixUntilDone, .fullVerification, .commitAndPush], "recommendation menu exposes only existing prompt shortcuts")
-        try expect(CodexPromptShortcut.recommendationMenuChoices.map(\.recommendationMenuTitle) == ["go on", "修到完成", "完整驗證", "提交並推送"], "recommendation menu labels map to existing actions")
         try expect(shortcuts.map(\.text) == [
             "go on",
             "請依目前最新的 Repo 狀態繼續處理目前工作。自動修復可修復問題、重新執行受影響的驗證，持續完成工作；只有遇到真正的重大阻塞才停止。不要因例行批准或已決定事項停止。",
