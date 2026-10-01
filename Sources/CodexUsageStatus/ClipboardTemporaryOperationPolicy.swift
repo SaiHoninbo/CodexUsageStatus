@@ -123,8 +123,10 @@ enum ClipboardPasteSettlePolicy {
             : safeRichContentSettle
     }
 
-    static func temporarySubmitSettle(for shortcut: CodexPromptShortcut) -> TimeInterval {
-        shortcut == .continueTask ? shortTextSettle : safeRichContentSettle
+    static func temporarySubmitSettle(for _: CodexPromptShortcut) -> TimeInterval {
+        // Cmd-V is asynchronous. Keep the temporary payload available long
+        // enough for Codex to consume it before Return and clipboard restore.
+        safeRichContentSettle
     }
 
     static func isPlainTextOnly(itemTypeIdentifiers: [[String]]) -> Bool {

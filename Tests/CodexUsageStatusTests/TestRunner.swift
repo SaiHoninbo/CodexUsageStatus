@@ -6698,8 +6698,9 @@ struct CodexUsageStatusTests {
 
     private static func testClipboardLatencyAndActivationPolicies() throws {
         try expect(
-            ClipboardPasteSettlePolicy.temporarySubmitSettle(for: .continueTask) == 0.03,
-            "known temporary Continue text uses the bounded short submit settle"
+            ClipboardPasteSettlePolicy.temporarySubmitSettle(for: .continueTask)
+                == ClipboardPasteSettlePolicy.safeRichContentSettle,
+            "temporary Continue text stays on the pasteboard until Codex can consume Cmd-V"
         )
         try expect(
             ClipboardPasteSettlePolicy.normalSubmitSettle(
