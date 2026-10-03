@@ -6036,7 +6036,7 @@ struct CodexUsageStatusTests {
         // The core-test executable has no release bundle, so AppVersion.current
         // resolves to "dev". Validate the canonical artifact against the
         // release version baked into the current packaging script instead.
-        let expectedArtifactVersion = "2.4.126"
+        let expectedArtifactVersion = "2.4.130"
         let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, expectedArtifactVersion])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 
@@ -6699,8 +6699,8 @@ struct CodexUsageStatusTests {
     private static func testClipboardLatencyAndActivationPolicies() throws {
         try expect(
             ClipboardPasteSettlePolicy.temporarySubmitSettle(for: .continueTask)
-                == ClipboardPasteSettlePolicy.safeRichContentSettle,
-            "temporary Continue text stays on the pasteboard until Codex can consume Cmd-V"
+                == ClipboardPasteSettlePolicy.shortTextSettle,
+            "temporary Continue text uses the known-good short submit settle"
         )
         try expect(
             ClipboardPasteSettlePolicy.normalSubmitSettle(
