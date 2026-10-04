@@ -12,6 +12,10 @@ struct HUDMetrics: Equatable {
     // grid need more vertical room than the retired two-line summary.
     static let canonicalTokenSummaryHeight: CGFloat = 78
     static let canonicalTokenSummaryGap: CGFloat = 5
+    // The tracking section is intentionally bounded. Cards beyond this
+    // height stay reachable through the section's own ScrollView.
+    static let canonicalChatTrackingSectionHeight: CGFloat = 238
+    static let canonicalChatTrackingGap: CGFloat = 6
     static let canonicalPanelWidth: CGFloat = 416
     static let canonicalOuterPadding: CGFloat = 11
     static let canonicalHeaderHeight: CGFloat = 22
@@ -68,14 +72,21 @@ struct HUDMetrics: Equatable {
     /// the compatibility default; accounts with one or three windows shrink or
     /// grow only by the quota column delta, so no empty placeholder row is
     /// reserved in the HUD.
-    func panelSize(quotaRowCount: Int, includesAccountInfoRow: Bool = false) -> CGSize {
+    func panelSize(
+        quotaRowCount: Int,
+        includesAccountInfoRow: Bool = false,
+        includesChatTrackingSection: Bool = false
+    ) -> CGSize {
         let count = max(1, quotaRowCount)
         let canonicalHeight = Self.canonicalPanelSize.height
         let quotaDelta = quotaColumnHeight(for: count) - quotaColumnHeight(for: Self.canonicalQuotaRowCount)
         let accountInfoDelta = includesAccountInfoRow ? accountInfoSectionHeight + sectionGap : 0
+        let chatTrackingDelta = includesChatTrackingSection
+            ? chatTrackingSectionHeight + chatTrackingGap
+            : 0
         return CGSize(
             width: Self.canonicalPanelSize.width * factor,
-            height: canonicalHeight * factor + quotaDelta + accountInfoDelta
+            height: canonicalHeight * factor + quotaDelta + accountInfoDelta + chatTrackingDelta
         )
     }
     var outerPadding: CGFloat { Self.canonicalOuterPadding * factor }
@@ -93,6 +104,13 @@ struct HUDMetrics: Equatable {
     var workflowActionHeight: CGFloat { actionHeight }
     var tokenSummaryHeight: CGFloat { Self.canonicalTokenSummaryHeight * factor }
     var tokenSummaryGap: CGFloat { Self.canonicalTokenSummaryGap * factor }
+    var chatTrackingSectionHeight: CGFloat { Self.canonicalChatTrackingSectionHeight * factor }
+    var chatTrackingGap: CGFloat { Self.canonicalChatTrackingGap * factor }
+    var chatTrackingScrollHeight: CGFloat {
+        // Reserve the section padding, title, divider, and vertical stack
+        // spacing so the scroll view stays inside the fixed section frame.
+        max(0, chatTrackingSectionHeight - (52 * factor))
+    }
     var workflowActionGap: CGFloat { Self.canonicalWorkflowActionGap * factor }
     var accountInfoSectionHeight: CGFloat { Self.canonicalAccountInfoSectionHeight * factor }
     // Text floors are intentionally physical-size aware. At the compact
@@ -127,9 +145,17 @@ struct HUDMetrics: Equatable {
         verticalContentHeight(for: Self.canonicalQuotaRowCount)
     }
 
-    func verticalContentHeight(for rowCount: Int, includesAccountInfoRow: Bool = false) -> CGFloat {
-        tokenSummaryHeight
+    func verticalContentHeight(
+        for rowCount: Int,
+        includesAccountInfoRow: Bool = false,
+        includesChatTrackingSection: Bool = false
+    ) -> CGFloat {
+        let chatTrackingHeight = includesChatTrackingSection
+            ? chatTrackingSectionHeight + chatTrackingGap
+            : 0
+        return tokenSummaryHeight
             + tokenSummaryGap
+            + chatTrackingHeight
             + headerHeight
             + headerGap
             + quotaColumnHeight(for: rowCount)

@@ -64,6 +64,7 @@ struct CodexFloatingHUDView: View {
     let setHUDScaleLevel: (HUDScaleLevel) -> Void
     let quotaRowCountChanged: (Int) -> Void
     let accountInfoRowVisibilityChanged: (Bool) -> Void
+    let chatTrackingVisibilityChanged: (Bool) -> Void
     let checkForUpdates: () -> Void
     let installUpdate: (AppUpdateRelease) -> Void
     let openReleasePage: () -> Void
@@ -222,6 +223,7 @@ struct CodexFloatingHUDView: View {
             identityEmail: model.currentAccountEmail,
             identityPlan: model.accountHealth?.identity.planType ?? model.snapshot?.planType,
             quota: displayedPresentation,
+            chatExecutions: model.trackedChatExecutions,
             tokenMetrics: model.hudTokenActivityMetrics,
             tokenActivityFeedback: model.hudTokenActivityFeedback,
             tokenActivityIsStale: model.hudTokenActivityIsStale,
@@ -426,10 +428,18 @@ struct CodexFloatingHUDView: View {
         let cornerRadius = FloatingHUDLayout.cornerRadius(for: presentation.scaleLevel)
         let panelSize = metrics.panelSize(
             quotaRowCount: presentation.quotaRowCount,
-            includesAccountInfoRow: presentation.showsAccountInfoRow
+            includesAccountInfoRow: presentation.showsAccountInfoRow,
+            includesChatTrackingSection: !presentation.chatExecutions.isEmpty
         )
         let displayedCredits = presentation.quota?.credits
         VStack(alignment: .leading, spacing: 0) {
+            if !presentation.chatExecutions.isEmpty {
+                chatExecutionTrackingSection(
+                    presentation: presentation,
+                    metrics: metrics
+                )
+                Color.clear.frame(height: metrics.chatTrackingGap)
+            }
             HUDTokenActivitySummaryView(
                 summaryMetrics: presentation.tokenMetrics,
                 feedback: presentation.tokenActivityFeedback,
@@ -500,6 +510,7 @@ struct CodexFloatingHUDView: View {
             syncLiveBaseline()
             quotaRowCountChanged(max(1, livePresentation?.rowCount ?? 1))
             accountInfoRowVisibilityChanged(presentation.showsAccountInfoRow)
+            chatTrackingVisibilityChanged(!presentation.chatExecutions.isEmpty)
         }
         .onChange(of: model.currentProfileID) { _, newProfileID in
             // Never carry quota from one account identity into another. The
@@ -535,6 +546,9 @@ struct CodexFloatingHUDView: View {
         .onChange(of: presentationCache) { _, _ in
             quotaRowCountChanged(max(1, displayedPresentation?.rowCount ?? 1))
             accountInfoRowVisibilityChanged(hudPresentation.showsAccountInfoRow)
+        }
+        .onChange(of: model.trackedChatExecutions) { _, executions in
+            chatTrackingVisibilityChanged(!executions.isEmpty)
         }
         .onChange(of: model.resetCredits) { _, _ in
             accountInfoRowVisibilityChanged(hudPresentation.showsAccountInfoRow)
@@ -577,6 +591,161 @@ struct CodexFloatingHUDView: View {
             try? await Task.sleep(nanoseconds: 1_300_000_000)
             guard !Task.isCancelled else { return }
             decreaseAmount = nil
+        }
+    }
+
+    @ViewBuilder
+    private func chatExecutionTrackingSection(
+        presentation: HUDPresentation,
+        metrics: HUDMetrics
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Label(
+                    "Chat 執行追蹤（\(presentation.chatExecutions.count)）",
+                    systemImage: "bubble.left.and.bubble.right.fill"
+                )
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(selectedHUDPalette.primaryText)
+                Spacer(minLength: 4)
+                Text("完成後保留")
+                    .font(.caption2)
+                    .foregroundStyle(selectedHUDPalette.secondaryText)
+            }
+            Divider()
+                .overlay(selectedHUDPalette.divider)
+            ScrollView(.vertical, showsIndicators: true) {
+                LazyVStack(alignment: .leading, spacing: 7) {
+                    ForEach(presentation.chatExecutions) { execution in
+                        chatExecutionCard(execution)
+                    }
+                }
+            }
+            .frame(height: metrics.chatTrackingScrollHeight)
+        }
+        .padding(8 * metrics.factor)
+        .frame(
+            width: metrics.contentWidth,
+            height: metrics.chatTrackingSectionHeight,
+            alignment: .topLeading
+        )
+        .overlay {
+            Divider()
+                .overlay(selectedHUDPalette.divider)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Chat 執行追蹤")
+        .accessibilityValue("共 \(presentation.chatExecutions.count) 個 Chat")
+    }
+
+    @ViewBuilder
+    private func chatExecutionCard(_ execution: CodexChatExecutionTracking) -> some View {
+        TimelineView(.periodic(from: .now, by: 1)) { timeline in
+            let now = timeline.date
+            HStack(alignment: .top, spacing: 5) {
+                Button {
+                    openCodex()
+                } label: {
+                    chatExecutionCardContent(execution, now: now)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    model.dismissTrackedChatExecution(execution.key)
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption2.weight(.bold))
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(selectedHUDPalette.secondaryText)
+                .accessibilityLabel("移除 \(execution.chatName ?? "Chat")")
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 6)
+            .background(selectedHUDPalette.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(selectedHUDPalette.border.opacity(0.8), lineWidth: 0.7)
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(
+                "\(execution.groupName)，\(execution.chatName ?? "Chat 名稱未取得")，\(execution.state.displayName)"
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func chatExecutionCardContent(
+        _ execution: CodexChatExecutionTracking,
+        now: Date
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(execution.groupName)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(selectedHUDPalette.secondaryText)
+                .lineLimit(1)
+            HStack(spacing: 5) {
+                Image(systemName: execution.isRepository ? "folder.fill" : "bubble.left")
+                    .foregroundStyle(selectedHUDPalette.sevenDay)
+                Text(execution.chatName ?? "Chat 名稱未取得")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(selectedHUDPalette.primaryText)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Text(execution.state.displayName)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(chatExecutionStateColor(execution.state))
+            }
+            HStack(spacing: 6) {
+                Text("模型：\(execution.model.displayText)")
+                    .lineLimit(1)
+                Text("·")
+                Text(chatExecutionDuration(execution, now: now))
+                if let tokens = execution.tokenTotal {
+                    Text("· \(TokenActivityPresentation.tokenCount(tokens)) token")
+                }
+            }
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(selectedHUDPalette.tertiaryText)
+            HStack(spacing: 7) {
+                Text("token/s —")
+                    .font(.caption2.weight(.semibold).monospacedDigit())
+                if execution.state.isTerminal {
+                    Text("ETA —")
+                } else if let estimate = model.estimatedExecution(for: execution.executionProjection, now: now) {
+                    Text(estimate.remainingText ?? "ETA —")
+                    Text(estimate.confidenceText)
+                } else {
+                    Text("ETA —")
+                    Text("信心：—")
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(selectedHUDPalette.tertiaryText)
+        }
+    }
+
+    private func chatExecutionDuration(
+        _ execution: CodexChatExecutionTracking,
+        now: Date
+    ) -> String {
+        let end = execution.completedAt ?? now
+        let seconds = max(0, Int64(end.timeIntervalSince(execution.startedAt)))
+        let minutes = seconds / 60
+        let remainder = seconds % 60
+        return minutes > 0 ? "\(minutes)分 \(remainder)秒" : "\(remainder)秒"
+    }
+
+    private func chatExecutionStateColor(_ state: CodexChatExecutionState) -> Color {
+        switch state {
+        case .running, .toolRunning: return selectedHUDPalette.sevenDay
+        case .waiting: return selectedHUDPalette.warning
+        case .completed: return selectedHUDPalette.secondaryText
+        case .failed, .interrupted: return selectedHUDPalette.warning
         }
     }
 
@@ -1308,7 +1477,10 @@ struct CodexFloatingHUDView: View {
             creditsText = ""
         }
         let workflowText = CodexPromptShortcut.allCases.map(\.rawValue).joined(separator: "、")
-        return "Codex，\(quotaText)\(creditsText)\(planText)，\(presentation.dataAgeText)，帳號 \(presentation.accountEmail ?? "未提供 Email")。提供更新通知、詳細面板、只貼上、貼上並送出與\(workflowText)"
+        let chatText = presentation.chatExecutions.isEmpty
+            ? ""
+            : "，Chat 執行追蹤 \(presentation.chatExecutions.count) 個"
+        return "Codex\(chatText)，\(quotaText)\(creditsText)\(planText)，\(presentation.dataAgeText)，帳號 \(presentation.accountEmail ?? "未提供 Email")。提供更新通知、詳細面板、只貼上、貼上並送出與\(workflowText)"
     }
 
     private func cacheCurrentPresentation() {

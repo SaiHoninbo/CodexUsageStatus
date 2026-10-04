@@ -56,6 +56,9 @@ struct CodexLocalTurnActivityEvent: Equatable, Sendable {
     /// Presentation-only lineage. This never participates in execution
     /// identity, cursor persistence, admission, or terminal matching.
     var presentationLineage: CodexLocalSessionLineage? = nil
+    /// Runtime model metadata is presentation-only. It is never used for
+    /// identity reconciliation or lifecycle admission.
+    var modelMetadata: CodexExecutionModelMetadata? = nil
 
     // Presentation attribution is intentionally not part of event identity.
     // A later session_meta line may enrich an already-observed execution, but
@@ -117,6 +120,17 @@ struct CodexLocalSessionLineage: Equatable, Sendable {
 struct CodexLocalSessionMetadata: Sendable {
     let identity: CodexLocalSessionIdentity?
     let lineage: CodexLocalSessionLineage?
+    let modelMetadata: CodexExecutionModelMetadata?
+
+    init(
+        identity: CodexLocalSessionIdentity?,
+        lineage: CodexLocalSessionLineage?,
+        modelMetadata: CodexExecutionModelMetadata? = nil
+    ) {
+        self.identity = identity
+        self.lineage = lineage
+        self.modelMetadata = modelMetadata
+    }
 }
 
 enum CodexLocalSessionIdentityKind: String, Codable, Equatable, Sendable {
@@ -292,6 +306,8 @@ enum CodexLocalUsageArtifactParser {
         let id: String?
         let cwd: String?
         let git: GitMetadata?
+        let model: String?
+        let modelName: String?
         let parentThreadID: String?
         let threadSource: String?
         let source: SessionMetaSource?
@@ -301,6 +317,8 @@ enum CodexLocalUsageArtifactParser {
             case id
             case cwd
             case git
+            case model
+            case modelName = "model_name"
             case parentThreadID = "parent_thread_id"
             case threadSource = "thread_source"
             case source
@@ -312,6 +330,11 @@ enum CodexLocalUsageArtifactParser {
             id = try values.decodeIfPresent(String.self, forKey: .id)
             cwd = try values.decodeIfPresent(String.self, forKey: .cwd)
             git = try values.decodeIfPresent(GitMetadata.self, forKey: .git)
+            // Some Codex builds expose the model as `model`, others as
+            // `model_name`. Treat non-string shapes as unavailable rather
+            // than rejecting otherwise valid session identity metadata.
+            model = try? values.decode(String.self, forKey: .model)
+            modelName = try? values.decode(String.self, forKey: .modelName)
             parentThreadID = try values.decodeIfPresent(String.self, forKey: .parentThreadID)
             threadSource = try values.decodeIfPresent(String.self, forKey: .threadSource)
             source = try? values.decode(SessionMetaSource.self, forKey: .source)
@@ -428,7 +451,19 @@ enum CodexLocalUsageArtifactParser {
         let lineage: CodexLocalSessionLineage? = (parent != nil || source != .unknown || relation != .unknown)
             ? CodexLocalSessionLineage(parentThreadID: parent, threadSource: source, relationKind: relation, agentRole: role)
             : nil
-        return CodexLocalSessionMetadata(identity: identity, lineage: lineage)
+        let modelName = normalizedMetadataValue(payload.modelName ?? payload.model, maxLength: 128)
+        let modelMetadata = modelName.map {
+            CodexExecutionModelMetadata(
+                displayName: $0,
+                source: .sessionMetadata,
+                confidence: .observed
+            )
+        }
+        return CodexLocalSessionMetadata(
+            identity: identity,
+            lineage: lineage,
+            modelMetadata: modelMetadata
+        )
     }
 
     static func parseSessionIdentity(_ data: Data) -> CodexLocalSessionIdentity? {
@@ -786,6 +821,9 @@ struct CodexLocalUsageCursor: Codable, Equatable, Sendable {
     /// the cursor lets an unchanged, caught-up rollout avoid reopening and
     /// reparsing its head on every observer tick.
     var sessionIdentity: CodexLocalSessionIdentity?
+    /// Presentation-only session model metadata cached with the head identity
+    /// so tail-only scans can continue to label the same Chat.
+    var modelMetadata: CodexExecutionModelMetadata?
     /// Resource metadata used to validate the head-identity cache. Older
     /// cursor files decode these as nil and pay one compatibility read.
     var fileSize: UInt64?
@@ -803,6 +841,7 @@ struct CodexLocalUsageCursor: Codable, Equatable, Sendable {
         case byteOffset
         case threadID
         case sessionIdentity
+        case modelMetadata
         case fileSize
         case modificationTime
         case fileResourceIdentifier
@@ -814,6 +853,7 @@ struct CodexLocalUsageCursor: Codable, Equatable, Sendable {
         byteOffset: UInt64,
         threadID: String? = nil,
         sessionIdentity: CodexLocalSessionIdentity? = nil,
+        modelMetadata: CodexExecutionModelMetadata? = nil,
         fileSize: UInt64? = nil,
         modificationTime: Date? = nil,
         fileResourceIdentifier: String? = nil,
@@ -823,6 +863,7 @@ struct CodexLocalUsageCursor: Codable, Equatable, Sendable {
         self.byteOffset = byteOffset
         self.threadID = threadID
         self.sessionIdentity = sessionIdentity
+        self.modelMetadata = modelMetadata
         self.fileSize = fileSize
         self.modificationTime = modificationTime
         self.fileResourceIdentifier = fileResourceIdentifier
@@ -835,6 +876,7 @@ struct CodexLocalUsageCursor: Codable, Equatable, Sendable {
         byteOffset = try values.decode(UInt64.self, forKey: .byteOffset)
         threadID = try values.decodeIfPresent(String.self, forKey: .threadID)
         sessionIdentity = try values.decodeIfPresent(CodexLocalSessionIdentity.self, forKey: .sessionIdentity)
+        modelMetadata = try values.decodeIfPresent(CodexExecutionModelMetadata.self, forKey: .modelMetadata)
         fileSize = try values.decodeIfPresent(UInt64.self, forKey: .fileSize)
         modificationTime = try values.decodeIfPresent(Date.self, forKey: .modificationTime)
         fileResourceIdentifier = try values.decodeIfPresent(String.self, forKey: .fileResourceIdentifier)
@@ -1439,33 +1481,38 @@ final class CodexLocalUsageObserver {
                 promotedFastPollPaths.insert(path)
             }
 
-                    // A metadata-stable rollout that is already caught up has
-                    // no new bytes to observe. Exit before identity work or
-                    // any FileHandle open/read. Keep the partial-line case
-                    // below: when byteOffset has not reached EOF, the file
-                    // still needs one incremental read even if its metadata
-                    // has not changed since the previous scan.
+            // A metadata-stable rollout that is already caught up has
+            // no new bytes to observe. Exit before identity work or
+            // any FileHandle open/read. Keep the partial-line case
+            // below: when byteOffset has not reached EOF, the file
+            // still needs one incremental read even if its metadata
+            // has not changed since the previous scan.
             if metadataUnchanged, let cursor, cursor.byteOffset == size {
                 continue
             }
 
             let headMetadata: CodexLocalSessionMetadata?
             if metadataUnchanged, let cursor {
-                        // A nil identity is also a resolved result. Keeping
-                        // that distinction prevents an unproven but stable
-                        // rollout from paying the head-read cost forever.
-                        headMetadata = CodexLocalSessionMetadata(identity: cursor.sessionIdentity, lineage: nil)
+                // A nil identity is also a resolved result. Keeping
+                // that distinction prevents an unproven but stable
+                // rollout from paying the head-read cost forever.
+                headMetadata = CodexLocalSessionMetadata(
+                    identity: cursor.sessionIdentity,
+                    lineage: nil,
+                    modelMetadata: cursor.modelMetadata
+                )
             } else {
                 sessionIdentityReadCount += 1
                 headMetadata = metadataReader(fileURL)
             }
             let headIdentity = headMetadata?.identity
-                    // A rollout is bound to its first session_meta identity.
-                    // Any later identity change makes the entire file
-                    // ambiguous; subsequent events may still be observed for
-                    // liveness, but can never receive Repo/Chat provenance.
+            // A rollout is bound to its first session_meta identity.
+            // Any later identity change makes the entire file
+            // ambiguous; subsequent events may still be observed for
+            // liveness, but can never receive Repo/Chat provenance.
             var canonicalIdentity = headIdentity
             var canonicalLineage = headMetadata?.lineage
+            var canonicalModelMetadata = headMetadata?.modelMetadata
             var identityIsAmbiguous = cursor?.identityIsAmbiguous ?? false
             if let headIdentity,
                let cursorThreadID = cursor?.threadID,
@@ -1473,22 +1520,24 @@ final class CodexLocalUsageObserver {
                 identityIsAmbiguous = true
             }
             if cursor == nil {
-                        // Existing rollouts are seeded at EOF; a rollout created
-                        // after observation began is a live source and may be
-                        // consumed from its beginning.
+                // Existing rollouts are seeded at EOF; a rollout created
+                // after observation began is a live source and may be
+                // consumed from its beginning.
                 cursor = CodexLocalUsageCursor(
-                            byteOffset: updatedSeededPaths.contains(path) ? size : 0,
-                            threadID: updatedSeededPaths.contains(path) ? (canonicalIdentity?.threadID ?? Self.threadIdentity(for: fileURL)) : nil,
-                            sessionIdentity: canonicalIdentity,
-                            fileSize: size,
-                            modificationTime: modificationTime,
-                            fileResourceIdentifier: fileResourceIdentifier
+                    byteOffset: updatedSeededPaths.contains(path) ? size : 0,
+                    threadID: updatedSeededPaths.contains(path) ? (canonicalIdentity?.threadID ?? Self.threadIdentity(for: fileURL)) : nil,
+                    sessionIdentity: canonicalIdentity,
+                    modelMetadata: canonicalModelMetadata,
+                    fileSize: size,
+                    modificationTime: modificationTime,
+                    fileResourceIdentifier: fileResourceIdentifier
                 )
                 updatedCursors[path] = cursor!
                 updatedSeededPaths.insert(path)
                 if cursor?.byteOffset == size { continue }
             }
             cursor?.sessionIdentity = canonicalIdentity
+            cursor?.modelMetadata = canonicalModelMetadata
             cursor?.fileSize = size
             cursor?.modificationTime = modificationTime
             cursor?.fileResourceIdentifier = fileResourceIdentifier
@@ -1498,16 +1547,17 @@ final class CodexLocalUsageObserver {
             }
             guard let startingOffset = cursor?.byteOffset else { continue }
             guard startingOffset <= size else {
-                        // A truncated/replaced rollout is not a reason to
-                        // replay its old contents. Re-anchor at EOF and only
-                        // observe future appends.
+                // A truncated/replaced rollout is not a reason to
+                // replay its old contents. Re-anchor at EOF and only
+                // observe future appends.
                 updatedCursors[path] = CodexLocalUsageCursor(
-                            byteOffset: size,
-                            threadID: canonicalIdentity?.threadID ?? Self.threadIdentity(for: fileURL),
-                            sessionIdentity: canonicalIdentity,
-                            fileSize: size,
-                            modificationTime: modificationTime,
-                            fileResourceIdentifier: fileResourceIdentifier
+                    byteOffset: size,
+                    threadID: canonicalIdentity?.threadID ?? Self.threadIdentity(for: fileURL),
+                    sessionIdentity: canonicalIdentity,
+                    modelMetadata: canonicalModelMetadata,
+                    fileSize: size,
+                    modificationTime: modificationTime,
+                    fileResourceIdentifier: fileResourceIdentifier
                 )
                 continue
             }
@@ -1546,6 +1596,10 @@ final class CodexLocalUsageObserver {
                                     if canonicalLineage == nil {
                                         canonicalLineage = observedMetadata.lineage
                                     }
+                                    if let observedModelMetadata = observedMetadata.modelMetadata {
+                                        canonicalModelMetadata = observedModelMetadata
+                                        cursor?.modelMetadata = observedModelMetadata
+                                    }
                                 }
                                 cursor?.identityIsAmbiguous = identityIsAmbiguous
                             }
@@ -1570,7 +1624,8 @@ final class CodexLocalUsageObserver {
                                     observedAt: record.observedAt,
                                     programName: provenIdentity == nil ? nil : CodexLocalSessionIndex.threadName(for: record.threadID, in: root.codexHomeURL),
                                     sessionIdentity: provenIdentity,
-                                    presentationLineage: canonicalLineage
+                                    presentationLineage: canonicalLineage,
+                                    modelMetadata: canonicalModelMetadata
                                 ))
                             }
                             if let activity = CodexLocalUsageArtifactParser.parseTurnActivity(lineData, threadID: threadID) {
@@ -1612,7 +1667,8 @@ final class CodexLocalUsageObserver {
                                     observedAt: activity.observedAt,
                                     programName: programName,
                                     sessionIdentity: provenIdentity,
-                                    presentationLineage: canonicalLineage
+                                    presentationLineage: canonicalLineage,
+                                    modelMetadata: canonicalModelMetadata
                                 ))
                             }
                             if let completion = CodexLocalUsageArtifactParser.parseTurnCompletion(

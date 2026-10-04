@@ -46,6 +46,9 @@ struct HUDPresentation: Equatable {
     let identityEmail: String?
     let identityPlan: String?
     let quota: HUDDualQuotaPresentation?
+    /// Runtime Chat cards shown above the existing HUD content. The array is
+    /// already filtered by the ViewModel's single tracking writer.
+    let chatExecutions: [CodexChatExecutionTracking]
     let tokenMetrics: [TokenActivityMetric]?
     /// A local-observation token update event. Account lifetime refreshes,
     /// cache hydration, account switches, and chart-range changes publish

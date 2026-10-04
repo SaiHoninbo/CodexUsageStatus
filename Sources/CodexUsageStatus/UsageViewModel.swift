@@ -62,8 +62,12 @@ final class UsageViewModel: ObservableObject {
     /// physical roots. The selected account's `activeTurn` remains the HUD
     /// authority; this collection is only the Overview's multi-execution view.
     @Published private(set) var activeExecutions: [CodexExecutionProjection] = []
+    /// HUD Chat tracking is a presentation projection fed by the same local
+    /// lifecycle observer. Terminal cards remain until the user removes them.
+    @Published private(set) var trackedChatExecutions: [CodexChatExecutionTracking] = []
     private var activeExecutionObservationEpoch: UInt64?
     private var retiredActiveExecutionKeys: Set<CodexExecutionKey> = []
+    private var dismissedChatExecutionKeys: Set<CodexChatExecutionKey> = []
     /// Observer-based estimates are separate from provider Plan snapshots and
     /// are derived only from bounded local Turn duration evidence.
     @Published private(set) var executionEstimationHistoryReady = false
@@ -496,6 +500,8 @@ final class UsageViewModel: ObservableObject {
         updateCheckTimer = nil
         localUsageObserver?.stop()
         activeExecutions.removeAll()
+        trackedChatExecutions.removeAll()
+        dismissedChatExecutionKeys.removeAll()
         retiredActiveExecutionKeys.removeAll()
         client.stop()
         accountManagementService.stopAllLogins()
@@ -1525,11 +1531,163 @@ final class UsageViewModel: ObservableObject {
         }
     }
 
+    private func updateTrackedChatExecution(_ event: CodexLocalTurnActivityEvent) {
+        guard localUsageObserver?.containsObservationRoot(event.physicalRootURL) == true else { return }
+        let key = CodexChatExecutionTrackingPolicy.key(for: event)
+
+        if event.kind == .started {
+            // A new Turn is a new run of the same Chat. A prior user dismissal
+            // applies only to the old card and must not hide the new run.
+            let dismissedKeysToReopen = dismissedChatExecutionKeys.filter {
+                CodexChatExecutionTrackingPolicy.compatible($0, with: key)
+            }
+            dismissedKeysToReopen.forEach { dismissedChatExecutionKeys.remove($0) }
+        } else if dismissedChatExecutionKeys.contains(where: {
+            CodexChatExecutionTrackingPolicy.compatible($0, with: key)
+        }) {
+            return
+        }
+
+        let exactIndex = trackedChatExecutions.firstIndex { $0.key == key }
+        let partialIndices = exactIndex == nil
+            ? trackedChatExecutions.indices.filter {
+                CodexChatExecutionTrackingPolicy.compatible(trackedChatExecutions[$0], with: key)
+            }
+            : []
+        guard partialIndices.count <= 1 else { return }
+        let index = exactIndex ?? partialIndices.first
+
+        func normalizedChatName(current: String?, incoming: String?, identityProven: Bool) -> String? {
+            CodexExecutionProjectionPolicy.updatedChatName(
+                current: current,
+                incoming: incoming,
+                identityProven: identityProven
+            )
+        }
+
+        func modelMetadata(current: CodexExecutionModelMetadata) -> CodexExecutionModelMetadata {
+            event.modelMetadata ?? current
+        }
+
+        switch event.kind {
+        case .started:
+            let identity = event.sessionIdentity
+            let card = CodexChatExecutionTracking(
+                key: key,
+                turnID: event.turnID,
+                repositoryDisplayName: identity?.repositoryDisplayName,
+                workspaceDisplayName: identity?.workspaceDisplayName,
+                chatName: event.programName,
+                model: event.modelMetadata ?? .unavailable,
+                state: .running,
+                startedAt: event.startedAt ?? event.observedAt,
+                completedAt: nil,
+                tokenTotal: event.turnTokenTotal,
+                plan: nil,
+                lastObservedAt: event.observedAt,
+                presentationLineage: event.presentationLineage
+            )
+            if let index {
+                trackedChatExecutions[index] = card
+            } else {
+                trackedChatExecutions.append(card)
+            }
+            trackedChatExecutions = CodexChatExecutionTrackingPolicy.sorted(trackedChatExecutions)
+
+        case .tokenUpdated:
+            guard let index else {
+                guard event.turnTokenTotal != nil else { return }
+                let identity = event.sessionIdentity
+                trackedChatExecutions.append(
+                    CodexChatExecutionTracking(
+                        key: key,
+                        turnID: event.turnID,
+                        repositoryDisplayName: identity?.repositoryDisplayName,
+                        workspaceDisplayName: identity?.workspaceDisplayName,
+                        chatName: event.programName,
+                        model: event.modelMetadata ?? .unavailable,
+                        state: .running,
+                        startedAt: event.startedAt ?? event.observedAt,
+                        completedAt: nil,
+                        tokenTotal: event.turnTokenTotal,
+                        plan: nil,
+                        lastObservedAt: event.observedAt,
+                        presentationLineage: event.presentationLineage
+                    )
+                )
+                trackedChatExecutions = CodexChatExecutionTrackingPolicy.sorted(trackedChatExecutions)
+                return
+            }
+            let previousObservedAt = trackedChatExecutions[index].lastObservedAt
+            let identityProven = event.sessionIdentity != nil
+            trackedChatExecutions[index].key = CodexChatExecutionTrackingPolicy.mergedKey(
+                current: trackedChatExecutions[index].key,
+                incoming: key
+            )
+            trackedChatExecutions[index].turnID = event.turnID
+            trackedChatExecutions[index].tokenTotal = event.turnTokenTotal ?? trackedChatExecutions[index].tokenTotal
+            trackedChatExecutions[index].lastObservedAt = CodexExecutionProjectionPolicy.monotonicLastObservedAt(
+                current: previousObservedAt,
+                incoming: event.observedAt
+            )
+            trackedChatExecutions[index].chatName = normalizedChatName(
+                current: trackedChatExecutions[index].chatName,
+                incoming: event.programName,
+                identityProven: identityProven
+            )
+            if let identity = event.sessionIdentity {
+                trackedChatExecutions[index].repositoryDisplayName = identity.repositoryDisplayName ?? trackedChatExecutions[index].repositoryDisplayName
+                trackedChatExecutions[index].workspaceDisplayName = identity.workspaceDisplayName ?? trackedChatExecutions[index].workspaceDisplayName
+            }
+            trackedChatExecutions[index].model = modelMetadata(current: trackedChatExecutions[index].model)
+            if let lineage = event.presentationLineage {
+                trackedChatExecutions[index].presentationLineage = lineage
+            }
+            trackedChatExecutions = CodexChatExecutionTrackingPolicy.sorted(trackedChatExecutions)
+
+        case .completed, .failed, .interrupted:
+            guard let index else { return }
+            trackedChatExecutions[index].key = CodexChatExecutionTrackingPolicy.mergedKey(
+                current: trackedChatExecutions[index].key,
+                incoming: key
+            )
+            trackedChatExecutions[index].turnID = event.turnID
+            trackedChatExecutions[index].state = {
+                switch event.kind {
+                case .completed: return .completed
+                case .failed: return .failed
+                case .interrupted: return .interrupted
+                default: return trackedChatExecutions[index].state
+                }
+            }()
+            trackedChatExecutions[index].completedAt = event.completedAt ?? event.observedAt
+            trackedChatExecutions[index].lastObservedAt = CodexExecutionProjectionPolicy.monotonicLastObservedAt(
+                current: trackedChatExecutions[index].lastObservedAt,
+                incoming: event.observedAt
+            )
+            trackedChatExecutions[index].tokenTotal = event.turnTokenTotal ?? trackedChatExecutions[index].tokenTotal
+            trackedChatExecutions[index].chatName = normalizedChatName(
+                current: trackedChatExecutions[index].chatName,
+                incoming: event.programName,
+                identityProven: event.sessionIdentity != nil
+            )
+            trackedChatExecutions[index].model = modelMetadata(current: trackedChatExecutions[index].model)
+            trackedChatExecutions = CodexChatExecutionTrackingPolicy.sorted(trackedChatExecutions)
+        }
+    }
+
+    func dismissTrackedChatExecution(_ key: CodexChatExecutionKey) {
+        dismissedChatExecutionKeys.insert(key)
+        trackedChatExecutions.removeAll { $0.key == key }
+    }
+
     private func handleActiveExecutionReconciliation(
         _ reconciliation: CodexLocalActiveExecutionReconciliation
     ) {
         if reconciliation.resetActiveExecutions {
             activeExecutions.removeAll()
+            trackedChatExecutions.removeAll()
+            dismissedChatExecutionKeys.removeAll()
             retiredActiveExecutionKeys.removeAll()
             activeExecutionObservationEpoch = reconciliation.observationEpoch
             return
@@ -1621,14 +1779,32 @@ final class UsageViewModel: ObservableObject {
 
     private func applyPlanToActiveExecution(profileID: UUID?, envelope: TurnPlanEnvelope) {
         let turnID = envelope.turnID
+        let trackedCandidates = trackedChatExecutions.indices.filter { index in
+            let card = trackedChatExecutions[index]
+            guard card.key.profileID == profileID,
+                  card.turnID == turnID else { return false }
+            if let threadID = envelope.optionalThreadID {
+                return card.key.threadID == threadID
+            }
+            return true
+        }
         let candidates = activeExecutions.indices.filter { index in
             let execution = activeExecutions[index]
             guard execution.key.profileID == profileID, execution.key.turnID == turnID else { return false }
             if let threadID = envelope.optionalThreadID { return execution.key.threadID == threadID }
             return true
         }
+        let steps = TurnPlanCodec.decodeSteps(from: envelope)
+        if trackedCandidates.count == 1, let trackedIndex = trackedCandidates.first {
+            trackedChatExecutions[trackedIndex].plan = steps.flatMap { $0.isEmpty ? nil : TurnPlanSnapshot(
+                profileID: profileID,
+                threadID: trackedChatExecutions[trackedIndex].key.threadID,
+                turnID: turnID,
+                steps: $0
+            ) }
+        }
         guard candidates.count == 1, let index = candidates.first else { return }
-        guard let steps = TurnPlanCodec.decodeSteps(from: envelope), !steps.isEmpty else {
+        guard let steps, !steps.isEmpty else {
             activeExecutions[index].plan = nil
             return
         }
@@ -1649,6 +1825,7 @@ final class UsageViewModel: ObservableObject {
         // Maintain the all-roots execution projection first. The selected
         // account filter below only governs the existing single Turn card/HUD.
         updateActiveExecutionProjection(event)
+        updateTrackedChatExecution(event)
         // Only the physical root selected by the current account context may
         // drive the visible Turn card. Other roots still feed their own local
         // ledger, but can never overwrite the current account's activity.
@@ -2302,6 +2479,8 @@ final class UsageViewModel: ObservableObject {
         historySamples = historyStore.samples
         historyErrorMessage = historyStore.errorMessage
         activeTurnPlan = nil
+        trackedChatExecutions.removeAll()
+        dismissedChatExecutionKeys.removeAll()
         tokenActivity = nil
         tokenActivityLastFetchedAt = nil
         hudTokenActivityFeedback = nil

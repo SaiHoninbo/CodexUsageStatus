@@ -2609,6 +2609,7 @@ struct CodexUsageStatusTests {
                     fiveHour: fiveHour,
                     sevenDay: sevenDay
                 ),
+                chatExecutions: [],
                 tokenMetrics: [
                     TokenActivityMetric(label: TokenActivityPresentation.lifetimeLabel, value: tokenValue),
                     TokenActivityMetric(label: TokenActivityPresentation.peakLabel, value: "575,763,278"),
@@ -6036,7 +6037,7 @@ struct CodexUsageStatusTests {
         // The core-test executable has no release bundle, so AppVersion.current
         // resolves to "dev". Validate the canonical artifact against the
         // release version baked into the current packaging script instead.
-        let expectedArtifactVersion = "2.4.131"
+        let expectedArtifactVersion = "2.4.132"
         let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, expectedArtifactVersion])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 
