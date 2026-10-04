@@ -6036,7 +6036,7 @@ struct CodexUsageStatusTests {
         // The core-test executable has no release bundle, so AppVersion.current
         // resolves to "dev". Validate the canonical artifact against the
         // release version baked into the current packaging script instead.
-        let expectedArtifactVersion = "2.4.130"
+        let expectedArtifactVersion = "2.4.131"
         let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, expectedArtifactVersion])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 
@@ -6151,6 +6151,9 @@ struct CodexUsageStatusTests {
             "請檢查目前 Repo、分支、working tree、diff、驗證狀態與敏感內容風險。若目前變更安全且驗證充分，建立適當的 commit 並推送到既有 upstream。若遇到 Repo 身分不符、分支或遠端目標異常、秘密外洩、破壞性 Git 操作或範圍不符等重大風險，請停止並回報。"
         ], "workflow payloads use Chinese instructions")
         try expect(shortcuts.map(\.submitPolicy) == [.singleReturn, .pasteOnly, .pasteOnly, .pasteOnly], "Continue requests exactly one Return; other workflow shortcuts remain paste-only")
+        try expect(shortcuts.map(ContinuePromptTransportPolicy.usesDirectUnicodeText(for:)) == [true, false, false, false], "only Continue uses direct Unicode text transport")
+        try expect(ContinuePromptTransportPolicy.unicodeUnits(for: "go on") == Array("go on".utf16), "Continue text converts to exact Unicode keyboard payload")
+        try expect(ContinuePromptTransportPolicy.unicodeUnits(for: "") == nil, "empty direct text fails closed")
         try expect(shortcuts.allSatisfy { $0.accessibilityLabel == $0.rawValue }, "accessibility uses concise labels")
         try expect(CodexPromptShortcut.commitAndPush.helpText.contains("不會自動送出"), "submit-sensitive workflow explains paste-only behavior")
         try expect(CodexPromptShortcut.continueTask.helpText.contains("後續動作依目前對話指示與權限決定"), "Continue describes the conversation-level effect without claiming downstream tool actions")

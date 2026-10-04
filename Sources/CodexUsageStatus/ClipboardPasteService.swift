@@ -173,6 +173,23 @@ enum ClipboardPasteService {
             return
         }
 
+        if ContinuePromptTransportPolicy.usesDirectUnicodeText(for: shortcut) {
+            guard let target = processID.flatMap(NSRunningApplication.init),
+                  isCodexApplication(target),
+                  isTargetFrontmost(target) else {
+                timing.mark("aborted", detail: "continue_target_not_verified_frontmost")
+                completion(false)
+                return
+            }
+            performContinueDirectUnicodeText(
+                shortcut.text,
+                target: target,
+                timing: timing,
+                completion: completion
+            )
+            return
+        }
+
         guard let target = processID.flatMap(NSRunningApplication.init)
                 ?? NSWorkspace.shared.runningApplications.first(where: isCodexApplication),
               isCodexApplication(target) else {
@@ -1188,6 +1205,85 @@ enum ClipboardPasteService {
         keyDown.post(tap: .cghidEventTap)
         keyUp.post(tap: .cghidEventTap)
         return true
+    }
+
+    private static func postUnicodeText(_ text: String) -> Bool {
+        guard let units = ContinuePromptTransportPolicy.unicodeUnits(for: text),
+              let source = CGEventSource(stateID: .hidSystemState),
+              let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
+            return false
+        }
+
+        let unicodePayloadConfigured = units.withUnsafeBufferPointer { buffer -> Bool in
+            guard let baseAddress = buffer.baseAddress else { return false }
+            keyDown.keyboardSetUnicodeString(
+                stringLength: buffer.count,
+                unicodeString: baseAddress
+            )
+            return true
+        }
+        guard unicodePayloadConfigured else { return false }
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
+        return true
+    }
+
+    private static func performContinueDirectUnicodeText(
+        _ text: String,
+        target: NSRunningApplication,
+        timing: ClipboardPasteTimingProbe,
+        completion: @escaping (Bool) -> Void
+    ) {
+        let token = UUID()
+        activeTemporaryOperationToken = token
+        defer {
+            if activeTemporaryOperationToken == token {
+                activeTemporaryOperationToken = nil
+            }
+        }
+
+        guard isEventPostingAuthorized() else {
+            timing.mark("aborted", detail: "accessibility_not_trusted")
+            promptForAccessibilityPermissionIfNeeded()
+            completion(false)
+            return
+        }
+        guard !target.isTerminated, isTargetFrontmost(target) else {
+            timing.mark("aborted", detail: "continue_target_lost_before_text")
+            completion(false)
+            return
+        }
+
+        timing.mark("continue_direct_text_begin", detail: "transport=quartz_unicode")
+        guard postUnicodeText(text) else {
+            timing.mark("aborted", detail: "continue_unicode_event_creation_failed")
+            completion(false)
+            return
+        }
+        timing.mark("temporary_text_prepared", detail: "transport=quartz_unicode")
+        timing.mark("continue_unicode_text_posted", detail: "transport=quartz_unicode")
+
+        guard isEventPostingAuthorized(),
+              !target.isTerminated,
+              isTargetFrontmost(target) else {
+            timing.mark("aborted", detail: "continue_target_or_authority_lost_before_return")
+            completion(false)
+            return
+        }
+
+        timing.mark(
+            "submit_settle_policy_resolved",
+            detail: "kind=temporary_text delay_ms=0 transport=quartz_unicode"
+        )
+        guard postKey(keyCode: 36) else {
+            timing.mark("return_post_failed", detail: "continue_direct")
+            completion(false)
+            return
+        }
+        timing.mark("return_posted", detail: "temporary transport=quartz_unicode")
+        timing.mark("completion_callback", detail: "continue_direct_return_posted")
+        completion(true)
     }
 
     private static func isEventPostingAuthorized() -> Bool {

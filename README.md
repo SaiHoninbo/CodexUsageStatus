@@ -46,7 +46,8 @@ Most monitoring features do not require Accessibility permission. Enable Accessi
 
 - **Paste clipboard**: sends `⌘V` to the foreground Codex window.
 - **Paste and submit**: sends `⌘V`, waits for the paste to finish, then sends one Return/Enter.
-- **Workflow shortcuts**: insert the app's predefined prompt into Codex's focused, writable text field through Accessibility. The app validates the foreground Codex process and focused field, and does not read composer text. Paste-only shortcuts never submit; **Continue** posts one Return only after confirming that the same field still has focus. If direct insertion fails before writing, the existing clipboard path is used once.
+- **Continue**: sends the fixed text `go on` as Unicode keyboard events, followed by one Return. It verifies the requested foreground Codex process and Accessibility permission before dispatch, and rechecks the target and permission before Return.
+- **Other workflow shortcuts**: temporarily place the predefined prompt on the clipboard, paste it into Codex, and restore the previous clipboard while the operation still owns it. Fix until done, Full verification, and Commit and push paste only.
 
 Open **System Settings → Privacy & Security → Accessibility** and enable `CodexUsageStatus.app` when paste/event posting is not trusted. The HUD re-reads live Accessibility/TCC state whenever the app launches or returns to the foreground; it never persists a stale "granted" flag. Releases keep the stable `com.openai.codex-usage-status` bundle identifier and `/Applications/CodexUsageStatus.app` path so macOS can retain the grant across an in-place update. Because releases use ad-hoc signing, macOS may still require authorization again; only follow the remediation when the app reports that permission is actually unavailable.
 

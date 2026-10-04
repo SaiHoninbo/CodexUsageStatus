@@ -215,3 +215,14 @@ enum ClipboardTemporaryOperationPolicy {
         observedText == expectedText && currentChangeCount == preparedChangeCount
     }
 }
+
+enum ContinuePromptTransportPolicy {
+    static func usesDirectUnicodeText(for shortcut: CodexPromptShortcut) -> Bool {
+        shortcut == .continueTask
+    }
+
+    static func unicodeUnits(for text: String) -> [UniChar]? {
+        guard !text.isEmpty else { return nil }
+        return Array(text.utf16)
+    }
+}
