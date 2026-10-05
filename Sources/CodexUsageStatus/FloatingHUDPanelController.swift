@@ -722,10 +722,16 @@ final class FloatingHUDPanelController: NSObject {
     }
 
     private func setChatTrackingContentHeight(_ height: CGFloat) {
-        let normalized = max(0, height.isFinite ? height : 0)
-        guard abs(layoutState.chatTrackingMeasuredContentHeight - normalized) > 0.5 else { return }
-        layoutState.chatTrackingMeasuredContentHeight = normalized
-        setChatTrackingVisibility(normalized > 0)
+        let measurement = HUDChatTrackingMeasurementPolicy.resolve(
+            hasCards: !model.trackedChatExecutions.isEmpty,
+            currentContentHeight: layoutState.chatTrackingMeasuredContentHeight,
+            reportedContentHeight: height
+        )
+        let heightChanged = abs(layoutState.chatTrackingMeasuredContentHeight - measurement.contentHeight) > 0.5
+        let visibilityChanged = layoutState.showsChatTrackingSection != measurement.isVisible
+        guard heightChanged || visibilityChanged else { return }
+        layoutState.chatTrackingMeasuredContentHeight = measurement.contentHeight
+        setChatTrackingVisibility(measurement.isVisible)
     }
 
     private func setChatTrackingVisibility(_ visible: Bool) {
@@ -735,6 +741,18 @@ final class FloatingHUDPanelController: NSObject {
             quotaRowCount: layoutState.quotaRowCount,
             includesAccountInfoRow: layoutState.showsAccountInfoRow
         ).height
+        let oldPanelSize = panel?.frame.size ?? layoutState.size
+        let oldOrigin = panel?.frame.origin ?? .zero
+        let availableTrackingSectionHeight: CGFloat? = panel.flatMap { _ in
+            lastCodexVisibleFrame.map { visibleFrame in
+                HUDChatTrackingGeometryPolicy.availableSectionHeight(
+                    screenMaxY: visibleFrame.maxY,
+                    basePanelBottomY: oldOrigin.y,
+                    basePanelHeight: basePanelHeight,
+                    sectionGap: metrics.chatTrackingGap
+                )
+            }
+        }
         let factor = metrics.factor
         let estimatedCardHeights = executions.map { execution -> CGFloat in
             let text = execution.chatName ?? "Chat 名稱未取得"
@@ -747,16 +765,13 @@ final class FloatingHUDPanelController: NSObject {
         let geometry = HUDChatTrackingGeometryPolicy.resolve(
             cardContentHeights: measuredOrEstimated,
             scaleFactor: factor,
-            basePanelHeight: basePanelHeight,
-            availableScreenHeight: lastCodexVisibleFrame?.height
+            availableTrackingSectionHeight: availableTrackingSectionHeight
         )
         let newVisible = visible && !executions.isEmpty
         let geometryChanged = abs(layoutState.chatTrackingSectionHeight - geometry.sectionHeight) > 0.5
         let visibilityChanged = newVisible != layoutState.showsChatTrackingSection
         guard visibilityChanged || geometryChanged else { return }
 
-        let oldPanelSize = panel?.frame.size ?? layoutState.size
-        let oldOrigin = panel?.frame.origin ?? .zero
         let placement = layoutState.placement
         layoutState.chatTrackingSectionHeight = geometry.sectionHeight
         layoutState.chatTrackingRequiresScroll = geometry.requiresScroll
@@ -770,19 +785,20 @@ final class FloatingHUDPanelController: NSObject {
         )
         layoutState.showsChatTrackingSection = newVisible
         guard let panel else { return }
-        let targetFrame = lastCodexWindowFrame
-        let visibleFrame = lastCodexVisibleFrame
-        let resizedOrigin = targetFrame.map {
-            HUDPlacementPolicy.resizedOrigin(
-                origin: oldOrigin, targetFrame: $0, oldPanelSize: oldPanelSize,
-                newPanelSize: newSize, placement: placement
-            )
-        } ?? oldOrigin
+        let resizedOrigin = HUDPlacementPolicy.chatTrackingResizeOrigin(
+            origin: oldOrigin,
+            oldPanelSize: oldPanelSize,
+            newPanelSize: newSize
+        )
         applySize(newSize, to: panel)
-        let correctedOrigin = visibleFrame.map { clampedOrigin(resizedOrigin, panelSize: newSize, visibleFrame: $0) } ?? resizedOrigin
-        panel.setFrameOrigin(correctedOrigin)
-        if let targetFrame {
-            saveAnchor(origin: correctedOrigin, targetFrame: targetFrame, panelSize: newSize, placement: placement)
+        panel.setFrameOrigin(resizedOrigin)
+        if let targetFrame = lastCodexWindowFrame {
+            saveAnchor(
+                origin: resizedOrigin,
+                targetFrame: targetFrame,
+                panelSize: newSize,
+                placement: placement
+            )
         }
         lastPositionedPanelSize = newSize
         if hasEstablishedPosition, lastKnownSafePanelFrame != nil {
@@ -1346,8 +1362,15 @@ final class FloatingHUDPanelController: NSObject {
         // a visible HUD without moving it to a guessed screen.
         let visibleFrame = displayMapping.screen.visibleFrame
 
+        let visibleFrameChanged = HUDChatTrackingGeometryPolicy.visibleFrameDidChange(
+            previous: lastCodexVisibleFrame,
+            current: visibleFrame
+        )
         lastCodexWindowFrame = targetFrame
         lastCodexVisibleFrame = visibleFrame
+        if visibleFrameChanged {
+            requestGeometryRefresh()
+        }
 
         // The HUD is refreshed every second so it can follow Codex, but a
         // repeated frame read must not re-apply the same anchor. Window-list

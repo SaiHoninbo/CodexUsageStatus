@@ -558,7 +558,9 @@ struct CodexFloatingHUDView: View {
             accountInfoRowVisibilityChanged(hudPresentation.showsAccountInfoRow)
         }
         .onChange(of: model.trackedChatExecutions) { _, executions in
-            chatTrackingContentHeightChanged(0)
+            if executions.isEmpty {
+                chatTrackingContentHeightChanged(0)
+            }
         }
         .onChange(of: model.resetCredits) { _, _ in
             accountInfoRowVisibilityChanged(hudPresentation.showsAccountInfoRow)
@@ -723,7 +725,7 @@ struct CodexFloatingHUDView: View {
                     .foregroundStyle(selectedHUDPalette.tertiaryText)
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         let rate = execution.tokenRateWindow.rate(at: now)
-                        Text("近窗平均 Token/s：\(rate.displayText)")
+                        Text("近窗 Token 消耗率：\(rate.displayText)")
                             .font(.system(size: 11 * metricsFactor, weight: .semibold, design: .rounded).monospacedDigit())
                         if execution.state.isTerminal {
                             Text("ETA —")

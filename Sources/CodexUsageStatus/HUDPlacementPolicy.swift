@@ -97,4 +97,17 @@ enum HUDPlacementPolicy {
             panelSize: newPanelSize
         )
     }
+
+    /// Chat tracking is inserted above the base HUD. Keep the base HUD's
+    /// bottom and right edges fixed while the tracking section grows or shrinks.
+    static func chatTrackingResizeOrigin(
+        origin point: CGPoint,
+        oldPanelSize: CGSize,
+        newPanelSize: CGSize
+    ) -> CGPoint {
+        CGPoint(
+            x: point.x + oldPanelSize.width - newPanelSize.width,
+            y: point.y
+        )
+    }
 }

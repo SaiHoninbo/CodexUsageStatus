@@ -12,12 +12,61 @@ struct HUDChatTrackingGeometry: Equatable, Sendable {
     let requiresScroll: Bool
 }
 
+struct HUDChatTrackingMeasurement: Equatable, Sendable {
+    let isVisible: Bool
+    let contentHeight: CGFloat
+}
+
+enum HUDChatTrackingMeasurementPolicy {
+    /// Card presence controls visibility. A transient zero-height layout pass
+    /// while cards still exist retains the last measured height until SwiftUI
+    /// reports the updated natural size.
+    static func resolve(
+        hasCards: Bool,
+        currentContentHeight: CGFloat,
+        reportedContentHeight: CGFloat
+    ) -> HUDChatTrackingMeasurement {
+        guard hasCards else {
+            return HUDChatTrackingMeasurement(isVisible: false, contentHeight: 0)
+        }
+        let current = currentContentHeight.isFinite ? max(0, currentContentHeight) : 0
+        let reported = reportedContentHeight.isFinite ? max(0, reportedContentHeight) : 0
+        return HUDChatTrackingMeasurement(
+            isVisible: true,
+            contentHeight: reported > 0 ? reported : current
+        )
+    }
+}
+
 enum HUDChatTrackingGeometryPolicy {
+    /// Ignores sub-point screen-read jitter so the one-second positioning
+    /// refresh does not schedule geometry work unless the usable display frame
+    /// actually changed.
+    static func visibleFrameDidChange(
+        previous: CGRect?,
+        current: CGRect,
+        tolerance: CGFloat = 1
+    ) -> Bool {
+        guard let previous else { return true }
+        return abs(previous.minX - current.minX) > tolerance
+            || abs(previous.minY - current.minY) > tolerance
+            || abs(previous.width - current.width) > tolerance
+            || abs(previous.height - current.height) > tolerance
+    }
+
+    static func availableSectionHeight(
+        screenMaxY: CGFloat,
+        basePanelBottomY: CGFloat,
+        basePanelHeight: CGFloat,
+        sectionGap: CGFloat
+    ) -> CGFloat {
+        max(0, screenMaxY - basePanelBottomY - basePanelHeight - sectionGap)
+    }
+
     static func resolve(
         cardContentHeights: [CGFloat],
         scaleFactor: CGFloat,
-        basePanelHeight: CGFloat,
-        availableScreenHeight: CGFloat?,
+        availableTrackingSectionHeight: CGFloat?,
         sectionChromeHeight: CGFloat = 52,
         verticalSafetyMargin: CGFloat = 20
     ) -> HUDChatTrackingGeometry {
@@ -27,8 +76,8 @@ enum HUDChatTrackingGeometryPolicy {
         let chrome = sectionChromeHeight * scaleFactor
         let natural = chrome + cardContentHeights.reduce(0, +)
             + CGFloat(max(0, cardContentHeights.count - 1)) * (7 * scaleFactor)
-        let capacity = availableScreenHeight.map {
-            max(0, $0 - basePanelHeight - verticalSafetyMargin)
+        let capacity = availableTrackingSectionHeight.map {
+            max(0, $0 - verticalSafetyMargin)
         } ?? natural
         let section = min(natural, capacity)
         return HUDChatTrackingGeometry(

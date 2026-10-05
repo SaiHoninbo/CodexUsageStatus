@@ -76,7 +76,14 @@ enum CodexTokenUsageRate: Equatable, Sendable {
         switch self {
         case .calculating: return "計算中"
         case .unavailable: return "—"
-        case .measured(let value, _): return String(format: "%.1f", value)
+        case .measured(let value, _):
+            if value >= 1_000_000 {
+                return String(format: "%.1fM tok/s", locale: Locale(identifier: "en_US_POSIX"), value / 1_000_000)
+            }
+            if value >= 1_000 {
+                return String(format: "%.1fK tok/s", locale: Locale(identifier: "en_US_POSIX"), value / 1_000)
+            }
+            return String(format: "%.1f tok/s", locale: Locale(identifier: "en_US_POSIX"), value)
         }
     }
 }

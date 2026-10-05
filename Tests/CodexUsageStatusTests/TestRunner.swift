@@ -1896,25 +1896,29 @@ struct CodexUsageStatusTests {
     private static func testChatTrackingAdmissionAndRate() throws {
         let root = URL(fileURLWithPath: "/tmp/chat-tracking-policy")
         let base = Date(timeIntervalSince1970: 1_000)
-        let identity = CodexLocalSessionIdentity(
-            threadID: "top-chat", repositoryDisplayName: "Usage", workspaceDisplayName: "Usage",
-            kind: .repository, repositoryIdentityDigest: "repo"
-        )
+        func identity(for thread: String) -> CodexLocalSessionIdentity {
+            CodexLocalSessionIdentity(
+                threadID: thread, repositoryDisplayName: "Usage", workspaceDisplayName: "Usage",
+                kind: .repository, repositoryIdentityDigest: "repo"
+            )
+        }
         func event(
             _ kind: CodexLocalTurnActivityEventKind,
+            thread: String = "top-chat",
             turn: String = "turn-1",
             at seconds: TimeInterval,
             total: Int64? = nil,
             lineage: CodexLocalSessionLineage? = nil,
-            id: CodexLocalSessionIdentity? = identity
+            includeIdentity: Bool = true
         ) -> CodexLocalTurnActivityEvent {
             CodexLocalTurnActivityEvent(
-                profileID: nil, physicalRootURL: root, threadID: "top-chat", turnID: turn,
+                profileID: nil, physicalRootURL: root, threadID: thread, turnID: turn,
                 kind: kind, startedAt: kind == .started ? base.addingTimeInterval(seconds) : nil,
                 completedAt: kind == .completed ? base.addingTimeInterval(seconds) : nil,
                 durationSeconds: nil, turnTokenTotal: total,
                 observedAt: base.addingTimeInterval(seconds), programName: "Main Chat",
-                sessionIdentity: id, presentationLineage: lineage
+                sessionIdentity: includeIdentity ? identity(for: thread) : nil,
+                presentationLineage: lineage
             )
         }
         let user = CodexLocalSessionLineage(parentThreadID: nil, threadSource: .user, relationKind: .unknown, agentRole: nil)
@@ -1930,6 +1934,16 @@ struct CodexUsageStatusTests {
         try expect(state.cards.count == 1 && state.cards[0].state == .completed, "completed top-level card remains retained")
         state = CodexChatExecutionTrackingPolicy.applying(event(.started, turn: "turn-2", at: 20, total: 2, lineage: user), to: state)
         try expect(state.cards.count == 1 && state.cards[0].turnID == "turn-2" && state.cards[0].tokenRateWindow.samples.count == 1, "rerun reuses card and resets its rate window")
+        let tokenUpdatedState = CodexChatExecutionTrackingPolicy.applying(
+            event(.tokenUpdated, turn: "turn-2", at: 21, total: 52, lineage: user),
+            to: state
+        )
+        let retainedMeasurement = HUDChatTrackingMeasurementPolicy.resolve(
+            hasCards: !tokenUpdatedState.cards.isEmpty,
+            currentContentHeight: 368,
+            reportedContentHeight: 0
+        )
+        try expect(retainedMeasurement.isVisible && retainedMeasurement.contentHeight == 368, "token-only updates keep tracking visible and retain the last nonzero measurement")
 
         var rejected = CodexChatTrackingState()
         rejected = CodexChatExecutionTrackingPolicy.applying(event(.started, at: 0, lineage: subagent), to: rejected)
@@ -1937,7 +1951,10 @@ struct CodexUsageStatusTests {
         rejected = CodexChatExecutionTrackingPolicy.applying(event(.started, at: 0, lineage: agentCreated), to: rejected)
         rejected = CodexChatExecutionTrackingPolicy.applying(event(.tokenUpdated, at: 1, total: 50, lineage: subagent), to: rejected)
         rejected = CodexChatExecutionTrackingPolicy.applying(event(.tokenUpdated, at: 1, total: 50, lineage: user), to: rejected)
-        rejected = CodexChatExecutionTrackingPolicy.applying(event(.tokenUpdated, at: 2, total: 50, lineage: nil, id: nil), to: rejected)
+        rejected = CodexChatExecutionTrackingPolicy.applying(
+            event(.tokenUpdated, at: 2, total: 50, lineage: nil, includeIdentity: false),
+            to: rejected
+        )
         rejected = CodexChatExecutionTrackingPolicy.applying(event(.started, turn: "unknown-start", at: 3, lineage: nil), to: rejected)
         try expect(rejected.cards.isEmpty, "subagent, guardian, agent-created, and token-only unknown events cannot admit cards")
 
@@ -1947,17 +1964,272 @@ struct CodexUsageStatusTests {
         try expect(state.cards.isEmpty, "token event cannot resurrect a dismissed card")
 
         let fourCards = Array(repeating: CGFloat(118), count: 4)
+        let availableAboveBase = HUDChatTrackingGeometryPolicy.availableSectionHeight(
+            screenMaxY: 1_000, basePanelBottomY: 120, basePanelHeight: 500, sectionGap: 6
+        )
+        try expect(availableAboveBase == 374, "tracking capacity is measured above the fixed base HUD top")
         let roomy = HUDChatTrackingGeometryPolicy.resolve(
-            cardContentHeights: fourCards, scaleFactor: 1, basePanelHeight: 300, availableScreenHeight: 1_000
+            cardContentHeights: fourCards, scaleFactor: 1, availableTrackingSectionHeight: 1_000
         )
         try expect(!roomy.requiresScroll && roomy.sectionHeight == roomy.naturalHeight, "all active cards fit without scrolling when screen space permits")
         let chatMetrics = HUDMetrics(scaleLevel: .standard, chatTrackingSectionHeight: roomy.sectionHeight)
         try expect(chatMetrics.panelSize(quotaRowCount: 2, includesChatTrackingSection: true).height > HUDMetrics().panelSize.height, "dynamic tracking content grows the panel below the unchanged base HUD")
         let constrained = HUDChatTrackingGeometryPolicy.resolve(
-            cardContentHeights: fourCards, scaleFactor: 1, basePanelHeight: 300, availableScreenHeight: 700
+            cardContentHeights: fourCards, scaleFactor: 1, availableTrackingSectionHeight: 320
         )
         try expect(constrained.requiresScroll && constrained.sectionHeight < constrained.naturalHeight, "scrolling begins only when actual screen capacity is insufficient")
-        try expect(HUDChatTrackingGeometryPolicy.resolve(cardContentHeights: [], scaleFactor: 1, basePanelHeight: 300, availableScreenHeight: 700).sectionHeight == 0, "empty tracking geometry adds no section")
+        let noCards = HUDChatTrackingGeometryPolicy.resolve(
+            cardContentHeights: [], scaleFactor: 1, availableTrackingSectionHeight: 700
+        )
+        try expect(noCards.sectionHeight == 0, "empty tracking geometry adds no section")
+
+        let tallVisibleFrame = CGRect(x: 0, y: 0, width: 1_920, height: 1_200)
+        let shortVisibleFrame = CGRect(x: 1_920, y: 0, width: 1_440, height: 900)
+        let jitteredTallVisibleFrame = CGRect(x: 0.25, y: -0.25, width: 1_920, height: 1_200)
+        try expect(
+            HUDChatTrackingGeometryPolicy.visibleFrameDidChange(previous: nil, current: tallVisibleFrame),
+            "the first verified visible frame schedules a geometry calculation"
+        )
+        try expect(
+            !HUDChatTrackingGeometryPolicy.visibleFrameDidChange(previous: tallVisibleFrame, current: jitteredTallVisibleFrame),
+            "sub-point visible-frame polling jitter does not schedule repeated geometry changes"
+        )
+        try expect(
+            HUDChatTrackingGeometryPolicy.visibleFrameDidChange(previous: tallVisibleFrame, current: shortVisibleFrame),
+            "switching to a materially different display frame schedules geometry recalculation"
+        )
+        let tallTrackingCapacity = HUDChatTrackingGeometryPolicy.availableSectionHeight(
+            screenMaxY: tallVisibleFrame.maxY, basePanelBottomY: 120, basePanelHeight: 500, sectionGap: 6
+        )
+        let shortTrackingCapacity = HUDChatTrackingGeometryPolicy.availableSectionHeight(
+            screenMaxY: shortVisibleFrame.maxY, basePanelBottomY: 120, basePanelHeight: 500, sectionGap: 6
+        )
+        let tallScreenGeometry = HUDChatTrackingGeometryPolicy.resolve(
+            cardContentHeights: fourCards, scaleFactor: 1,
+            availableTrackingSectionHeight: tallTrackingCapacity
+        )
+        let shortScreenGeometry = HUDChatTrackingGeometryPolicy.resolve(
+            cardContentHeights: fourCards, scaleFactor: 1,
+            availableTrackingSectionHeight: shortTrackingCapacity
+        )
+        try expect(!tallScreenGeometry.requiresScroll, "four cards fully expand on the taller display")
+        try expect(shortScreenGeometry.requiresScroll, "four cards switch to scrolling when the shorter display lacks space")
+        let tallScreenSize = HUDMetrics(chatTrackingSectionHeight: tallScreenGeometry.sectionHeight)
+            .panelSize(quotaRowCount: 2, includesChatTrackingSection: true)
+        let shortScreenSize = HUDMetrics(chatTrackingSectionHeight: shortScreenGeometry.sectionHeight)
+            .panelSize(quotaRowCount: 2, includesChatTrackingSection: true)
+        let beforeDisplaySwitchOrigin = CGPoint(x: 1_000, y: 120)
+        let shortScreenOrigin = HUDPlacementPolicy.chatTrackingResizeOrigin(
+            origin: beforeDisplaySwitchOrigin,
+            oldPanelSize: tallScreenSize,
+            newPanelSize: shortScreenSize
+        )
+        try expect(shortScreenSize.height < tallScreenSize.height, "shorter display contracts only the tracking section")
+        try expect(shortScreenOrigin.y == beforeDisplaySwitchOrigin.y, "shorter display keeps the HUD bottom fixed")
+        try expect(
+            shortScreenOrigin.x + shortScreenSize.width == beforeDisplaySwitchOrigin.x + tallScreenSize.width,
+            "shorter display keeps the HUD right edge fixed"
+        )
+        let restoredTallOrigin = HUDPlacementPolicy.chatTrackingResizeOrigin(
+            origin: shortScreenOrigin,
+            oldPanelSize: shortScreenSize,
+            newPanelSize: tallScreenSize
+        )
+        try expect(!tallScreenGeometry.requiresScroll, "returning to the taller display expands the four-card section")
+        try expect(restoredTallOrigin == beforeDisplaySwitchOrigin, "returning to the taller display restores full height without moving bottom or right")
+
+        let oneCard = HUDChatTrackingGeometryPolicy.resolve(
+            cardContentHeights: [118], scaleFactor: 1, availableTrackingSectionHeight: 2_000
+        )
+        let tokenOnlyMeasurement = HUDChatTrackingMeasurementPolicy.resolve(
+            hasCards: !tokenUpdatedState.cards.isEmpty,
+            currentContentHeight: oneCard.naturalHeight,
+            reportedContentHeight: 0
+        )
+        let tokenOnlyGeometry = HUDChatTrackingGeometryPolicy.resolve(
+            cardContentHeights: [118], scaleFactor: 1, availableTrackingSectionHeight: 2_000
+        )
+        let tokenOnlyPanelSize = HUDMetrics(chatTrackingSectionHeight: oneCard.sectionHeight)
+            .panelSize(quotaRowCount: 2, includesChatTrackingSection: true)
+        let panelAfterTokenOnlyUpdate = HUDMetrics(chatTrackingSectionHeight: tokenOnlyGeometry.sectionHeight)
+            .panelSize(quotaRowCount: 2, includesChatTrackingSection: tokenOnlyMeasurement.isVisible)
+        let tokenOnlyOrigin = CGPoint(x: 640, y: 120)
+        let originAfterTokenOnlyUpdate = HUDPlacementPolicy.chatTrackingResizeOrigin(
+            origin: tokenOnlyOrigin,
+            oldPanelSize: tokenOnlyPanelSize,
+            newPanelSize: panelAfterTokenOnlyUpdate
+        )
+        try expect(tokenOnlyMeasurement.isVisible, "token-only update keeps the one-card tracking section visible")
+        try expect(panelAfterTokenOnlyUpdate == tokenOnlyPanelSize, "token-only update leaves the panel size unchanged")
+        try expect(originAfterTokenOnlyUpdate == tokenOnlyOrigin, "token-only update leaves the panel origin unchanged")
+        let twoCards = HUDChatTrackingGeometryPolicy.resolve(
+            cardContentHeights: [118, 118], scaleFactor: 1, availableTrackingSectionHeight: 2_000
+        )
+        let four = HUDChatTrackingGeometryPolicy.resolve(
+            cardContentHeights: fourCards, scaleFactor: 1, availableTrackingSectionHeight: 2_000
+        )
+        let baseMetrics = HUDMetrics()
+        var trackedPanelSize = baseMetrics.panelSize(quotaRowCount: 2)
+        var trackedPanelOrigin = CGPoint(x: 640, y: 120)
+        for geometry in [oneCard, four, twoCards, noCards] {
+            let includesTracking = geometry.sectionHeight > 0
+            let nextSize = HUDMetrics(chatTrackingSectionHeight: geometry.sectionHeight)
+                .panelSize(quotaRowCount: 2, includesChatTrackingSection: includesTracking)
+            let nextOrigin = HUDPlacementPolicy.chatTrackingResizeOrigin(
+                origin: trackedPanelOrigin,
+                oldPanelSize: trackedPanelSize,
+                newPanelSize: nextSize
+            )
+            try expect(nextOrigin.y == trackedPanelOrigin.y, "0→1→4→2→0 cards keep the original HUD bottom fixed")
+            try expect(
+                nextOrigin.x + nextSize.width == trackedPanelOrigin.x + trackedPanelSize.width,
+                "0→1→4→2→0 cards keep the original HUD right edge fixed"
+            )
+            trackedPanelOrigin = nextOrigin
+            trackedPanelSize = nextSize
+        }
+        try expect(trackedPanelSize == baseMetrics.panelSize(quotaRowCount: 2), "removing all cards restores the unchanged base HUD size")
+        let clearedMeasurement = HUDChatTrackingMeasurementPolicy.resolve(
+            hasCards: false,
+            currentContentHeight: 368,
+            reportedContentHeight: 0
+        )
+        try expect(!clearedMeasurement.isVisible && clearedMeasurement.contentHeight == 0, "only an empty Chat set clears tracking visibility and measurement")
+
+        let threeCardHeights = Array(repeating: CGFloat(118), count: 3)
+        let threeCardGeometry = HUDChatTrackingGeometryPolicy.resolve(
+            cardContentHeights: threeCardHeights,
+            scaleFactor: 1,
+            availableTrackingSectionHeight: 2_000
+        )
+        var threeCardSize = HUDMetrics(chatTrackingSectionHeight: threeCardGeometry.sectionHeight)
+            .panelSize(quotaRowCount: 2, includesChatTrackingSection: true)
+        var threeCardOrigin = CGPoint(x: 640, y: 120)
+        let threeThreadIDs = ["top-chat-1", "top-chat-2", "top-chat-3"]
+        var threeChatState = CodexChatTrackingState()
+        for (index, thread) in threeThreadIDs.enumerated() {
+            threeChatState = CodexChatExecutionTrackingPolicy.applying(
+                event(.started, thread: thread, turn: "turn-\(index)", at: TimeInterval(30 + index), total: 100, lineage: user),
+                to: threeChatState
+            )
+        }
+        try expect(threeChatState.cards.count == 3, "the token geometry scenario starts with three distinct tracked chats")
+        for update in 0..<3 {
+            for (index, thread) in threeThreadIDs.enumerated() {
+                threeChatState = CodexChatExecutionTrackingPolicy.applying(
+                    event(
+                        .tokenUpdated,
+                        thread: thread,
+                        turn: "turn-\(index)",
+                        at: TimeInterval(40 + update * 3 + index),
+                        total: Int64(10_000 + update * 2_000 + index),
+                        lineage: user
+                    ),
+                    to: threeChatState
+                )
+            }
+            let updateMeasurement = HUDChatTrackingMeasurementPolicy.resolve(
+                hasCards: !threeChatState.cards.isEmpty,
+                currentContentHeight: threeCardGeometry.naturalHeight,
+                reportedContentHeight: 0
+            )
+            let updateGeometry = HUDChatTrackingGeometryPolicy.resolve(
+                cardContentHeights: threeCardHeights,
+                scaleFactor: 1,
+                availableTrackingSectionHeight: 2_000
+            )
+            let updateSize = HUDMetrics(chatTrackingSectionHeight: updateGeometry.sectionHeight)
+                .panelSize(quotaRowCount: 2, includesChatTrackingSection: updateMeasurement.isVisible)
+            let updateOrigin = HUDPlacementPolicy.chatTrackingResizeOrigin(
+                origin: threeCardOrigin,
+                oldPanelSize: threeCardSize,
+                newPanelSize: updateSize
+            )
+            try expect(threeChatState.cards.count == 3, "token update round \(update + 1) keeps all three tracked cards")
+            try expect(updateGeometry == threeCardGeometry, "token update round \(update + 1) leaves three-card geometry unchanged")
+            try expect(updateOrigin == threeCardOrigin && updateSize == threeCardSize, "Token-only updates keep the three-card panel bottom, right, and size fixed")
+            threeCardOrigin = updateOrigin
+            threeCardSize = updateSize
+        }
+
+        let fourCardHeights = Array(repeating: CGFloat(118), count: 4)
+        let fourCardGeometry = HUDChatTrackingGeometryPolicy.resolve(
+            cardContentHeights: fourCardHeights,
+            scaleFactor: 1,
+            availableTrackingSectionHeight: 2_000
+        )
+        let fourCardSize = HUDMetrics(chatTrackingSectionHeight: fourCardGeometry.sectionHeight)
+            .panelSize(quotaRowCount: 2, includesChatTrackingSection: true)
+        let fourCardOrigin = HUDPlacementPolicy.chatTrackingResizeOrigin(
+            origin: threeCardOrigin,
+            oldPanelSize: threeCardSize,
+            newPanelSize: fourCardSize
+        )
+        try expect(fourCardOrigin.y == threeCardOrigin.y, "3→4 cards keep the HUD bottom fixed")
+        try expect(fourCardOrigin.x == threeCardOrigin.x, "3→4 cards keep the HUD right edge fixed when width is unchanged")
+        try expect(fourCardOrigin.y + fourCardSize.height > threeCardOrigin.y + threeCardSize.height, "3→4 cards move only the top edge upward")
+
+        let backToThreeOrigin = HUDPlacementPolicy.chatTrackingResizeOrigin(
+            origin: fourCardOrigin,
+            oldPanelSize: fourCardSize,
+            newPanelSize: threeCardSize
+        )
+        try expect(backToThreeOrigin.y == fourCardOrigin.y, "4→3 cards keep the HUD bottom fixed")
+        try expect(backToThreeOrigin.x == fourCardOrigin.x, "4→3 cards keep the HUD right edge fixed when width is unchanged")
+        try expect(backToThreeOrigin.y + threeCardSize.height < fourCardOrigin.y + fourCardSize.height, "4→3 cards move only the top edge downward")
+
+        let preResizeOrigin = CGPoint(x: 540, y: 160)
+        let preResizeSize = CGSize(width: 416, height: 500)
+        let resizedOrigin = HUDPlacementPolicy.chatTrackingResizeOrigin(
+            origin: preResizeOrigin,
+            oldPanelSize: preResizeSize,
+            newPanelSize: CGSize(width: 416, height: 760)
+        )
+        let resizedSize = CGSize(width: 416, height: 760)
+        let targetFrame = CGRect(x: 100, y: 100, width: 900, height: 700)
+        let refreshedTargetFrame = CGRect(x: 140, y: 125, width: 940, height: 720)
+        for placement in [HUDPlacement.bottomRight, .topRight] {
+            let persistedAnchor = HUDPlacementPolicy.anchor(
+                origin: resizedOrigin,
+                targetFrame: targetFrame,
+                panelSize: resizedSize,
+                placement: placement
+            )
+            let visibilityRefreshOrigin = HUDPlacementPolicy.origin(
+                for: persistedAnchor,
+                targetFrame: targetFrame,
+                panelSize: resizedSize
+            )
+            try expect(visibilityRefreshOrigin == resizedOrigin, "saving the post-resize anchor prevents a later visibility refresh jump for \(placement)")
+
+            let movedRefreshOrigin = HUDPlacementPolicy.origin(
+                for: persistedAnchor,
+                targetFrame: refreshedTargetFrame,
+                panelSize: resizedSize
+            )
+            let movedRefreshAnchor = HUDPlacementPolicy.anchor(
+                origin: movedRefreshOrigin,
+                targetFrame: refreshedTargetFrame,
+                panelSize: resizedSize,
+                placement: placement
+            )
+            try expect(movedRefreshAnchor == persistedAnchor, "window move/resize refresh preserves the post-resize anchor for \(placement)")
+
+            let staleAnchor = HUDPlacementPolicy.anchor(
+                origin: preResizeOrigin,
+                targetFrame: targetFrame,
+                panelSize: preResizeSize,
+                placement: placement
+            )
+            let staleRefreshOrigin = HUDPlacementPolicy.origin(
+                for: staleAnchor,
+                targetFrame: refreshedTargetFrame,
+                panelSize: resizedSize
+            )
+            if placement == .topRight {
+                try expect(staleRefreshOrigin != movedRefreshOrigin, "top-right refresh exposes the jump from a pre-resize persisted anchor")
+            }
+        }
 
         var rate = CodexTokenUsageRateWindow()
         rate.record(tokenTotal: 1_000, observedAt: base)
@@ -1979,6 +2251,14 @@ struct CodexUsageStatusTests {
         try expect(rate.samples == previousSamples, "out-of-order sample is ignored")
         rate.record(tokenTotal: 3, observedAt: base.addingTimeInterval(181))
         try expect(rate.samples.count == 1 && rate.rate(at: base.addingTimeInterval(181)) == .calculating, "turn total reset clears rate history")
+        try expect(
+            CodexTokenUsageRate.measured(tokensPerSecond: 10_526.3, intervalSeconds: 60).displayText == "10.5K tok/s",
+            "near-window consumption rate uses compact thousands formatting"
+        )
+        try expect(
+            CodexTokenUsageRate.measured(tokensPerSecond: 14_000, intervalSeconds: 60).displayText == "14.0K tok/s",
+            "compact rate formatting keeps one decimal place"
+        )
 
         let context = Data(#"{"timestamp":"1970-01-01T00:16:40.000Z","type":"turn_context","payload":{"turn_id":"turn-a","model":"gpt-6.1-sol","effort":"max"}}"#.utf8)
         let parsed = try unwrap(CodexLocalUsageArtifactParser.parseTurnContext(context), "turn_context model metadata")
