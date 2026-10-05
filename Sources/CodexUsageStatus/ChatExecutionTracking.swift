@@ -1,5 +1,28 @@
 import Foundation
 
+enum CodexModelOutputRate: Equatable {
+    case notObservable
+
+    var displayText: String {
+        switch self {
+        case .notObservable: return "—"
+        }
+    }
+
+    var accessibilityValue: String {
+        switch self {
+        case .notObservable: return "NOT_OBSERVABLE"
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .notObservable:
+            return "目前 rollout 沒有可驗證的模型生成 active duration；不以整個 Turn 時間推算。"
+        }
+    }
+}
+
 enum CodexChatExecutionState: String, Equatable, Sendable {
     case running
     case waiting

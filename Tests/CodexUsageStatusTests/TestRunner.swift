@@ -2259,6 +2259,11 @@ struct CodexUsageStatusTests {
             CodexTokenUsageRate.measured(tokensPerSecond: 14_000, intervalSeconds: 60).displayText == "14.0K tok/s",
             "compact rate formatting keeps one decimal place"
         )
+        try expect(
+            CodexModelOutputRate.notObservable.displayText == "—"
+                && CodexModelOutputRate.notObservable.accessibilityValue == "NOT_OBSERVABLE",
+            "model output rate stays unavailable without per-generation active-duration evidence"
+        )
 
         let context = Data(#"{"timestamp":"1970-01-01T00:16:40.000Z","type":"turn_context","payload":{"turn_id":"turn-a","model":"gpt-6.1-sol","effort":"max"}}"#.utf8)
         let parsed = try unwrap(CodexLocalUsageArtifactParser.parseTurnContext(context), "turn_context model metadata")
@@ -3098,6 +3103,53 @@ struct CodexUsageStatusTests {
         )
         try expect(base != makePresentation(tokenFeedback: feedback), "token feedback changes invalidate only the visual boundary")
         try expect(makePresentation(tokenFeedback: feedback) == makePresentation(tokenFeedback: feedback), "identical token feedback remains equatable")
+
+        let baseLayout = HUDPresentationLayoutGeometry(chatTrackingSectionHeight: 160, chatTrackingRequiresScroll: false)
+        let tallerLayout = HUDPresentationLayoutGeometry(chatTrackingSectionHeight: 320, chatTrackingRequiresScroll: false)
+        let scrollingLayout = HUDPresentationLayoutGeometry(chatTrackingSectionHeight: 320, chatTrackingRequiresScroll: true)
+        try expect(
+            HUDPresentationInvalidationPolicy.shouldInvalidateLayout(previous: baseLayout, current: tallerLayout),
+            "Chat section height changes invalidate the HUD render boundary"
+        )
+        try expect(
+            HUDPresentationInvalidationPolicy.shouldInvalidateLayout(previous: tallerLayout, current: scrollingLayout),
+            "Chat scroll-state changes invalidate the HUD render boundary"
+        )
+
+        let basePanelBottom: CGFloat = 127
+        let basePanelRight: CGFloat = 1_833
+        let basePanelHeight: CGFloat = 638
+        let baseContentLocalFrame = CGRect(x: 8, y: 8, width: 317, height: 622)
+        let originalBaseFrame = HUDPanelGeometryPolicy.baseContentScreenFrame(
+            localFrame: baseContentLocalFrame,
+            panelFrame: CGRect(x: 1_500, y: basePanelBottom, width: 333, height: basePanelHeight)
+        )
+        for cardCount in 1...4 {
+            let trackingHeight = CGFloat(cardCount) * 164
+            let expandedPanelFrame = CGRect(
+                x: 1_500,
+                y: basePanelBottom,
+                width: 333,
+                height: basePanelHeight + trackingHeight
+            )
+            let expandedBaseLocalFrame = CGRect(
+                x: baseContentLocalFrame.minX,
+                y: trackingHeight + baseContentLocalFrame.minY,
+                width: baseContentLocalFrame.width,
+                height: baseContentLocalFrame.height
+            )
+            let expandedBaseFrame = HUDPanelGeometryPolicy.baseContentScreenFrame(
+                localFrame: expandedBaseLocalFrame,
+                panelFrame: expandedPanelFrame
+            )
+            try expect(
+                abs(expandedBaseFrame.minY - originalBaseFrame.minY) < 0.01
+                    && abs(expandedBaseFrame.maxX - originalBaseFrame.maxX) < 0.01
+                    && abs(expandedBaseFrame.minY - basePanelBottom - 8) < 0.01
+                    && abs(expandedBaseFrame.maxX - (basePanelRight - 8)) < 0.01,
+                "Base HUD geometry conversion preserves its screen anchors with \(cardCount) added Chat cards"
+            )
+        }
 
     }
 
@@ -6964,10 +7016,18 @@ struct CodexUsageStatusTests {
 
         let artifactURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("outputs/CodexUsageStatus.app.zip")
-        // The core-test executable has no release bundle, so AppVersion.current
-        // resolves to "dev". Validate the canonical artifact against the
-        // release version baked into the current packaging script instead.
-        let expectedArtifactVersion = "2.4.134"
+        // Candidate identity can advance before the canonical release ZIP is
+        // replaced. Validate the artifact against its own embedded version so
+        // a fresh candidate build does not invalidate the previous release.
+        let artifactInfoPlist = try runTool(
+            "/usr/bin/unzip",
+            ["-p", artifactURL.path, "CodexUsageStatus.app/Contents/Info.plist"]
+        )
+        guard let artifactInfoData = artifactInfoPlist.data(using: .utf8),
+              let artifactInfo = try PropertyListSerialization.propertyList(from: artifactInfoData, format: nil) as? [String: Any],
+              let expectedArtifactVersion = artifactInfo["CFBundleShortVersionString"] as? String else {
+            throw HarnessError.unwrap("CFBundleShortVersionString in canonical release artifact")
+        }
         let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, expectedArtifactVersion])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 

@@ -952,20 +952,30 @@ struct HUDPresentationBoundary<Content: View>: View, Equatable {
     /// equality guarantees palette repaint while preserving child state such
     /// as an in-flight Token Reel generation.
     let theme: HUDTheme
+    /// Panel geometry is an independent render input. It must participate in
+    /// equality because the child reads this state to size the tracking view.
+    let layoutGeometry: HUDPresentationLayoutGeometry
     private let content: (HUDPresentation) -> Content
 
     init(
         presentation: HUDPresentation,
         theme: HUDTheme = .neonPurple,
+        layoutGeometry: HUDPresentationLayoutGeometry = .zero,
         @ViewBuilder content: @escaping (HUDPresentation) -> Content
     ) {
         self.presentation = presentation
         self.theme = theme
+        self.layoutGeometry = layoutGeometry
         self.content = content
     }
 
     static func == (lhs: HUDPresentationBoundary<Content>, rhs: HUDPresentationBoundary<Content>) -> Bool {
-        lhs.presentation == rhs.presentation && lhs.theme == rhs.theme
+        lhs.presentation == rhs.presentation
+            && lhs.theme == rhs.theme
+            && !HUDPresentationInvalidationPolicy.shouldInvalidateLayout(
+                previous: lhs.layoutGeometry,
+                current: rhs.layoutGeometry
+            )
     }
 
     var body: some View { content(presentation) }

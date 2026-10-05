@@ -68,15 +68,17 @@ final class FloatingHUDLayoutState: ObservableObject {
 }
 
 private final class DraggableHUDPanel: NSPanel {
-    var onUserMoved: ((NSPoint) -> Void)?
+    var onUserMoved: ((NSPoint, NSPoint) -> Void)?
     var onDragStateChanged: ((Bool) -> Void)?
     private var dragOffset: NSPoint?
+    private var dragStartOrigin: NSPoint?
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
     override func mouseDown(with event: NSEvent) {
         dragOffset = event.locationInWindow
+        dragStartOrigin = frame.origin
         onDragStateChanged?(true)
     }
 
@@ -93,12 +95,14 @@ private final class DraggableHUDPanel: NSPanel {
     override func mouseUp(with event: NSEvent) {
         guard dragOffset != nil else { return }
         dragOffset = nil
+        let originalOrigin = dragStartOrigin ?? frame.origin
+        dragStartOrigin = nil
         onDragStateChanged?(false)
         // Persistence and placement/size reconciliation are intentionally
         // deferred until the drag ends. Doing that work for every high-rate
         // mouseDragged event can re-enter SwiftUI/AppKit layout and starve the
         // main event loop, which presents as a full application freeze.
-        onUserMoved?(frame.origin)
+        onUserMoved?(frame.origin, originalOrigin)
     }
 }
 
@@ -190,6 +194,8 @@ final class FloatingHUDPanelController: NSObject {
     private let legacyPositionKey = "ui.floatingHUD.position"
     private var lastCodexWindowFrame: NSRect?
     private var lastCodexVisibleFrame: NSRect?
+    private var lastBaseHUDContentFrame: CGRect?
+    private var lastBaseHUDScreenFrame: CGRect?
     private var lastCodexProcessID: pid_t?
     private var lastCodexWindowDiagnostics: CodexWindowDiagnostics?
     private var lastPositionedCodexWindowFrame: NSRect?
@@ -260,6 +266,7 @@ final class FloatingHUDPanelController: NSObject {
             quotaRowCountChanged: { [weak self] count in self?.setQuotaRowCount(count) },
             accountInfoRowVisibilityChanged: { [weak self] visible in self?.setAccountInfoRowVisibility(visible) },
             chatTrackingContentHeightChanged: { [weak self] height in self?.setChatTrackingContentHeight(height) },
+            baseHUDFrameChanged: { [weak self] frame in self?.recordBaseHUDFrame(frame) },
             checkForUpdates: { [weak self] in self?.model.checkForUpdates() },
             installUpdate: { [weak self] release in self?.model.installUpdate(release) },
             openReleasePage: { [weak self] in self?.model.openUpdateReleasePage() },
@@ -301,8 +308,8 @@ final class FloatingHUDPanelController: NSObject {
         newPanel.hidesOnDeactivate = false
         newPanel.ignoresMouseEvents = false
         newPanel.title = "Codex Usage HUD"
-        newPanel.onUserMoved = { [weak self] origin in
-            self?.savePosition(origin)
+        newPanel.onUserMoved = { [weak self] origin, originalOrigin in
+            self?.savePosition(origin, previousOrigin: originalOrigin)
         }
         newPanel.onDragStateChanged = { [weak self] isDragging in
             self?.isUserDraggingHUD = isDragging
@@ -564,12 +571,17 @@ final class FloatingHUDPanelController: NSObject {
             resizedOrigin = oldOrigin
         }
 
-        applySize(newSize, to: panel)
         let correctedOrigin = visibleFrame.map {
             clampedOrigin(resizedOrigin, panelSize: newSize, visibleFrame: $0)
         } ?? resizedOrigin
-        panel.setFrameOrigin(correctedOrigin)
         layoutState.scaleLevel = newLevel
+        applyPanelGeometry(
+            size: newSize,
+            origin: correctedOrigin,
+            requestedOrigin: resizedOrigin,
+            to: panel,
+            path: "scale-level"
+        )
         newLevel.persist(to: defaults)
         if let targetFrame {
             saveAnchor(
@@ -640,12 +652,17 @@ final class FloatingHUDPanelController: NSObject {
             resizedOrigin = oldOrigin
         }
 
-        applySize(newSize, to: panel)
         let correctedOrigin = visibleFrame.map {
             clampedOrigin(resizedOrigin, panelSize: newSize, visibleFrame: $0)
         } ?? resizedOrigin
-        panel.setFrameOrigin(correctedOrigin)
         layoutState.quotaRowCount = newCount
+        applyPanelGeometry(
+            size: newSize,
+            origin: correctedOrigin,
+            requestedOrigin: resizedOrigin,
+            to: panel,
+            path: "quota-row-count"
+        )
         if let targetFrame {
             saveAnchor(
                 origin: correctedOrigin,
@@ -699,12 +716,17 @@ final class FloatingHUDPanelController: NSObject {
             resizedOrigin = oldOrigin
         }
 
-        applySize(newSize, to: panel)
         let correctedOrigin = visibleFrame.map {
             clampedOrigin(resizedOrigin, panelSize: newSize, visibleFrame: $0)
         } ?? resizedOrigin
-        panel.setFrameOrigin(correctedOrigin)
         layoutState.showsAccountInfoRow = visible
+        applyPanelGeometry(
+            size: newSize,
+            origin: correctedOrigin,
+            requestedOrigin: resizedOrigin,
+            to: panel,
+            path: "account-info-visibility"
+        )
         if let targetFrame {
             saveAnchor(
                 origin: correctedOrigin,
@@ -731,10 +753,10 @@ final class FloatingHUDPanelController: NSObject {
         let visibilityChanged = layoutState.showsChatTrackingSection != measurement.isVisible
         guard heightChanged || visibilityChanged else { return }
         layoutState.chatTrackingMeasuredContentHeight = measurement.contentHeight
-        setChatTrackingVisibility(measurement.isVisible)
+        setChatTrackingVisibility(measurement.isVisible, source: "swiftui-measurement")
     }
 
-    private func setChatTrackingVisibility(_ visible: Bool) {
+    private func setChatTrackingVisibility(_ visible: Bool, source: String = "chat-tracking-update") {
         let executions = model.trackedChatExecutions
         let metrics = HUDMetrics(scaleLevel: layoutState.scaleLevel)
         let basePanelHeight = metrics.panelSize(
@@ -757,7 +779,7 @@ final class FloatingHUDPanelController: NSObject {
         let estimatedCardHeights = executions.map { execution -> CGFloat in
             let text = execution.chatName ?? "Chat 名稱未取得"
             let wrappedLines = min(3, max(1, Int(ceil(Double(text.count) / 34.0))))
-            return (132 + CGFloat(max(0, wrappedLines - 1)) * 18) * factor
+            return (147 + CGFloat(max(0, wrappedLines - 1)) * 18) * factor
         }
         let measuredOrEstimated = layoutState.chatTrackingMeasuredContentHeight > 0
             ? [layoutState.chatTrackingMeasuredContentHeight]
@@ -790,8 +812,12 @@ final class FloatingHUDPanelController: NSObject {
             oldPanelSize: oldPanelSize,
             newPanelSize: newSize
         )
-        applySize(newSize, to: panel)
-        panel.setFrameOrigin(resizedOrigin)
+        applyPanelGeometry(
+            size: newSize,
+            origin: resizedOrigin,
+            to: panel,
+            path: "\(source)-chat-tracking-resize"
+        )
         if let targetFrame = lastCodexWindowFrame {
             saveAnchor(
                 origin: resizedOrigin,
@@ -1095,7 +1121,10 @@ final class FloatingHUDPanelController: NSObject {
             guard let self, !Task.isCancelled, !self.isUserDraggingHUD,
                   let panel = self.panel else { return }
             self.synchronizeQuotaRowCount(for: panel)
-            self.setChatTrackingVisibility(!self.model.trackedChatExecutions.isEmpty)
+            self.setChatTrackingVisibility(
+                !self.model.trackedChatExecutions.isEmpty,
+                source: "request-geometry-refresh"
+            )
         }
     }
 
@@ -1404,13 +1433,19 @@ final class FloatingHUDPanelController: NSObject {
                 includesChatTrackingSection: layoutState.showsChatTrackingSection,
             chatTrackingSectionHeight: layoutState.chatTrackingSectionHeight
             )
-            applySize(size, to: panel)
             let origin = HUDPlacementPolicy.origin(
                 for: anchor,
                 targetFrame: targetFrame,
                 panelSize: size
             )
-            panel.setFrameOrigin(clampedOrigin(origin, panelSize: size, visibleFrame: visibleFrame))
+            let correctedOrigin = clampedOrigin(origin, panelSize: size, visibleFrame: visibleFrame)
+            applyPanelGeometry(
+                size: size,
+                origin: correctedOrigin,
+                requestedOrigin: origin,
+                to: panel,
+                path: "saved-anchor-restore"
+            )
             saveAnchor(origin: panel.frame.origin, targetFrame: targetFrame, panelSize: size, placement: anchor.placement)
             markPositionEstablished(panel)
             return .positioned
@@ -1447,7 +1482,6 @@ final class FloatingHUDPanelController: NSObject {
                 includesChatTrackingSection: layoutState.showsChatTrackingSection,
             chatTrackingSectionHeight: layoutState.chatTrackingSectionHeight
             )
-            applySize(size, to: panel)
             let origin = HUDPlacementPolicy.resizedOrigin(
                 origin: oldOrigin,
                 targetFrame: targetFrame,
@@ -1455,7 +1489,14 @@ final class FloatingHUDPanelController: NSObject {
                 newPanelSize: size,
                 placement: placement
             )
-            panel.setFrameOrigin(clampedOrigin(origin, panelSize: size, visibleFrame: visibleFrame))
+            let correctedOrigin = clampedOrigin(origin, panelSize: size, visibleFrame: visibleFrame)
+            applyPanelGeometry(
+                size: size,
+                origin: correctedOrigin,
+                requestedOrigin: origin,
+                to: panel,
+                path: "bottom-right-offset-migration"
+            )
             saveAnchor(origin: panel.frame.origin, targetFrame: targetFrame, panelSize: size, placement: placement)
             markPositionEstablished(panel)
             return .positioned
@@ -1483,7 +1524,6 @@ final class FloatingHUDPanelController: NSObject {
                 includesChatTrackingSection: layoutState.showsChatTrackingSection,
             chatTrackingSectionHeight: layoutState.chatTrackingSectionHeight
             )
-            applySize(size, to: panel)
             let resizedOrigin = HUDPlacementPolicy.resizedOrigin(
                 origin: origin,
                 targetFrame: targetFrame,
@@ -1491,7 +1531,14 @@ final class FloatingHUDPanelController: NSObject {
                 newPanelSize: size,
                 placement: placement
             )
-            panel.setFrameOrigin(clampedOrigin(resizedOrigin, panelSize: size, visibleFrame: visibleFrame))
+            let correctedOrigin = clampedOrigin(resizedOrigin, panelSize: size, visibleFrame: visibleFrame)
+            applyPanelGeometry(
+                size: size,
+                origin: correctedOrigin,
+                requestedOrigin: resizedOrigin,
+                to: panel,
+                path: "relative-offset-migration"
+            )
             saveAnchor(origin: panel.frame.origin, targetFrame: targetFrame, panelSize: size, placement: placement)
             markPositionEstablished(panel)
             return .positioned
@@ -1518,7 +1565,6 @@ final class FloatingHUDPanelController: NSObject {
                 includesChatTrackingSection: layoutState.showsChatTrackingSection,
             chatTrackingSectionHeight: layoutState.chatTrackingSectionHeight
             )
-            applySize(size, to: panel)
             let resizedOrigin = HUDPlacementPolicy.resizedOrigin(
                 origin: legacyOrigin,
                 targetFrame: targetFrame,
@@ -1526,7 +1572,14 @@ final class FloatingHUDPanelController: NSObject {
                 newPanelSize: size,
                 placement: placement
             )
-            panel.setFrameOrigin(clampedOrigin(resizedOrigin, panelSize: size, visibleFrame: visibleFrame))
+            let correctedOrigin = clampedOrigin(resizedOrigin, panelSize: size, visibleFrame: visibleFrame)
+            applyPanelGeometry(
+                size: size,
+                origin: correctedOrigin,
+                requestedOrigin: resizedOrigin,
+                to: panel,
+                path: "legacy-position-migration"
+            )
             saveAnchor(origin: panel.frame.origin, targetFrame: targetFrame, panelSize: size, placement: placement)
             markPositionEstablished(panel)
             return .positioned
@@ -1535,14 +1588,21 @@ final class FloatingHUDPanelController: NSObject {
         lastPlacement = .bottomRight
         layoutState.placement = .bottomRight
         let size = layoutState.size
-        applySize(size, to: panel)
-        var x = targetFrame.maxX - size.width - 18
-        var y = targetFrame.maxY - size.height - 18
-        x = min(x, visibleFrame.maxX - size.width - 8)
-        x = max(x, visibleFrame.minX + 8)
-        y = min(y, visibleFrame.maxY - size.height - 8)
-        y = max(y, visibleFrame.minY + 8)
-        panel.setFrameOrigin(NSPoint(x: x, y: y))
+        let requestedOrigin = NSPoint(
+            x: targetFrame.maxX - size.width - 18,
+            y: targetFrame.maxY - size.height - 18
+        )
+        let origin = NSPoint(
+            x: min(max(requestedOrigin.x, visibleFrame.minX + 8), visibleFrame.maxX - size.width - 8),
+            y: min(max(requestedOrigin.y, visibleFrame.minY + 8), visibleFrame.maxY - size.height - 8)
+        )
+        applyPanelGeometry(
+            size: size,
+            origin: origin,
+            requestedOrigin: requestedOrigin,
+            to: panel,
+            path: "initial-bottom-right-position"
+        )
         saveAnchor(origin: panel.frame.origin, targetFrame: targetFrame, panelSize: size, placement: .bottomRight)
         markPositionEstablished(panel)
         return .positioned
@@ -1551,6 +1611,143 @@ final class FloatingHUDPanelController: NSObject {
     private func applySize(_ size: NSSize, to panel: NSPanel) {
         guard panel.frame.size != size else { return }
         panel.setContentSize(size)
+    }
+
+    private func applyPanelGeometry(
+        size: NSSize,
+        origin: NSPoint,
+        requestedOrigin: NSPoint? = nil,
+        to panel: NSPanel,
+        path: String
+    ) {
+        let before = panel.frame
+        applySize(size, to: panel)
+        panel.setFrameOrigin(origin)
+        logGeometryTrace(
+            path: requestedOrigin.map { $0 == origin ? path : "\(path)-clamped" } ?? path,
+            before: before,
+            after: panel.frame,
+            requestedOrigin: requestedOrigin ?? origin
+        )
+    }
+
+    private func recordBaseHUDFrame(_ localFrame: CGRect) {
+        guard let panel,
+              localFrame.width.isFinite, localFrame.height.isFinite,
+              localFrame.width > 0, localFrame.height > 0 else { return }
+        let panelFrame = panel.frame
+        let baseFrame = screenFrame(for: localFrame, in: panelFrame)
+        let localChanged = lastBaseHUDContentFrame.map { Self.geometryDiffers($0, localFrame) } ?? true
+        let screenChanged = lastBaseHUDScreenFrame.map { Self.geometryDiffers($0, baseFrame) } ?? true
+        let previousBaseFrame = lastBaseHUDScreenFrame
+        lastBaseHUDContentFrame = localFrame
+        lastBaseHUDScreenFrame = baseFrame
+        guard localChanged || screenChanged else { return }
+        let placement = layoutState.placement.rawValue
+        let sectionHeight = layoutState.chatTrackingSectionHeight
+        let measuredHeight = layoutState.chatTrackingMeasuredContentHeight
+        let requiresScroll = layoutState.chatTrackingRequiresScroll
+        let codexWindow = Self.geometryText(lastCodexWindowFrame)
+        let visibleFrame = Self.geometryText(lastCodexVisibleFrame)
+        let anchor = anchorTraceText()
+        let trace = [
+            "HUD geometry trace path=swiftui-base-layout",
+            "panel_frame=\(Self.geometryText(panelFrame))",
+            "panel_max=\(Self.geometryMaxText(panelFrame))",
+            "base_local=\(Self.geometryText(localFrame))",
+            "base_screen_before=\(Self.geometryText(previousBaseFrame))",
+            "base_screen_after=\(Self.geometryText(baseFrame))",
+            "placement=\(placement)",
+            "chat_section_h=\(sectionHeight)",
+            "measured_h=\(measuredHeight)",
+            "requires_scroll=\(requiresScroll)",
+            "codex_window=\(codexWindow)",
+            "visible_frame=\(visibleFrame)",
+            "anchor=\(anchor)"
+        ].joined(separator: " ")
+        Self.performanceLogger.info("\(trace, privacy: .public)")
+    }
+
+    private func logGeometryTrace(path: String, before: NSRect, after: NSRect, requestedOrigin: NSPoint? = nil) {
+        let measuredBaseBefore = lastBaseHUDContentFrame.map { screenFrame(for: $0, in: before) }
+        let measuredBaseAfter = lastBaseHUDContentFrame.map { screenFrame(for: $0, in: after) }
+        let localBase = lastBaseHUDContentFrame.map { Self.geometryText($0) } ?? "none"
+        let placement = layoutState.placement.rawValue
+        let sectionHeight = layoutState.chatTrackingSectionHeight
+        let measuredHeight = layoutState.chatTrackingMeasuredContentHeight
+        let requiresScroll = layoutState.chatTrackingRequiresScroll
+        let codexWindow = Self.geometryText(lastCodexWindowFrame)
+        let visibleFrame = Self.geometryText(lastCodexVisibleFrame)
+        let anchor = anchorTraceText()
+        let trace = [
+            "HUD geometry trace path=\(path)",
+            "requested_origin=\(Self.pointText(requestedOrigin))",
+            "panel_before=\(Self.geometryText(before))",
+            "panel_before_max=\(Self.geometryMaxText(before))",
+            "panel_after=\(Self.geometryText(after))",
+            "panel_after_max=\(Self.geometryMaxText(after))",
+            "base_local_last=\(localBase)",
+            "base_screen_before_from_last_layout=\(measuredBaseBefore.map { Self.geometryText($0) } ?? "none")",
+            "base_screen_after_from_last_layout=\(measuredBaseAfter.map { Self.geometryText($0) } ?? "none")",
+            "placement=\(placement)",
+            "chat_section_h=\(sectionHeight)",
+            "measured_h=\(measuredHeight)",
+            "requires_scroll=\(requiresScroll)",
+            "codex_window=\(codexWindow)",
+            "visible_frame=\(visibleFrame)",
+            "anchor=\(anchor)"
+        ].joined(separator: " ")
+        Self.performanceLogger.info("\(trace, privacy: .public)")
+    }
+
+    private func anchorTraceText() -> String {
+        guard let anchor = savedAnchor() else { return "none" }
+        return String(
+            format: "right=%.1f,vertical=%.1f,placement=%d",
+            locale: Locale(identifier: "en_US_POSIX"),
+            anchor.rightInset,
+            anchor.verticalInset,
+            anchor.placement.rawValue
+        )
+    }
+
+    private func screenFrame(for localFrame: CGRect, in panelFrame: NSRect) -> NSRect {
+        HUDPanelGeometryPolicy.baseContentScreenFrame(
+            localFrame: localFrame,
+            panelFrame: panelFrame
+        )
+    }
+
+    private static func geometryText(_ frame: CGRect?) -> String {
+        guard let frame else { return "none" }
+        return geometryText(frame)
+    }
+
+    private static func geometryText(_ frame: CGRect) -> String {
+        String(
+            format: "%.1f,%.1f,%.1f,%.1f",
+            locale: Locale(identifier: "en_US_POSIX"),
+            frame.minX,
+            frame.minY,
+            frame.width,
+            frame.height
+        )
+    }
+
+    private static func geometryMaxText(_ frame: CGRect) -> String {
+        String(format: "%.1f,%.1f", locale: Locale(identifier: "en_US_POSIX"), frame.maxX, frame.maxY)
+    }
+
+    private static func pointText(_ point: NSPoint?) -> String {
+        guard let point else { return "none" }
+        return String(format: "%.1f,%.1f", locale: Locale(identifier: "en_US_POSIX"), point.x, point.y)
+    }
+
+    private static func geometryDiffers(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        abs(lhs.minX - rhs.minX) > 0.5
+            || abs(lhs.minY - rhs.minY) > 0.5
+            || abs(lhs.width - rhs.width) > 0.5
+            || abs(lhs.height - rhs.height) > 0.5
     }
 
     private func scheduleFocusLoss(_ panel: NSPanel) {
@@ -1655,11 +1852,16 @@ final class FloatingHUDPanelController: NSObject {
         return NSPoint(x: values[0], y: values[1])
     }
 
-    private func savePosition(_ origin: NSPoint) {
+    private func savePosition(_ origin: NSPoint, previousOrigin: NSPoint? = nil) {
         guard let codexWindowFrame = lastCodexWindowFrame,
               let panel else {
             defaults.set([Double(origin.x), Double(origin.y)], forKey: legacyPositionKey)
             return
+        }
+
+        if let previousOrigin, previousOrigin != origin {
+            let beforeDragFrame = NSRect(origin: previousOrigin, size: panel.frame.size)
+            logGeometryTrace(path: "user-drag-setFrameOrigin", before: beforeDragFrame, after: panel.frame)
         }
 
         let placement = HUDPlacementPolicy.placement(
@@ -1684,8 +1886,7 @@ final class FloatingHUDPanelController: NSObject {
             newPanelSize: newSize,
             placement: placement
         )
-        applySize(newSize, to: panel)
-        panel.setFrameOrigin(resizedOrigin)
+        applyPanelGeometry(size: newSize, origin: resizedOrigin, to: panel, path: "user-drag-anchor-reconcile")
         saveAnchor(origin: resizedOrigin, targetFrame: codexWindowFrame, panelSize: newSize, placement: placement)
         if hasEstablishedPosition, lastKnownSafePanelFrame != nil {
             lastKnownSafePanelFrame = panel.frame

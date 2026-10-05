@@ -111,3 +111,35 @@ enum HUDPlacementPolicy {
         )
     }
 }
+
+enum HUDPanelGeometryPolicy {
+    /// Converts a SwiftUI frame measured from the panel's top-leading origin
+    /// into AppKit screen coordinates whose origin is bottom-leading.
+    static func baseContentScreenFrame(localFrame: CGRect, panelFrame: CGRect) -> CGRect {
+        CGRect(
+            x: panelFrame.minX + localFrame.minX,
+            y: panelFrame.minY + panelFrame.height - localFrame.maxY,
+            width: localFrame.width,
+            height: localFrame.height
+        )
+    }
+}
+
+struct HUDPresentationLayoutGeometry: Equatable {
+    let chatTrackingSectionHeight: CGFloat
+    let chatTrackingRequiresScroll: Bool
+
+    static let zero = HUDPresentationLayoutGeometry(
+        chatTrackingSectionHeight: 0,
+        chatTrackingRequiresScroll: false
+    )
+}
+
+enum HUDPresentationInvalidationPolicy {
+    static func shouldInvalidateLayout(
+        previous: HUDPresentationLayoutGeometry,
+        current: HUDPresentationLayoutGeometry
+    ) -> Bool {
+        previous != current
+    }
+}

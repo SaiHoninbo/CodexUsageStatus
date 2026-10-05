@@ -35,6 +35,16 @@ private struct ChatTrackingContentHeightPreference: PreferenceKey {
     }
 }
 
+private struct HUDBaseContentFramePreference: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        if next.width > 0, next.height > 0 {
+            value = next
+        }
+    }
+}
+
 struct CodexFloatingHUDView: View {
     private enum UpdateFeedbackKind {
         case checking
@@ -72,6 +82,7 @@ struct CodexFloatingHUDView: View {
     let quotaRowCountChanged: (Int) -> Void
     let accountInfoRowVisibilityChanged: (Bool) -> Void
     let chatTrackingContentHeightChanged: (CGFloat) -> Void
+    let baseHUDFrameChanged: (CGRect) -> Void
     let checkForUpdates: () -> Void
     let installUpdate: (AppUpdateRelease) -> Void
     let openReleasePage: () -> Void
@@ -138,7 +149,11 @@ struct CodexFloatingHUDView: View {
                 // and renders an updating state instead of blanking the panel.
                 HUDPresentationBoundary(
                     presentation: hudPresentation,
-                    theme: selectedHUDTheme
+                    theme: selectedHUDTheme,
+                    layoutGeometry: HUDPresentationLayoutGeometry(
+                        chatTrackingSectionHeight: layoutState.chatTrackingSectionHeight,
+                        chatTrackingRequiresScroll: layoutState.chatTrackingRequiresScroll
+                    )
                 ) { presentation in
                     hudContainer(presentation: presentation)
                         .overlay { hudPulseOverlay(presentation: presentation) }
@@ -450,43 +465,58 @@ struct CodexFloatingHUDView: View {
                 )
                 Color.clear.frame(height: metrics.chatTrackingGap)
             }
-            HUDTokenActivitySummaryView(
-                summaryMetrics: presentation.tokenMetrics,
-                feedback: presentation.tokenActivityFeedback,
-                width: metrics.contentWidth,
-                height: metrics.tokenSummaryHeight,
-                scaleFactor: metrics.factor,
-                isStale: presentation.tokenActivityIsStale,
-                reduceMotion: presentation.reduceMotion
-            )
-            // The Token Hero consumes the theme palette from the environment.
-            // Do not put an Equatable gate in front of it: palette-only theme
-            // changes must repaint the secondary metric labels and values even
-            // when the usage payload itself is unchanged.
-            Color.clear.frame(height: metrics.tokenSummaryGap)
-            hudHeader(presentation: presentation, metrics: metrics)
-            Color.clear.frame(height: metrics.headerGap)
-            quotaStack(presentation: presentation, width: metrics.contentWidth, height: metrics.quotaRowHeight, gap: metrics.quotaGap)
-            Color.clear.frame(height: metrics.sectionGap)
-            if presentation.showsAccountInfoRow {
-                HUDAccountInfoRow(
-                    credits: displayedCredits,
-                    resetCreditCount: presentation.resetCreditCount,
-                    resetCreditCountdownText: presentation.resetCreditCountdownText,
-                    resetCreditExactExpiryText: presentation.resetCreditExactExpiryText,
+            VStack(alignment: .leading, spacing: 0) {
+                HUDTokenActivitySummaryView(
+                    summaryMetrics: presentation.tokenMetrics,
+                    feedback: presentation.tokenActivityFeedback,
                     width: metrics.contentWidth,
-                    sectionHeight: metrics.accountInfoSectionHeight,
-                    rowHeight: metrics.accountInfoRowHeight,
-                    scaleFactor: metrics.factor
+                    height: metrics.tokenSummaryHeight,
+                    scaleFactor: metrics.factor,
+                    isStale: presentation.tokenActivityIsStale,
+                    reduceMotion: presentation.reduceMotion
                 )
+                // The Token Hero consumes the theme palette from the environment.
+                // Do not put an Equatable gate in front of it: palette-only theme
+                // changes must repaint the secondary metric labels and values even
+                // when the usage payload itself is unchanged.
+                Color.clear.frame(height: metrics.tokenSummaryGap)
+                hudHeader(presentation: presentation, metrics: metrics)
+                Color.clear.frame(height: metrics.headerGap)
+                quotaStack(presentation: presentation, width: metrics.contentWidth, height: metrics.quotaRowHeight, gap: metrics.quotaGap)
                 Color.clear.frame(height: metrics.sectionGap)
+                if presentation.showsAccountInfoRow {
+                    HUDAccountInfoRow(
+                        credits: displayedCredits,
+                        resetCreditCount: presentation.resetCreditCount,
+                        resetCreditCountdownText: presentation.resetCreditCountdownText,
+                        resetCreditExactExpiryText: presentation.resetCreditExactExpiryText,
+                        width: metrics.contentWidth,
+                        sectionHeight: metrics.accountInfoSectionHeight,
+                        rowHeight: metrics.accountInfoRowHeight,
+                        scaleFactor: metrics.factor
+                    )
+                }
+                Color.clear.frame(height: metrics.sectionGap)
+                actionCardsRow(presentation: presentation, metrics: metrics)
+                Color.clear.frame(height: metrics.workflowActionGap)
+                workflowShortcutsRow(presentation: presentation, metrics: metrics)
             }
-            actionCardsRow(presentation: presentation, metrics: metrics)
-            Color.clear.frame(height: metrics.workflowActionGap)
-            workflowShortcutsRow(presentation: presentation, metrics: metrics)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: HUDBaseContentFramePreference.self,
+                        value: proxy.frame(in: .named("CodexUsageStatusHUDPanel"))
+                    )
+                }
+            }
         }
         .padding(metrics.outerPadding)
         .frame(width: panelSize.width, height: panelSize.height, alignment: .topLeading)
+        .coordinateSpace(name: "CodexUsageStatusHUDPanel")
+        .onPreferenceChange(HUDBaseContentFramePreference.self) { frame in
+            guard frame.width > 0, frame.height > 0 else { return }
+            baseHUDFrameChanged(frame)
+        }
         // Keep theme surfaces behind the content.  They are panel chrome, not
         // a foreground scrim: placing them in an overlay washes out text,
         // controls, and the Token Reel when a theme uses an opaque surface.
@@ -737,6 +767,13 @@ struct CodexFloatingHUDView: View {
                     }
                     .font(.system(size: 10 * metricsFactor, weight: .regular, design: .rounded))
                     .foregroundStyle(selectedHUDPalette.tertiaryText)
+                    let outputRate = CodexModelOutputRate.notObservable
+                    Text("模型輸出速度：\(outputRate.displayText)")
+                        .font(.system(size: 10 * metricsFactor, weight: .regular, design: .rounded).monospacedDigit())
+                        .foregroundStyle(selectedHUDPalette.tertiaryText)
+                        .accessibilityLabel("模型輸出速度")
+                        .accessibilityValue(outputRate.accessibilityValue)
+                        .help(outputRate.explanation)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
