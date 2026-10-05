@@ -224,6 +224,7 @@ struct CodexUsageStatusTests {
             ("session lineage presentation metadata", testSessionLineagePresentationMetadata),
             ("Chat tracking admission and total-token rate", testChatTrackingAdmissionAndRate),
             ("active Turn recovery proof", testActiveTurnRecoveryProof),
+            ("durable active Turn evidence", testDurableActiveTurnEvidence),
             ("Repo Chat identity reconciliation", testRepoChatIdentityReconciliation),
             ("desktop activity authority", testDesktopActivityAuthority),
             ("local token usage ledger", testLocalTokenUsageLedger),
@@ -336,6 +337,7 @@ struct CodexUsageStatusTests {
         }
         let selectedTests = tests.filter { name, _ in filters.isEmpty || filters.contains(where: name.localizedCaseInsensitiveContains) }
         let asyncTestNames = ["active execution observer epochs", "observer restart during active turns",
+                              "observer restart with durable active turn evidence",
                               "login lifecycle shutdown", "persistence write coordinator", "observer cursor persistence is async"]
         if !filters.isEmpty && selectedTests.isEmpty
             && !asyncTestNames.contains(where: { name in filters.contains(where: name.localizedCaseInsensitiveContains) }) {
@@ -371,6 +373,16 @@ struct CodexUsageStatusTests {
         } catch {
             failures += 1
             print("FAIL observer restart during active turns: \(error)")
+        }
+        }
+        if filters.isEmpty || filters.contains(where: { "observer restart with durable active turn evidence".localizedCaseInsensitiveContains($0) }) {
+        asyncTestCount += 1
+        do {
+            try await testObserverRestartWithDurableActiveTurnEvidence()
+            print("PASS observer restart with durable active turn evidence")
+        } catch {
+            failures += 1
+            print("FAIL observer restart with durable active turn evidence: \(error)")
         }
         }
         if filters.isEmpty || filters.contains(where: { "login lifecycle shutdown".localizedCaseInsensitiveContains($0) }) {
@@ -3900,6 +3912,317 @@ struct CodexUsageStatusTests {
         try expect(bounded.turnActivities.isEmpty, "start outside the bounded suffix remains NOT_PROVEN, never blind token admission")
     }
 
+    private static func testDurableActiveTurnEvidence() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-durable-recovery-\(UUID().uuidString)", isDirectory: true)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let root = CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: base)
+        let rollout = base.appendingPathComponent("sessions/rollout-main.jsonl").standardizedFileURL.resolvingSymlinksInPath().path
+        let resourceID = "rollout-resource-1"
+        let original = try activeTurnRecoveryFixture(thread: "main", now: now)
+        let originalLines = original.split(separator: 0x0A)
+        let headLine = Data(originalLines[0])
+        let head = try unwrap(CodexLocalUsageArtifactParser.parseSessionMetadata(headLine), "durable evidence session identity")
+        let identity = try unwrap(head.identity, "durable evidence thread identity")
+        let lineage = try unwrap(head.lineage, "durable evidence top-level lineage")
+        let turnContext = try unwrap(
+            CodexLocalUsageArtifactParser.parseTurnContext(Data(originalLines[2])),
+            "durable evidence model context"
+        )
+        let startedAt = now.addingTimeInterval(-240)
+        let lastTokenAt = now.addingTimeInterval(-5)
+        let evidence = CodexLocalActiveTurnEvidence(
+            threadID: "main",
+            turnID: "turn-main",
+            startedAt: startedAt,
+            startedEvidenceOffset: 64,
+            lastValidatedOffset: 512,
+            lastMatchingTokenAt: lastTokenAt,
+            lastTurnTokenTotal: 6_000,
+            rolloutPathIdentity: rollout,
+            observationRootIdentity: base.standardizedFileURL.resolvingSymlinksInPath().path,
+            resourceIdentifier: resourceID,
+            sessionIdentity: identity,
+            lineage: lineage,
+            turnContextMetadata: turnContext
+        )
+        let cursor = CodexLocalUsageCursor(
+            byteOffset: evidence.lastValidatedOffset,
+            threadID: "main",
+            sessionIdentity: identity,
+            sessionLineage: lineage,
+            fileResourceIdentifier: resourceID,
+            activeTurnEvidence: evidence
+        )
+        func recover(
+            _ delta: Data = Data(),
+            cursor: CodexLocalUsageCursor = cursor,
+            metadata: CodexLocalSessionMetadata = head,
+            observationRoot: CodexLocalUsageObservationRoot = root,
+            rolloutPath: String = rollout,
+            currentResourceID: String? = resourceID,
+            at recoveryTime: Date = now
+        ) -> CodexLocalTurnActivityEvent? {
+            CodexLocalUsageObserver.recoverPersistedActiveTurnSnapshot(
+                delta,
+                cursor: cursor,
+                metadata: metadata,
+                root: observationRoot,
+                rolloutPath: rolloutPath,
+                resourceIdentifier: currentResourceID,
+                now: recoveryTime
+            )
+        }
+        func eventLine(_ kind: String, turnID: String, at time: Date, extra: [String: Any] = [:]) throws -> Data {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            var payload: [String: Any] = ["type": kind, "turn_id": turnID]
+            payload.merge(extra) { _, latest in latest }
+            var data = try JSONSerialization.data(withJSONObject: [
+                "timestamp": formatter.string(from: time),
+                "type": "event_msg",
+                "payload": payload
+            ], options: [.sortedKeys])
+            data.append(0x0A)
+            return data
+        }
+
+        let restored = try unwrap(recover(), "persisted active evidence restores a Turn with no task_started in the delta")
+        try expect(restored.activeTurnRecovery?.accepts(restored) == true, "durable evidence is converted into the existing typed recovery proof")
+        try expect(restored.turnID == "turn-main" && restored.turnTokenTotal == 6_000, "recovery preserves the exact Turn and last validated token total")
+        try expect(restored.modelMetadata?.displayText == "gpt-6.1-sol · max", "recovery keeps persisted turn model context")
+
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let newerToken = try JSONSerialization.data(withJSONObject: [
+            "timestamp": formatter.string(from: now.addingTimeInterval(-1)),
+            "type": "token_usage_record",
+            "payload": [
+                "thread_id": "main",
+                "turn_id": "turn-main",
+                "turn_token_usage": ["total_tokens": 7_000]
+            ]
+        ], options: [.sortedKeys]) + Data([0x0A])
+        let updated = try unwrap(recover(newerToken), "incremental matching token activity refreshes the durable proof")
+        try expect(updated.turnTokenTotal == 7_000 && updated.observedAt == now.addingTimeInterval(-1), "incremental reconciliation chooses the newest matching token")
+
+        for kind in ["task_complete", "turn_aborted"] {
+            let terminal = try eventLine(kind, turnID: "turn-main", at: now.addingTimeInterval(-1), extra: ["reason": "interrupted"])
+            try expect(recover(terminal) == nil, "matching \(kind) in the crash window blocks recovery")
+        }
+        let newerTurn = try eventLine("task_started", turnID: "turn-b", at: now.addingTimeInterval(-1))
+        try expect(recover(newerTurn) == nil, "a later Turn supersedes the persisted Turn")
+        let unrelatedToken = try JSONSerialization.data(withJSONObject: [
+            "timestamp": formatter.string(from: now.addingTimeInterval(-1)),
+            "type": "token_usage_record",
+            "payload": ["thread_id": "main", "turn_id": "turn-b", "turn_token_usage": ["total_tokens": 8_000]]
+        ], options: [.sortedKeys]) + Data([0x0A])
+        try expect(recover(unrelatedToken) == nil, "another Turn cannot borrow the persisted start evidence")
+        try expect(recover(at: now.addingTimeInterval(181)) == nil, "persisted token time is not sufficient after the 180-second freshness window")
+        try expect(recover(at: now.addingTimeInterval(-6)) == nil, "future token evidence fails closed")
+
+        try expect(recover(currentResourceID: "replacement-resource") == nil, "a replaced rollout resource invalidates persisted evidence")
+        try expect(recover(rolloutPath: rollout + ".moved") == nil, "evidence is bound to the canonical rollout path")
+        let otherRoot = CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: base.appendingPathComponent("other-root"))
+        try expect(recover(observationRoot: otherRoot) == nil, "evidence is bound to its observation root")
+        let changedIdentity = CodexLocalSessionIdentity(
+            threadID: identity.threadID,
+            repositoryDisplayName: identity.repositoryDisplayName,
+            workspaceDisplayName: identity.workspaceDisplayName,
+            kind: identity.kind,
+            repositoryIdentityDigest: "different-repository-digest"
+        )
+        let changedRepository = CodexLocalSessionMetadata(identity: changedIdentity, lineage: lineage, modelMetadata: nil)
+        try expect(recover(metadata: changedRepository) == nil, "a repository identity digest mismatch invalidates recovery")
+        let internalLineage = CodexLocalSessionLineage(
+            parentThreadID: "main",
+            threadSource: .subagent,
+            relationKind: .threadSpawn,
+            agentRole: "worker"
+        )
+        let internalMetadata = CodexLocalSessionMetadata(identity: identity, lineage: internalLineage, modelMetadata: nil)
+        try expect(recover(metadata: internalMetadata) == nil, "non-top-level lineage cannot use durable evidence")
+        try expect(recover(cursor: CodexLocalUsageCursor(
+            byteOffset: cursor.byteOffset,
+            threadID: cursor.threadID,
+            sessionIdentity: cursor.sessionIdentity,
+            sessionLineage: cursor.sessionLineage,
+            fileResourceIdentifier: cursor.fileResourceIdentifier,
+            activeTurnEvidence: evidence,
+            identityIsAmbiguous: true
+        )) == nil, "ambiguous cursor identity blocks recovery")
+        try expect(recover(Data("not-json\\n".utf8)) == nil, "corrupt incremental data fails closed")
+
+        let cursorMap: [String: CodexLocalUsageCursor] = [rollout: cursor]
+        let encodedCursor = try JSONEncoder().encode(cursorMap)
+        var legacyObject = try JSONSerialization.jsonObject(with: encodedCursor) as! [String: Any]
+        var cursorObject = legacyObject[rollout] as! [String: Any]
+        cursorObject.removeValue(forKey: "activeTurnEvidence")
+        legacyObject[rollout] = cursorObject
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
+        let legacy = try JSONDecoder().decode([String: CodexLocalUsageCursor].self, from: legacyData)
+        try expect(legacy[rollout]?.activeTurnEvidence == nil, "legacy cursor files decode without durable evidence")
+
+        cursorObject["activeTurnEvidence"] = ["turnID": 42]
+        legacyObject[rollout] = cursorObject
+        let corruptData = try JSONSerialization.data(withJSONObject: legacyObject)
+        let corrupt = try JSONDecoder().decode([String: CodexLocalUsageCursor].self, from: corruptData)
+        try expect(corrupt[rollout]?.byteOffset == cursor.byteOffset, "corrupt optional evidence does not discard the cursor")
+        try expect(corrupt[rollout]?.activeTurnEvidence == nil, "corrupt optional evidence has no recovery authority")
+    }
+
+    @MainActor
+    private static func testObserverRestartWithDurableActiveTurnEvidence() async throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-durable-active-restart-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let home = base.appendingPathComponent("home", isDirectory: true)
+        let sessions = home.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let file = sessions.appendingPathComponent("rollout-main.jsonl")
+        let cursorURL = base.appendingPathComponent("state/cursors.json")
+        let path = file.standardizedFileURL.resolvingSymlinksInPath().path
+        let now = Date()
+        let fixture = try activeTurnRecoveryFixture(thread: "main", now: now)
+        let fixtureLines = fixture.split(separator: 0x0A)
+        var head = Data(fixtureLines[0])
+        head.append(0x0A)
+        try head.write(to: file)
+
+        var state = CodexChatTrackingState()
+        var scanCount = 0
+        var ledgerCount = 0
+        var completionCount = 0
+        func makeObserver() -> CodexLocalUsageObserver {
+            CodexLocalUsageObserver(
+                cursorURL: cursorURL,
+                handler: { _, _ in ledgerCount += 1 },
+                turnCompletionHandler: { _, _ in completionCount += 1 },
+                turnActivityHandler: { state = CodexChatExecutionTrackingPolicy.applying($0, to: state) },
+                activeExecutionReconciliationHandler: {
+                    if $0.resetActiveExecutions { state = .init() } else { scanCount += 1 }
+                }
+            )
+        }
+        func awaitScan(after count: Int, stage: String, timeout: TimeInterval = 20) async throws {
+            let deadline = Date().addingTimeInterval(timeout)
+            while scanCount <= count && Date() < deadline {
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            try expect(scanCount > count, "durable recovery observer completes the \(stage) scan (observed \(scanCount), expected > \(count))")
+        }
+        func readCursor() -> CodexLocalUsageCursor? {
+            guard let data = try? Data(contentsOf: cursorURL),
+                  let cursors = try? JSONDecoder().decode([String: CodexLocalUsageCursor].self, from: data) else { return nil }
+            return cursors[path]
+        }
+        func awaitCursor(
+            after count: Int,
+            timeout: TimeInterval = 30,
+            matching predicate: (CodexLocalUsageCursor) -> Bool
+        ) async throws -> CodexLocalUsageCursor {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                _ = await PersistenceWriteCoordinator.shared.flush(timeoutNanoseconds: 1_000_000_000)
+                if let cursor = readCursor(), predicate(cursor) { return cursor }
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            if let cursor = readCursor() {
+                let evidence = cursor.activeTurnEvidence
+                try expect(false, "durable cursor condition timed out after scan \(scanCount) (started after \(count)); byteOffset=\(cursor.byteOffset), activeTurn=\(evidence?.turnID ?? "nil"), tokenTotal=\(evidence?.lastTurnTokenTotal.map(String.init) ?? "nil")")
+            }
+            try expect(false, "durable cursor did not reach the expected state")
+            return CodexLocalUsageCursor(byteOffset: 0)
+        }
+        func append(_ data: Data) throws {
+            let handle = try FileHandle(forWritingTo: file)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+        }
+        func jsonLine(type: String, payload: [String: Any], timestamp: Date) throws -> Data {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            var data = try JSONSerialization.data(withJSONObject: [
+                "timestamp": formatter.string(from: timestamp),
+                "type": type,
+                "payload": payload
+            ], options: [.sortedKeys])
+            data.append(0x0A)
+            return data
+        }
+
+        let roots = [CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: home)]
+        let observer = makeObserver()
+        observer.setRoots(roots)
+        let firstScan = scanCount
+        observer.start()
+        try await awaitScan(after: firstScan, stage: "initial")
+        _ = await PersistenceWriteCoordinator.shared.flush(timeoutNanoseconds: 2_000_000_000)
+
+        var liveRecords = Data()
+        for line in fixtureLines.dropFirst() {
+            liveRecords.append(contentsOf: line)
+            liveRecords.append(0x0A)
+        }
+        let beforeStartObservation = scanCount
+        try append(liveRecords)
+        let tokenDate = Date()
+        let recentToken = try jsonLine(type: "token_usage_record", payload: [
+            "thread_id": "main",
+            "turn_id": "turn-main",
+            "turn_token_usage": ["total_tokens": 7_000]
+        ], timestamp: tokenDate)
+        try append(recentToken)
+        var padding = Data("{\"type\":\"response_item\",\"payload\":{\"text\":\"".utf8)
+        padding.append(contentsOf: repeatElement(UInt8(0x78), count: CodexLocalUsageObserver.activeTurnRecoveryReadLimit + 64))
+        padding.append(contentsOf: Data("\"}}\n".utf8))
+        try append(padding)
+        let largeFileSize = UInt64((try file.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0)
+        let persistedAfterGrowth = try await awaitCursor(after: beforeStartObservation) { cursor in
+            cursor.byteOffset >= largeFileSize && cursor.activeTurnEvidence?.lastTurnTokenTotal == 7_000
+        }
+        let durableEvidence = try unwrap(persistedAfterGrowth.activeTurnEvidence, "live factual start is persisted with its current token")
+        try expect(durableEvidence.lastValidatedOffset == persistedAfterGrowth.byteOffset, "durable proof advances with the validated cursor")
+        try expect(largeFileSize - durableEvidence.startedEvidenceOffset > UInt64(CodexLocalUsageObserver.activeTurnRecoveryReadLimit), "the persisted factual start is beyond the legacy 8 MiB suffix")
+        try expect(state.cards.count == 1 && state.cards[0].state == .running, "live top-level Turn remains visible before restart")
+        let ledgerCountBeforeRestart = ledgerCount
+        let completionCountBeforeRestart = completionCount
+
+        observer.stop()
+        _ = await PersistenceWriteCoordinator.shared.flush(timeoutNanoseconds: 2_000_000_000)
+
+        let restarted = makeObserver()
+        restarted.setRoots(roots)
+        let beforeRestart = scanCount
+        restarted.start()
+        try await awaitScan(after: beforeRestart, stage: "restart")
+        try expect(state.cards.count == 1 && state.cards[0].key.threadID == "main", "restart restores the same long-running Chat without finding task_started in the tail")
+        try expect(state.cards[0].state == .running && state.cards[0].tokenTotal == 7_000, "restart requires recent matching token activity and preserves its total")
+        restarted.stop()
+        _ = await PersistenceWriteCoordinator.shared.flush(timeoutNanoseconds: 2_000_000_000)
+
+        let terminalLine = try jsonLine(type: "event_msg", payload: ["type": "task_complete", "turn_id": "turn-main"], timestamp: Date())
+        try append(terminalLine)
+        let afterTerminal = makeObserver()
+        afterTerminal.setRoots(roots)
+        let beforeTerminalRestart = scanCount
+        afterTerminal.start()
+        try await awaitScan(after: beforeTerminalRestart, stage: "terminal restart")
+        let terminalFileSize = UInt64((try file.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0)
+        let cursorAfterTerminal = try await awaitCursor(after: beforeTerminalRestart) { cursor in
+            cursor.byteOffset >= terminalFileSize && cursor.activeTurnEvidence == nil
+        }
+        try expect(cursorAfterTerminal.activeTurnEvidence == nil, "terminal appended after the last cursor checkpoint clears evidence before recovery admission")
+        try expect(!state.cards.contains(where: { $0.state == .running }), "a terminal in the restart delta never restores a running card")
+        afterTerminal.stop()
+        _ = await PersistenceWriteCoordinator.shared.flush(timeoutNanoseconds: 2_000_000_000)
+        try expect(
+            ledgerCount == ledgerCountBeforeRestart && completionCount == completionCountBeforeRestart,
+            "restart recovery never replays historical ledger tokens or completion notifications"
+        )
+    }
+
     @MainActor
     private static func testObserverRestartDuringActiveTurns() async throws {
         let base = FileManager.default.temporaryDirectory
@@ -6364,7 +6687,7 @@ struct CodexUsageStatusTests {
         // The core-test executable has no release bundle, so AppVersion.current
         // resolves to "dev". Validate the canonical artifact against the
         // release version baked into the current packaging script instead.
-        let expectedArtifactVersion = "2.4.133"
+        let expectedArtifactVersion = "2.4.134"
         let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, expectedArtifactVersion])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 
