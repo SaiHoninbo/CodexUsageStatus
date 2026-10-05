@@ -29,6 +29,7 @@ enum CodexChatExecutionState: String, Equatable, Sendable {
 
 enum CodexExecutionModelSource: String, Codable, Equatable, Sendable {
     case sessionMetadata
+    case turnContext
 }
 
 enum CodexExecutionModelConfidence: String, Codable, Equatable, Sendable {
@@ -40,6 +41,7 @@ struct CodexExecutionModelMetadata: Codable, Equatable, Sendable {
     let displayName: String?
     let source: CodexExecutionModelSource
     let confidence: CodexExecutionModelConfidence
+    var reasoningEffort: String? = nil
 
     static let unavailable = CodexExecutionModelMetadata(
         displayName: nil,
@@ -48,7 +50,76 @@ struct CodexExecutionModelMetadata: Codable, Equatable, Sendable {
     )
 
     var displayText: String {
-        displayName ?? "模型未取得"
+        guard let displayName else { return "模型未取得" }
+        return reasoningEffort.map { "\(displayName) · \($0)" } ?? displayName
+    }
+
+    var provenanceText: String {
+        guard confidence == .observed else { return "尚無可靠本地模型資料" }
+        return source == .turnContext
+            ? "本地 turn_context.model / effort；觀測值"
+            : "本地 session_meta；觀測值"
+    }
+}
+
+struct CodexTokenUsageRateSample: Equatable, Sendable {
+    let observedAt: Date
+    let tokenTotal: Int64
+}
+
+enum CodexTokenUsageRate: Equatable, Sendable {
+    case calculating
+    case unavailable
+    case measured(tokensPerSecond: Double, intervalSeconds: Double)
+
+    var displayText: String {
+        switch self {
+        case .calculating: return "計算中"
+        case .unavailable: return "—"
+        case .measured(let value, _): return String(format: "%.1f", value)
+        }
+    }
+}
+
+/// Total-token usage, measured between factual rollout timestamps. This is
+/// not output generation speed. Both the time span and allocation are bounded.
+struct CodexTokenUsageRateWindow: Equatable, Sendable {
+    static let retentionSeconds: TimeInterval = 180
+    static let minimumIntervalSeconds: TimeInterval = 60
+    static let maximumSampleCount = 512
+    private(set) var samples: [CodexTokenUsageRateSample] = []
+
+    mutating func record(tokenTotal: Int64, observedAt: Date) {
+        guard tokenTotal >= 0 else { return }
+        if let latest = samples.last {
+            guard observedAt >= latest.observedAt else { return }
+            if tokenTotal < latest.tokenTotal {
+                samples.removeAll(keepingCapacity: true)
+            } else if observedAt == latest.observedAt {
+                samples.removeLast()
+            }
+        }
+        samples.append(.init(observedAt: observedAt, tokenTotal: tokenTotal))
+        let cutoff = observedAt.addingTimeInterval(-Self.retentionSeconds)
+        samples.removeAll { $0.observedAt < cutoff }
+        if samples.count > Self.maximumSampleCount {
+            samples.removeFirst(samples.count - Self.maximumSampleCount)
+        }
+    }
+
+    func rate(at now: Date) -> CodexTokenUsageRate {
+        guard let latest = samples.last else { return .calculating }
+        guard now.timeIntervalSince(latest.observedAt) <= Self.retentionSeconds else { return .unavailable }
+        // Use actual samples only. A sparse window may cover less than 180s;
+        // never invent a token total at the boundary or a zero-rate heartbeat.
+        let cutoff = latest.observedAt.addingTimeInterval(-Self.retentionSeconds)
+        guard let baseline = samples.first(where: { $0.observedAt >= cutoff }) else { return .unavailable }
+        let interval = latest.observedAt.timeIntervalSince(baseline.observedAt)
+        guard interval >= Self.minimumIntervalSeconds else { return .calculating }
+        return .measured(
+            tokensPerSecond: Double(latest.tokenTotal - baseline.tokenTotal) / interval,
+            intervalSeconds: interval
+        )
     }
 }
 
@@ -87,6 +158,7 @@ struct CodexChatExecutionTracking: Identifiable, Equatable, Sendable {
     var plan: TurnPlanSnapshot?
     var lastObservedAt: Date
     var presentationLineage: CodexLocalSessionLineage?
+    var tokenRateWindow = CodexTokenUsageRateWindow()
 
     var id: CodexChatExecutionKey { key }
 
@@ -119,7 +191,112 @@ struct CodexChatExecutionTracking: Identifiable, Equatable, Sendable {
     }
 }
 
+struct CodexDismissedChatTurn: Equatable, Sendable {
+    let turnID: String
+    let observedAt: Date
+}
+
+struct CodexChatTrackingState: Equatable, Sendable {
+    var cards: [CodexChatExecutionTracking] = []
+    var dismissedTurns: [CodexChatExecutionKey: CodexDismissedChatTurn] = [:]
+}
+
 enum CodexChatExecutionTrackingPolicy {
+    /// Admission requires top-level user provenance and either a live start
+    /// or an observer-verified active Turn recovered after a reset.
+    static func applying(
+        _ event: CodexLocalTurnActivityEvent,
+        to current: CodexChatTrackingState
+    ) -> CodexChatTrackingState {
+        var result = current
+        let incomingKey = key(for: event)
+        let matches = result.cards.indices.filter { compatible(result.cards[$0], with: incomingKey) }
+        guard matches.count <= 1 else { return current }
+        let index = matches.first
+        if let index, event.observedAt < result.cards[index].lastObservedAt { return current }
+
+        if event.presentationLineage?.isKnownInternalExecution == true {
+            if let index { result.cards.remove(at: index) }
+            return result
+        }
+        let dismissed = result.dismissedTurns.filter { compatible($0.key, with: incomingKey) }
+        let recoversActiveTurn = event.activeTurnRecovery?.accepts(event) == true
+        if !dismissed.isEmpty {
+            guard event.kind == .started || recoversActiveTurn,
+                  dismissed.values.allSatisfy({ $0.turnID != event.turnID && event.observedAt > $0.observedAt }) else {
+                return current
+            }
+        }
+
+        if event.kind == .started || recoversActiveTurn {
+            guard event.sessionIdentity?.threadID == event.threadID,
+                  event.presentationLineage?.isTopLevelUserChat == true else { return current }
+            if let index, result.cards[index].turnID == event.turnID {
+                // Replayed/duplicate starts must not reset samples, resurrect
+                // a terminal run, or reopen a dismissed run.
+                return current
+            }
+            dismissed.keys.forEach { result.dismissedTurns.removeValue(forKey: $0) }
+            let previous = index.map { result.cards[$0] }
+            var card = CodexChatExecutionTracking(
+                key: previous.map { mergedKey(current: $0.key, incoming: incomingKey) } ?? incomingKey,
+                turnID: event.turnID,
+                repositoryDisplayName: event.sessionIdentity?.repositoryDisplayName ?? previous?.repositoryDisplayName,
+                workspaceDisplayName: event.sessionIdentity?.workspaceDisplayName ?? previous?.workspaceDisplayName,
+                chatName: CodexExecutionProjectionPolicy.updatedChatName(
+                    current: previous?.chatName, incoming: event.programName, identityProven: true
+                ),
+                model: event.modelMetadata ?? .unavailable,
+                state: .running,
+                startedAt: event.startedAt ?? event.observedAt,
+                completedAt: nil,
+                tokenTotal: event.turnTokenTotal,
+                plan: nil,
+                lastObservedAt: event.observedAt,
+                presentationLineage: event.presentationLineage
+            )
+            if let total = event.turnTokenTotal { card.tokenRateWindow.record(tokenTotal: total, observedAt: event.observedAt) }
+            if let index { result.cards[index] = card } else { result.cards.append(card) }
+        } else {
+            guard let index, result.cards[index].turnID == event.turnID else { return current }
+            var card = result.cards[index]
+            card.key = mergedKey(current: card.key, incoming: incomingKey)
+            card.lastObservedAt = event.observedAt
+            card.chatName = CodexExecutionProjectionPolicy.updatedChatName(
+                current: card.chatName, incoming: event.programName,
+                identityProven: event.sessionIdentity?.threadID == event.threadID
+            )
+            card.repositoryDisplayName = event.sessionIdentity?.repositoryDisplayName ?? card.repositoryDisplayName
+            card.workspaceDisplayName = event.sessionIdentity?.workspaceDisplayName ?? card.workspaceDisplayName
+            card.model = event.modelMetadata ?? card.model
+            if let total = event.turnTokenTotal {
+                card.tokenTotal = total
+                card.tokenRateWindow.record(tokenTotal: total, observedAt: event.observedAt)
+            }
+            switch event.kind {
+            case .completed: card.state = .completed
+            case .failed: card.state = .failed
+            case .interrupted: card.state = .interrupted
+            case .started, .tokenUpdated, .metadataUpdated: break
+            }
+            if card.state.isTerminal, card.completedAt == nil {
+                card.completedAt = event.completedAt ?? event.observedAt
+            }
+            result.cards[index] = card
+        }
+        result.cards = sorted(result.cards)
+        return result
+    }
+
+    /// Projection-only dismissal. No execution, observer, or Codex API call.
+    static func dismissing(_ key: CodexChatExecutionKey, in current: CodexChatTrackingState) -> CodexChatTrackingState {
+        var result = current
+        guard let card = result.cards.first(where: { $0.key == key }) else { return current }
+        result.dismissedTurns[key] = .init(turnID: card.turnID, observedAt: card.lastObservedAt)
+        result.cards.removeAll { $0.key == key }
+        return result
+    }
+
     static func key(for event: CodexLocalTurnActivityEvent) -> CodexChatExecutionKey {
         CodexChatExecutionKey(
             profileID: event.profileID,

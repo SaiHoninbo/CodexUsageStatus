@@ -22,10 +22,11 @@ enum FloatingHUDLayout {
         scaleLevel: HUDScaleLevel = .standard,
         quotaRowCount: Int = HUDMetrics.canonicalQuotaRowCount,
         includesAccountInfoRow: Bool = false,
-        includesChatTrackingSection: Bool = false
+        includesChatTrackingSection: Bool = false,
+        chatTrackingSectionHeight: CGFloat? = nil
     ) -> NSSize {
         _ = placement
-        let metrics = HUDMetrics(scaleLevel: scaleLevel)
+        let metrics = HUDMetrics(scaleLevel: scaleLevel, chatTrackingSectionHeight: chatTrackingSectionHeight)
         let size = metrics.panelSize(
             quotaRowCount: quotaRowCount,
             includesAccountInfoRow: includesAccountInfoRow,
@@ -46,6 +47,9 @@ final class FloatingHUDLayoutState: ObservableObject {
     @Published var quotaRowCount: Int = 1
     @Published var showsAccountInfoRow = false
     @Published var showsChatTrackingSection = false
+    @Published var chatTrackingSectionHeight: CGFloat = 0
+    @Published var chatTrackingRequiresScroll = false
+    @Published var chatTrackingMeasuredContentHeight: CGFloat = 0
     /// Increments only when a hidden panel is successfully made visible. The
     /// SwiftUI tree uses this as a per-show render marker while the panel
     /// itself remains persistent and reusable.
@@ -57,7 +61,8 @@ final class FloatingHUDLayoutState: ObservableObject {
             scaleLevel: scaleLevel,
             quotaRowCount: quotaRowCount,
             includesAccountInfoRow: showsAccountInfoRow,
-            includesChatTrackingSection: showsChatTrackingSection
+            includesChatTrackingSection: showsChatTrackingSection,
+            chatTrackingSectionHeight: chatTrackingSectionHeight
         )
     }
 }
@@ -254,7 +259,7 @@ final class FloatingHUDPanelController: NSObject {
             setHUDScaleLevel: { [weak self] level in self?.setHUDScaleLevel(level) },
             quotaRowCountChanged: { [weak self] count in self?.setQuotaRowCount(count) },
             accountInfoRowVisibilityChanged: { [weak self] visible in self?.setAccountInfoRowVisibility(visible) },
-            chatTrackingVisibilityChanged: { [weak self] visible in self?.setChatTrackingVisibility(visible) },
+            chatTrackingContentHeightChanged: { [weak self] height in self?.setChatTrackingContentHeight(height) },
             checkForUpdates: { [weak self] in self?.model.checkForUpdates() },
             installUpdate: { [weak self] release in self?.model.installUpdate(release) },
             openReleasePage: { [weak self] in self?.model.openUpdateReleasePage() },
@@ -541,7 +546,8 @@ final class FloatingHUDPanelController: NSObject {
             scaleLevel: newLevel,
             quotaRowCount: layoutState.quotaRowCount,
             includesAccountInfoRow: layoutState.showsAccountInfoRow,
-            includesChatTrackingSection: layoutState.showsChatTrackingSection
+            includesChatTrackingSection: layoutState.showsChatTrackingSection,
+            chatTrackingSectionHeight: layoutState.chatTrackingSectionHeight
         )
         let targetFrame = lastCodexWindowFrame
         let visibleFrame = lastCodexVisibleFrame
@@ -578,6 +584,7 @@ final class FloatingHUDPanelController: NSObject {
             lastKnownSafePanelFrame = panel.frame
             layoutState.hasEstablishedPosition = true
         }
+        requestGeometryRefresh()
     }
 
     /// Keeps the AppKit frame in lockstep with the number of quota windows
@@ -615,7 +622,8 @@ final class FloatingHUDPanelController: NSObject {
             scaleLevel: layoutState.scaleLevel,
             quotaRowCount: newCount,
             includesAccountInfoRow: layoutState.showsAccountInfoRow,
-            includesChatTrackingSection: layoutState.showsChatTrackingSection
+            includesChatTrackingSection: layoutState.showsChatTrackingSection,
+            chatTrackingSectionHeight: layoutState.chatTrackingSectionHeight
         )
         let targetFrame = lastCodexWindowFrame
         let visibleFrame = lastCodexVisibleFrame
@@ -651,6 +659,7 @@ final class FloatingHUDPanelController: NSObject {
             lastKnownSafePanelFrame = panel.frame
             layoutState.hasEstablishedPosition = true
         }
+        requestGeometryRefresh()
     }
 
     private func setAccountInfoRowVisibility(_ visible: Bool) {
@@ -672,7 +681,8 @@ final class FloatingHUDPanelController: NSObject {
             scaleLevel: layoutState.scaleLevel,
             quotaRowCount: layoutState.quotaRowCount,
             includesAccountInfoRow: visible,
-            includesChatTrackingSection: layoutState.showsChatTrackingSection
+            includesChatTrackingSection: layoutState.showsChatTrackingSection,
+            chatTrackingSectionHeight: layoutState.chatTrackingSectionHeight
         )
         let targetFrame = lastCodexWindowFrame
         let visibleFrame = lastCodexVisibleFrame
@@ -708,53 +718,71 @@ final class FloatingHUDPanelController: NSObject {
             lastKnownSafePanelFrame = panel.frame
             layoutState.hasEstablishedPosition = true
         }
+        requestGeometryRefresh()
+    }
+
+    private func setChatTrackingContentHeight(_ height: CGFloat) {
+        let normalized = max(0, height.isFinite ? height : 0)
+        guard abs(layoutState.chatTrackingMeasuredContentHeight - normalized) > 0.5 else { return }
+        layoutState.chatTrackingMeasuredContentHeight = normalized
+        setChatTrackingVisibility(normalized > 0)
     }
 
     private func setChatTrackingVisibility(_ visible: Bool) {
-        guard let panel else {
-            layoutState.showsChatTrackingSection = visible
-            return
+        let executions = model.trackedChatExecutions
+        let metrics = HUDMetrics(scaleLevel: layoutState.scaleLevel)
+        let basePanelHeight = metrics.panelSize(
+            quotaRowCount: layoutState.quotaRowCount,
+            includesAccountInfoRow: layoutState.showsAccountInfoRow
+        ).height
+        let factor = metrics.factor
+        let estimatedCardHeights = executions.map { execution -> CGFloat in
+            let text = execution.chatName ?? "Chat 名稱未取得"
+            let wrappedLines = min(3, max(1, Int(ceil(Double(text.count) / 34.0))))
+            return (132 + CGFloat(max(0, wrappedLines - 1)) * 18) * factor
         }
-        guard visible != layoutState.showsChatTrackingSection else { return }
+        let measuredOrEstimated = layoutState.chatTrackingMeasuredContentHeight > 0
+            ? [layoutState.chatTrackingMeasuredContentHeight]
+            : estimatedCardHeights
+        let geometry = HUDChatTrackingGeometryPolicy.resolve(
+            cardContentHeights: measuredOrEstimated,
+            scaleFactor: factor,
+            basePanelHeight: basePanelHeight,
+            availableScreenHeight: lastCodexVisibleFrame?.height
+        )
+        let newVisible = visible && !executions.isEmpty
+        let geometryChanged = abs(layoutState.chatTrackingSectionHeight - geometry.sectionHeight) > 0.5
+        let visibilityChanged = newVisible != layoutState.showsChatTrackingSection
+        guard visibilityChanged || geometryChanged else { return }
 
-        let oldPanelSize = panel.frame.size
-        let oldOrigin = panel.frame.origin
+        let oldPanelSize = panel?.frame.size ?? layoutState.size
+        let oldOrigin = panel?.frame.origin ?? .zero
         let placement = layoutState.placement
+        layoutState.chatTrackingSectionHeight = geometry.sectionHeight
+        layoutState.chatTrackingRequiresScroll = geometry.requiresScroll
         let newSize = FloatingHUDLayout.size(
             for: placement,
             scaleLevel: layoutState.scaleLevel,
             quotaRowCount: layoutState.quotaRowCount,
             includesAccountInfoRow: layoutState.showsAccountInfoRow,
-            includesChatTrackingSection: visible
+            includesChatTrackingSection: newVisible,
+            chatTrackingSectionHeight: geometry.sectionHeight
         )
+        layoutState.showsChatTrackingSection = newVisible
+        guard let panel else { return }
         let targetFrame = lastCodexWindowFrame
         let visibleFrame = lastCodexVisibleFrame
-        let resizedOrigin: NSPoint
-        if let targetFrame {
-            resizedOrigin = HUDPlacementPolicy.resizedOrigin(
-                origin: oldOrigin,
-                targetFrame: targetFrame,
-                oldPanelSize: oldPanelSize,
-                newPanelSize: newSize,
-                placement: placement
+        let resizedOrigin = targetFrame.map {
+            HUDPlacementPolicy.resizedOrigin(
+                origin: oldOrigin, targetFrame: $0, oldPanelSize: oldPanelSize,
+                newPanelSize: newSize, placement: placement
             )
-        } else {
-            resizedOrigin = oldOrigin
-        }
-
+        } ?? oldOrigin
         applySize(newSize, to: panel)
-        let correctedOrigin = visibleFrame.map {
-            clampedOrigin(resizedOrigin, panelSize: newSize, visibleFrame: $0)
-        } ?? resizedOrigin
+        let correctedOrigin = visibleFrame.map { clampedOrigin(resizedOrigin, panelSize: newSize, visibleFrame: $0) } ?? resizedOrigin
         panel.setFrameOrigin(correctedOrigin)
-        layoutState.showsChatTrackingSection = visible
         if let targetFrame {
-            saveAnchor(
-                origin: correctedOrigin,
-                targetFrame: targetFrame,
-                panelSize: newSize,
-                placement: placement
-            )
+            saveAnchor(origin: correctedOrigin, targetFrame: targetFrame, panelSize: newSize, placement: placement)
         }
         lastPositionedPanelSize = newSize
         if hasEstablishedPosition, lastKnownSafePanelFrame != nil {
@@ -1350,7 +1378,8 @@ final class FloatingHUDPanelController: NSObject {
                 scaleLevel: layoutState.scaleLevel,
                 quotaRowCount: layoutState.quotaRowCount,
                 includesAccountInfoRow: layoutState.showsAccountInfoRow,
-                includesChatTrackingSection: layoutState.showsChatTrackingSection
+                includesChatTrackingSection: layoutState.showsChatTrackingSection,
+            chatTrackingSectionHeight: layoutState.chatTrackingSectionHeight
             )
             applySize(size, to: panel)
             let origin = HUDPlacementPolicy.origin(
@@ -1392,7 +1421,8 @@ final class FloatingHUDPanelController: NSObject {
                 scaleLevel: layoutState.scaleLevel,
                 quotaRowCount: layoutState.quotaRowCount,
                 includesAccountInfoRow: layoutState.showsAccountInfoRow,
-                includesChatTrackingSection: layoutState.showsChatTrackingSection
+                includesChatTrackingSection: layoutState.showsChatTrackingSection,
+            chatTrackingSectionHeight: layoutState.chatTrackingSectionHeight
             )
             applySize(size, to: panel)
             let origin = HUDPlacementPolicy.resizedOrigin(
@@ -1427,7 +1457,8 @@ final class FloatingHUDPanelController: NSObject {
                 scaleLevel: layoutState.scaleLevel,
                 quotaRowCount: layoutState.quotaRowCount,
                 includesAccountInfoRow: layoutState.showsAccountInfoRow,
-                includesChatTrackingSection: layoutState.showsChatTrackingSection
+                includesChatTrackingSection: layoutState.showsChatTrackingSection,
+            chatTrackingSectionHeight: layoutState.chatTrackingSectionHeight
             )
             applySize(size, to: panel)
             let resizedOrigin = HUDPlacementPolicy.resizedOrigin(
@@ -1461,7 +1492,8 @@ final class FloatingHUDPanelController: NSObject {
                 scaleLevel: layoutState.scaleLevel,
                 quotaRowCount: layoutState.quotaRowCount,
                 includesAccountInfoRow: layoutState.showsAccountInfoRow,
-                includesChatTrackingSection: layoutState.showsChatTrackingSection
+                includesChatTrackingSection: layoutState.showsChatTrackingSection,
+            chatTrackingSectionHeight: layoutState.chatTrackingSectionHeight
             )
             applySize(size, to: panel)
             let resizedOrigin = HUDPlacementPolicy.resizedOrigin(
@@ -1619,7 +1651,8 @@ final class FloatingHUDPanelController: NSObject {
             scaleLevel: layoutState.scaleLevel,
             quotaRowCount: layoutState.quotaRowCount,
             includesAccountInfoRow: layoutState.showsAccountInfoRow,
-            includesChatTrackingSection: layoutState.showsChatTrackingSection
+            includesChatTrackingSection: layoutState.showsChatTrackingSection,
+            chatTrackingSectionHeight: layoutState.chatTrackingSectionHeight
         )
         let resizedOrigin = HUDPlacementPolicy.resizedOrigin(
             origin: origin,

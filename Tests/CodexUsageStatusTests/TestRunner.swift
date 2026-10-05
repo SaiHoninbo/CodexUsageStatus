@@ -222,6 +222,8 @@ struct CodexUsageStatusTests {
             ("token activity presentation", testTokenActivityPresentation),
             ("local Codex usage artifact parser", testLocalCodexUsageArtifactParser),
             ("session lineage presentation metadata", testSessionLineagePresentationMetadata),
+            ("Chat tracking admission and total-token rate", testChatTrackingAdmissionAndRate),
+            ("active Turn recovery proof", testActiveTurnRecoveryProof),
             ("Repo Chat identity reconciliation", testRepoChatIdentityReconciliation),
             ("desktop activity authority", testDesktopActivityAuthority),
             ("local token usage ledger", testLocalTokenUsageLedger),
@@ -321,8 +323,27 @@ struct CodexUsageStatusTests {
             ,("termination reply gate", testTerminationReplyGate)
         ]
 
+        let arguments = CommandLine.arguments
+        var filters: [String] = []
+        var argumentIndex = 1
+        while argumentIndex < arguments.count {
+            if arguments[argumentIndex] == "--filter", argumentIndex + 1 < arguments.count {
+                filters.append(arguments[argumentIndex + 1])
+                argumentIndex += 2
+            } else {
+                argumentIndex += 1
+            }
+        }
+        let selectedTests = tests.filter { name, _ in filters.isEmpty || filters.contains(where: name.localizedCaseInsensitiveContains) }
+        let asyncTestNames = ["active execution observer epochs", "observer restart during active turns",
+                              "login lifecycle shutdown", "persistence write coordinator", "observer cursor persistence is async"]
+        if !filters.isEmpty && selectedTests.isEmpty
+            && !asyncTestNames.contains(where: { name in filters.contains(where: name.localizedCaseInsensitiveContains) }) {
+            fputs("No core tests matched filters: \(filters.joined(separator: ", \n"))\n", stderr)
+            exit(2)
+        }
         var failures = 0
-        for (name, test) in tests {
+        for (name, test) in selectedTests {
             do {
                 try test()
                 print("PASS \(name)")
@@ -331,6 +352,9 @@ struct CodexUsageStatusTests {
                 print("FAIL \(name): \(error)")
             }
         }
+        var asyncTestCount = 0
+        if filters.isEmpty || filters.contains(where: { "active execution observer epochs".localizedCaseInsensitiveContains($0) }) {
+        asyncTestCount += 1
         do {
             try await testActiveExecutionObserverEpochs()
             print("PASS active execution observer epochs")
@@ -338,6 +362,19 @@ struct CodexUsageStatusTests {
             failures += 1
             print("FAIL active execution observer epochs: \(error)")
         }
+        }
+        if filters.isEmpty || filters.contains(where: { "observer restart during active turns".localizedCaseInsensitiveContains($0) }) {
+        asyncTestCount += 1
+        do {
+            try await testObserverRestartDuringActiveTurns()
+            print("PASS observer restart during active turns")
+        } catch {
+            failures += 1
+            print("FAIL observer restart during active turns: \(error)")
+        }
+        }
+        if filters.isEmpty || filters.contains(where: { "login lifecycle shutdown".localizedCaseInsensitiveContains($0) }) {
+        asyncTestCount += 1
         do {
             try await testLoginLifecycleShutdown()
             print("PASS login lifecycle shutdown")
@@ -345,6 +382,9 @@ struct CodexUsageStatusTests {
             failures += 1
             print("FAIL login lifecycle shutdown: \(error)")
         }
+        }
+        if filters.isEmpty || filters.contains(where: { "persistence write coordinator".localizedCaseInsensitiveContains($0) }) {
+        asyncTestCount += 1
         do {
             try await testPersistenceWriteCoordinator()
             print("PASS persistence write coordinator")
@@ -352,6 +392,9 @@ struct CodexUsageStatusTests {
             failures += 1
             print("FAIL persistence write coordinator: \(error)")
         }
+        }
+        if filters.isEmpty || filters.contains(where: { "observer cursor persistence is async".localizedCaseInsensitiveContains($0) }) {
+        asyncTestCount += 1
         do {
             try await testObserverCursorPersistenceIsAsync()
             print("PASS observer cursor persistence is async")
@@ -359,7 +402,8 @@ struct CodexUsageStatusTests {
             failures += 1
             print("FAIL observer cursor persistence is async: \(error)")
         }
-        print("\(tests.count + 4 - failures)/\(tests.count + 4) tests passed")
+        }
+        print("\(selectedTests.count + asyncTestCount - failures)/\(selectedTests.count + asyncTestCount) tests passed")
         if failures > 0 { exit(1) }
     }
 
@@ -1835,6 +1879,98 @@ struct CodexUsageStatusTests {
             repositoryIdentityDigest: repoA.repositoryIdentityDigest
         )
         try expect(keyA != keyB, "simultaneous worktrees remain separate execution identities")
+    }
+
+    private static func testChatTrackingAdmissionAndRate() throws {
+        let root = URL(fileURLWithPath: "/tmp/chat-tracking-policy")
+        let base = Date(timeIntervalSince1970: 1_000)
+        let identity = CodexLocalSessionIdentity(
+            threadID: "top-chat", repositoryDisplayName: "Usage", workspaceDisplayName: "Usage",
+            kind: .repository, repositoryIdentityDigest: "repo"
+        )
+        func event(
+            _ kind: CodexLocalTurnActivityEventKind,
+            turn: String = "turn-1",
+            at seconds: TimeInterval,
+            total: Int64? = nil,
+            lineage: CodexLocalSessionLineage? = nil,
+            id: CodexLocalSessionIdentity? = identity
+        ) -> CodexLocalTurnActivityEvent {
+            CodexLocalTurnActivityEvent(
+                profileID: nil, physicalRootURL: root, threadID: "top-chat", turnID: turn,
+                kind: kind, startedAt: kind == .started ? base.addingTimeInterval(seconds) : nil,
+                completedAt: kind == .completed ? base.addingTimeInterval(seconds) : nil,
+                durationSeconds: nil, turnTokenTotal: total,
+                observedAt: base.addingTimeInterval(seconds), programName: "Main Chat",
+                sessionIdentity: id, presentationLineage: lineage
+            )
+        }
+        let user = CodexLocalSessionLineage(parentThreadID: nil, threadSource: .user, relationKind: .unknown, agentRole: nil)
+        let subagent = CodexLocalSessionLineage(parentThreadID: "top-chat", threadSource: .subagent, relationKind: .threadSpawn, agentRole: "worker")
+        let guardian = CodexLocalSessionLineage(parentThreadID: "top-chat", threadSource: .guardianReview, relationKind: .guardian, agentRole: nil)
+        let agentCreated = CodexLocalSessionLineage(parentThreadID: nil, threadSource: .agentCreatedThread, relationKind: .unknown, agentRole: nil)
+
+        var state = CodexChatTrackingState()
+        state = CodexChatExecutionTrackingPolicy.applying(event(.started, at: 0, total: 100, lineage: user), to: state)
+        try expect(state.cards.count == 1, "top-level user start admits one HUD card")
+        let admittedKey = try unwrap(state.cards.first?.key, "admitted chat key")
+        state = CodexChatExecutionTrackingPolicy.applying(event(.completed, at: 10, total: 120, lineage: user), to: state)
+        try expect(state.cards.count == 1 && state.cards[0].state == .completed, "completed top-level card remains retained")
+        state = CodexChatExecutionTrackingPolicy.applying(event(.started, turn: "turn-2", at: 20, total: 2, lineage: user), to: state)
+        try expect(state.cards.count == 1 && state.cards[0].turnID == "turn-2" && state.cards[0].tokenRateWindow.samples.count == 1, "rerun reuses card and resets its rate window")
+
+        var rejected = CodexChatTrackingState()
+        rejected = CodexChatExecutionTrackingPolicy.applying(event(.started, at: 0, lineage: subagent), to: rejected)
+        rejected = CodexChatExecutionTrackingPolicy.applying(event(.started, at: 0, lineage: guardian), to: rejected)
+        rejected = CodexChatExecutionTrackingPolicy.applying(event(.started, at: 0, lineage: agentCreated), to: rejected)
+        rejected = CodexChatExecutionTrackingPolicy.applying(event(.tokenUpdated, at: 1, total: 50, lineage: subagent), to: rejected)
+        rejected = CodexChatExecutionTrackingPolicy.applying(event(.tokenUpdated, at: 1, total: 50, lineage: user), to: rejected)
+        rejected = CodexChatExecutionTrackingPolicy.applying(event(.tokenUpdated, at: 2, total: 50, lineage: nil, id: nil), to: rejected)
+        rejected = CodexChatExecutionTrackingPolicy.applying(event(.started, turn: "unknown-start", at: 3, lineage: nil), to: rejected)
+        try expect(rejected.cards.isEmpty, "subagent, guardian, agent-created, and token-only unknown events cannot admit cards")
+
+        state = CodexChatExecutionTrackingPolicy.dismissing(admittedKey, in: state)
+        try expect(state.cards.isEmpty && state.dismissedTurns[admittedKey]?.turnID == "turn-2", "x removes only the HUD projection for the current run")
+        state = CodexChatExecutionTrackingPolicy.applying(event(.tokenUpdated, turn: "turn-2", at: 21, total: 3, lineage: user), to: state)
+        try expect(state.cards.isEmpty, "token event cannot resurrect a dismissed card")
+
+        let fourCards = Array(repeating: CGFloat(118), count: 4)
+        let roomy = HUDChatTrackingGeometryPolicy.resolve(
+            cardContentHeights: fourCards, scaleFactor: 1, basePanelHeight: 300, availableScreenHeight: 1_000
+        )
+        try expect(!roomy.requiresScroll && roomy.sectionHeight == roomy.naturalHeight, "all active cards fit without scrolling when screen space permits")
+        let chatMetrics = HUDMetrics(scaleLevel: .standard, chatTrackingSectionHeight: roomy.sectionHeight)
+        try expect(chatMetrics.panelSize(quotaRowCount: 2, includesChatTrackingSection: true).height > HUDMetrics().panelSize.height, "dynamic tracking content grows the panel below the unchanged base HUD")
+        let constrained = HUDChatTrackingGeometryPolicy.resolve(
+            cardContentHeights: fourCards, scaleFactor: 1, basePanelHeight: 300, availableScreenHeight: 700
+        )
+        try expect(constrained.requiresScroll && constrained.sectionHeight < constrained.naturalHeight, "scrolling begins only when actual screen capacity is insufficient")
+        try expect(HUDChatTrackingGeometryPolicy.resolve(cardContentHeights: [], scaleFactor: 1, basePanelHeight: 300, availableScreenHeight: 700).sectionHeight == 0, "empty tracking geometry adds no section")
+
+        var rate = CodexTokenUsageRateWindow()
+        rate.record(tokenTotal: 1_000, observedAt: base)
+        try expect(rate.rate(at: base.addingTimeInterval(59)) == .calculating, "rates under 60 seconds remain calculating")
+        rate.record(tokenTotal: 1_600, observedAt: base.addingTimeInterval(60))
+        guard case .measured(let sixtyRate, let sixtySpan) = rate.rate(at: base.addingTimeInterval(60)) else {
+            throw HarnessError.assertion("60-second total-token rate becomes available")
+        }
+        try expectApproximately(sixtyRate, 10, "60-second average total-token usage rate")
+        try expectApproximately(sixtySpan, 60, "rate uses valid observed sample interval")
+        rate.record(tokenTotal: 2_800, observedAt: base.addingTimeInterval(180))
+        guard case .measured(let windowRate, let windowSpan) = rate.rate(at: base.addingTimeInterval(180)) else {
+            throw HarnessError.assertion("180-second total-token rate remains available")
+        }
+        try expectApproximately(windowRate, 10, "180-second rolling total-token rate")
+        try expectApproximately(windowSpan, 180, "180-second window uses its actual baseline sample")
+        let previousSamples = rate.samples
+        rate.record(tokenTotal: 9_999, observedAt: base.addingTimeInterval(179))
+        try expect(rate.samples == previousSamples, "out-of-order sample is ignored")
+        rate.record(tokenTotal: 3, observedAt: base.addingTimeInterval(181))
+        try expect(rate.samples.count == 1 && rate.rate(at: base.addingTimeInterval(181)) == .calculating, "turn total reset clears rate history")
+
+        let context = Data(#"{"timestamp":"1970-01-01T00:16:40.000Z","type":"turn_context","payload":{"turn_id":"turn-a","model":"gpt-6.1-sol","effort":"max"}}"#.utf8)
+        let parsed = try unwrap(CodexLocalUsageArtifactParser.parseTurnContext(context), "turn_context model metadata")
+        try expect(parsed.model.displayText == "gpt-6.1-sol · max" && parsed.model.source == .turnContext, "model and effort come from observed current-turn context")
     }
 
     private static func testSessionLineagePresentationMetadata() throws {
@@ -3644,6 +3780,197 @@ struct CodexUsageStatusTests {
             ).isEmpty,
             "an ambiguous partial terminal cannot retire either execution"
         )
+    }
+
+    private static func activeTurnRecoveryFixture(
+        thread: String, source: String = "user", parent: String? = nil,
+        now: Date, terminal: String? = nil, includeStart: Bool = true,
+        tokenAge: TimeInterval = 5
+    ) throws -> Data {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var metadata: [String: Any] = ["id": thread, "cwd": "/tmp/recovery-project", "thread_source": source]
+        if let parent { metadata["parent_thread_id"] = parent }
+        var lines: [[String: Any]] = [["type": "session_meta", "payload": metadata]]
+        let turn = "turn-\(thread)"
+        func event(_ type: String, age: TimeInterval, payload: [String: Any]) -> [String: Any] {
+            ["timestamp": formatter.string(from: now.addingTimeInterval(-age)), "type": type, "payload": payload]
+        }
+        if includeStart {
+            lines.append(event("event_msg", age: 240, payload: ["type": "task_started", "turn_id": turn]))
+        }
+        lines.append(event("turn_context", age: 239, payload: ["turn_id": turn, "model": "gpt-6.1-sol", "effort": "max"]))
+        lines.append(event("token_usage_record", age: tokenAge, payload: [
+            "thread_id": thread, "turn_id": turn, "turn_token_usage": ["total_tokens": 6_000]
+        ]))
+        if let terminal {
+            lines.append(event("event_msg", age: 1, payload: ["type": terminal, "turn_id": turn, "reason": "interrupted"]))
+        }
+        var data = Data()
+        for line in lines {
+            data.append(try JSONSerialization.data(withJSONObject: line, options: [.sortedKeys]))
+            data.append(0x0A)
+        }
+        return data
+    }
+
+    private static func testActiveTurnRecoveryProof() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-recovery-proof-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let root = CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: base)
+        let now = Date()
+        let active = try activeTurnRecoveryFixture(thread: "main", now: now)
+        let head = try unwrap(CodexLocalUsageArtifactParser.parseSessionMetadata(Data(active.split(separator: 0x0A)[0])), "recovery head metadata")
+        func recover(_ data: Data, metadata: CodexLocalSessionMetadata? = nil) -> CodexLocalTurnActivityEvent? {
+            CodexLocalUsageObserver.recoverActiveTurnSnapshot(data, metadata: metadata ?? head, root: root, now: now)
+        }
+        let recovered = try unwrap(recover(active), "factual started + fresh activity recovers the current Turn")
+        try expect(recovered.activeTurnRecovery?.accepts(recovered) == true, "recovery carries typed start and freshness proof")
+        try expectApproximately(now.timeIntervalSince(try unwrap(recovered.startedAt, "factual recovered start")), 240, "recovery preserves the historical start time", tolerance: 0.01)
+        try expect(recovered.modelMetadata?.displayText == "gpt-6.1-sol · max", "recovery reads current-turn model metadata")
+        let admitted = CodexChatExecutionTrackingPolicy.applying(recovered, to: .init())
+        try expect(admitted.cards.count == 1 && admitted.cards[0].tokenTotal == 6_000, "verified recovery admits the top-level current Turn")
+        var tokenOnly = recovered
+        tokenOnly.activeTurnRecovery = nil
+        try expect(CodexChatExecutionTrackingPolicy.applying(tokenOnly, to: .init()).cards.isEmpty, "token-only event still cannot create a HUD card")
+        var wrongTurnProof = recovered
+        wrongTurnProof.activeTurnRecovery = .init(turnID: "other-turn", startedAt: recovered.startedAt!, latestActivityAt: recovered.observedAt, verifiedAt: now)
+        try expect(CodexChatExecutionTrackingPolicy.applying(wrongTurnProof, to: .init()).cards.isEmpty, "recovery proof must match the exact Turn")
+        let dismissed = CodexChatExecutionTrackingPolicy.dismissing(admitted.cards[0].key, in: admitted)
+        try expect(CodexChatExecutionTrackingPolicy.applying(recovered, to: dismissed).cards.isEmpty, "recovery cannot reopen a dismissed current Turn")
+        let terminal = CodexLocalTurnActivityEvent(
+            profileID: nil, physicalRootURL: base, threadID: "main", turnID: recovered.turnID,
+            kind: .completed, startedAt: nil, completedAt: now, durationSeconds: nil,
+            turnTokenTotal: nil, observedAt: now, sessionIdentity: head.identity, presentationLineage: head.lineage
+        )
+        let completed = CodexChatExecutionTrackingPolicy.applying(terminal, to: admitted)
+        try expect(CodexChatExecutionTrackingPolicy.applying(recovered, to: completed).cards[0].state == .completed, "replayed recovery cannot resurrect a completed Turn")
+
+        for source in ["subagent", "guardian_review", "agent_created_thread", "unknown"] {
+            let child = try activeTurnRecoveryFixture(thread: source, source: source, now: now)
+            let childHead = try unwrap(CodexLocalUsageArtifactParser.parseSessionMetadata(Data(child.split(separator: 0x0A)[0])), "internal recovery metadata")
+            try expect(recover(child, metadata: childHead) == nil, "\(source) never enters through the recovery path even without a parent field")
+        }
+        for kind in ["task_complete", "turn_aborted"] {
+            let ended = try activeTurnRecoveryFixture(thread: "main", now: now, terminal: kind)
+            try expect(recover(ended) == nil, "\(kind) blocks recovery")
+        }
+        let withoutStart = try activeTurnRecoveryFixture(thread: "main", now: now, includeStart: false)
+        let stale = try activeTurnRecoveryFixture(thread: "main", now: now, tokenAge: 181)
+        let future = try activeTurnRecoveryFixture(thread: "main", now: now, tokenAge: -5)
+        try expect(recover(withoutStart) == nil, "fresh tokens without a factual start remain unproven")
+        try expect(recover(stale) == nil, "stale activity cannot admit a card")
+        try expect(recover(future) == nil, "future activity cannot admit a card")
+        let lines = active.split(separator: 0x0A).map(Data.init)
+        var noTokens = Data()
+        for line in lines.prefix(3) { noTokens.append(line); noTokens.append(0x0A) }
+        try expect(recover(noTokens) == nil, "an old start without fresh activity remains unproven")
+        let contradictory = try activeTurnRecoveryFixture(thread: "other-main", now: now)
+        try expect(recover(active + contradictory) == nil, "contradictory session identity cannot reuse the original head")
+        var partialTerminal = active
+        partialTerminal.append(Data(#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-main"}}"#.utf8))
+        try expect(recover(partialTerminal) == nil, "partial trailing records cannot prove absence of termination")
+        let otherTurn = Data(String(decoding: lines[3], as: UTF8.self).replacingOccurrences(of: "turn-main", with: "new-turn-without-start").utf8)
+        try expect(recover(active + otherTurn + Data([0x0A])) == nil, "a new Turn cannot borrow the old Turn's start")
+
+        let sessions = base.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let file = sessions.appendingPathComponent("rollout-existing.jsonl")
+        try active.write(to: file)
+        let path = file.standardizedFileURL.resolvingSymlinksInPath().path
+        let cursors = [path: CodexLocalUsageCursor(byteOffset: UInt64(active.count), threadID: "main")]
+        let restored = CodexLocalUsageObserver.scanRoots([root], cursors: cursors, seededPaths: [path], knownRolloutPaths: [path], discoverNewRollouts: false, fastPollPaths: [path], recoverActiveTurns: true)
+        try expect(restored.turnActivities.count == 1 && restored.events.isEmpty && restored.turnCompletions.isEmpty, "EOF cursor recovers only the HUD projection without replaying history")
+        let caughtUp = CodexLocalUsageObserver.scanRoots([root], cursors: restored.cursors, seededPaths: restored.seededPaths, knownRolloutPaths: [path], discoverNewRollouts: false, fastPollPaths: [path])
+        try expect(caughtUp.turnActivities.isEmpty && caughtUp.metrics.rolloutContentFileHandleOpenCount == 0, "ordinary caught-up polls do not repeat recovery reads")
+        try activeTurnRecoveryFixture(thread: "main", now: now, terminal: "task_complete").write(to: file)
+        let ended = CodexLocalUsageObserver.scanRoots([root], cursors: restored.cursors, seededPaths: restored.seededPaths, knownRolloutPaths: [path], discoverNewRollouts: false, fastPollPaths: [path], recoverActiveTurns: true)
+        try expect(ended.turnActivities.allSatisfy { $0.activeTurnRecovery == nil }, "terminal appended before the recovery snapshot blocks admission")
+
+        // A current start outside the read budget is explicitly unproven.
+        var beyondBudget = noTokens
+        beyondBudget.append(Data(#"{"type":"response_item","payload":{"text":""#.utf8))
+        beyondBudget.append(Data(repeating: 0x78, count: CodexLocalUsageObserver.activeTurnRecoveryReadLimit + 32))
+        beyondBudget.append(Data(#""}}"#.utf8))
+        beyondBudget.append(0x0A)
+        beyondBudget.append(lines[3]); beyondBudget.append(0x0A)
+        try beyondBudget.write(to: file)
+        let bounded = CodexLocalUsageObserver.scanRoots([root], cursors: [path: .init(byteOffset: UInt64(beyondBudget.count), threadID: "main")], seededPaths: [path], knownRolloutPaths: [path], discoverNewRollouts: false, fastPollPaths: [path], recoverActiveTurns: true)
+        try expect(bounded.turnActivities.isEmpty, "start outside the bounded suffix remains NOT_PROVEN, never blind token admission")
+    }
+
+    @MainActor
+    private static func testObserverRestartDuringActiveTurns() async throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-active-restart-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let home = base.appendingPathComponent("home", isDirectory: true)
+        let sessions = home.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let now = Date()
+        for thread in ["main-a", "main-b"] {
+            try activeTurnRecoveryFixture(thread: thread, now: now)
+                .write(to: sessions.appendingPathComponent("rollout-\(thread).jsonl"))
+        }
+        for source in ["subagent", "guardian_review", "agent_created_thread"] {
+            try activeTurnRecoveryFixture(thread: source, source: source, parent: "main-a", now: now)
+                .write(to: sessions.appendingPathComponent("rollout-\(source).jsonl"))
+        }
+        let cursorURL = base.appendingPathComponent("state/cursors.json")
+        var state = CodexChatTrackingState()
+        var scanCount = 0
+        var ledgerCount = 0
+        var completionCount = 0
+        func makeObserver() -> CodexLocalUsageObserver {
+            CodexLocalUsageObserver(
+                cursorURL: cursorURL,
+                handler: { _, _ in ledgerCount += 1 },
+                turnCompletionHandler: { _, _ in completionCount += 1 },
+                turnActivityHandler: { state = CodexChatExecutionTrackingPolicy.applying($0, to: state) },
+                activeExecutionReconciliationHandler: {
+                    if $0.resetActiveExecutions { state = .init() } else { scanCount += 1 }
+                }
+            )
+        }
+        func awaitScan(after count: Int) async throws {
+            let deadline = Date().addingTimeInterval(2)
+            while scanCount <= count && Date() < deadline {
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            try expect(scanCount > count, "bootstrap finishes a normal observer scan")
+        }
+        let roots = [CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: home)]
+        let observer = makeObserver()
+        defer { observer.stop() }
+        observer.setRoots(roots)
+        observer.start()
+        try await awaitScan(after: 0)
+        try expect(Set(state.cards.map { $0.key.threadID }) == ["main-a", "main-b"], "cold startup recovers exactly two already-active main Chats")
+        try expect(state.cards.allSatisfy { $0.state == .running }, "recovered Chats retain active state")
+
+        let beforeRestart = scanCount
+        observer.stop()
+        observer.start()
+        try await awaitScan(after: beforeRestart)
+        try expect(state.cards.count == 2, "observer reset restores the same two Chats without new starts")
+        observer.stop()
+        await PersistenceWriteCoordinator.shared.flush(timeoutNanoseconds: 2_000_000_000)
+
+        let relaunched = makeObserver()
+        defer { relaunched.stop() }
+        let beforeRelaunch = scanCount
+        relaunched.setRoots(roots)
+        relaunched.start()
+        try await awaitScan(after: beforeRelaunch)
+        try expect(Set(state.cards.map { $0.key.threadID }) == ["main-a", "main-b"], "app relaunch with persisted EOF cursors restores main Chats only")
+        let additionalHome = base.appendingPathComponent("additional-home", isDirectory: true)
+        try FileManager.default.createDirectory(at: additionalHome, withIntermediateDirectories: true)
+        let beforeRootReset = scanCount
+        relaunched.setRoots(roots + [.init(profileID: UUID(), codexHomeURL: additionalHome)])
+        try await awaitScan(after: beforeRootReset)
+        try expect(state.cards.count == 2, "root-set reset also restores already-active Chats in retained roots")
+        try expect(ledgerCount == 0 && completionCount == 0, "recovery never replays historical ledger tokens or completion notifications")
     }
 
     @MainActor
@@ -6037,7 +6364,7 @@ struct CodexUsageStatusTests {
         // The core-test executable has no release bundle, so AppVersion.current
         // resolves to "dev". Validate the canonical artifact against the
         // release version baked into the current packaging script instead.
-        let expectedArtifactVersion = "2.4.132"
+        let expectedArtifactVersion = "2.4.133"
         let adhocStatus = try runToolStatus("/bin/bash", [validatorURL.path, artifactURL.path, expectedArtifactVersion])
         try expect(adhocStatus == 0, "ad-hoc artifact is accepted for local/candidate validation")
 

@@ -4,17 +4,53 @@ import Foundation
 /// Geometry and typography for the C vertical HUD.  Keeping these values in
 /// one pure type makes every scale level auditable and prevents independent
 /// rows/cards from accidentally acquiring different scale factors.
+
+struct HUDChatTrackingGeometry: Equatable, Sendable {
+    let naturalHeight: CGFloat
+    let sectionHeight: CGFloat
+    let scrollHeight: CGFloat
+    let requiresScroll: Bool
+}
+
+enum HUDChatTrackingGeometryPolicy {
+    static func resolve(
+        cardContentHeights: [CGFloat],
+        scaleFactor: CGFloat,
+        basePanelHeight: CGFloat,
+        availableScreenHeight: CGFloat?,
+        sectionChromeHeight: CGFloat = 52,
+        verticalSafetyMargin: CGFloat = 20
+    ) -> HUDChatTrackingGeometry {
+        guard !cardContentHeights.isEmpty else {
+            return HUDChatTrackingGeometry(naturalHeight: 0, sectionHeight: 0, scrollHeight: 0, requiresScroll: false)
+        }
+        let chrome = sectionChromeHeight * scaleFactor
+        let natural = chrome + cardContentHeights.reduce(0, +)
+            + CGFloat(max(0, cardContentHeights.count - 1)) * (7 * scaleFactor)
+        let capacity = availableScreenHeight.map {
+            max(0, $0 - basePanelHeight - verticalSafetyMargin)
+        } ?? natural
+        let section = min(natural, capacity)
+        return HUDChatTrackingGeometry(
+            naturalHeight: natural,
+            sectionHeight: section,
+            scrollHeight: max(0, section - chrome),
+            requiresScroll: section + 0.5 < natural
+        )
+    }
+}
+
 struct HUDMetrics: Equatable {
     let scaleLevel: HUDScaleLevel
+    let trackingSectionHeight: CGFloat?
 
     // The current C-layout HUD keeps its 416pt compatibility width. The Token
     // Activity area is now the hero: its stable reel cells and 2x2 secondary
     // grid need more vertical room than the retired two-line summary.
     static let canonicalTokenSummaryHeight: CGFloat = 78
     static let canonicalTokenSummaryGap: CGFloat = 5
-    // The tracking section is intentionally bounded. Cards beyond this
-    // height stay reachable through the section's own ScrollView.
-    static let canonicalChatTrackingSectionHeight: CGFloat = 238
+    // Tracking cards grow to their measured content height. Screen space,
+    // when available, is applied by CodexChatTrackingGeometryPolicy.
     static let canonicalChatTrackingGap: CGFloat = 6
     static let canonicalPanelWidth: CGFloat = 416
     static let canonicalOuterPadding: CGFloat = 11
@@ -54,8 +90,9 @@ struct HUDMetrics: Equatable {
             + canonicalActionHeight
     )
 
-    init(scaleLevel: HUDScaleLevel = .standard) {
+    init(scaleLevel: HUDScaleLevel = .standard, chatTrackingSectionHeight: CGFloat? = nil) {
         self.scaleLevel = scaleLevel
+        self.trackingSectionHeight = chatTrackingSectionHeight
     }
 
     var factor: CGFloat { scaleLevel.scaleFactor }
@@ -104,11 +141,10 @@ struct HUDMetrics: Equatable {
     var workflowActionHeight: CGFloat { actionHeight }
     var tokenSummaryHeight: CGFloat { Self.canonicalTokenSummaryHeight * factor }
     var tokenSummaryGap: CGFloat { Self.canonicalTokenSummaryGap * factor }
-    var chatTrackingSectionHeight: CGFloat { Self.canonicalChatTrackingSectionHeight * factor }
+    var chatTrackingSectionHeight: CGFloat { max(0, trackingSectionHeight ?? 0) }
     var chatTrackingGap: CGFloat { Self.canonicalChatTrackingGap * factor }
     var chatTrackingScrollHeight: CGFloat {
-        // Reserve the section padding, title, divider, and vertical stack
-        // spacing so the scroll view stays inside the fixed section frame.
+        // Header, divider, spacing, and vertical section padding.
         max(0, chatTrackingSectionHeight - (52 * factor))
     }
     var workflowActionGap: CGFloat { Self.canonicalWorkflowActionGap * factor }

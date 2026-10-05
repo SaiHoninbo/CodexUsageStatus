@@ -57,4 +57,4 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Tests/CodexUsageStatusTests/TestRunner.swift" \
   -o "$BUILD_DIR/CodexUsageStatusTests"
 
-"$BUILD_DIR/CodexUsageStatusTests"
+"$BUILD_DIR/CodexUsageStatusTests" "$@"

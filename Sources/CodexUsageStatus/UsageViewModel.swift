@@ -67,7 +67,7 @@ final class UsageViewModel: ObservableObject {
     @Published private(set) var trackedChatExecutions: [CodexChatExecutionTracking] = []
     private var activeExecutionObservationEpoch: UInt64?
     private var retiredActiveExecutionKeys: Set<CodexExecutionKey> = []
-    private var dismissedChatExecutionKeys: Set<CodexChatExecutionKey> = []
+    private var dismissedChatExecutionTurns: [CodexChatExecutionKey: CodexDismissedChatTurn] = [:]
     /// Observer-based estimates are separate from provider Plan snapshots and
     /// are derived only from bounded local Turn duration evidence.
     @Published private(set) var executionEstimationHistoryReady = false
@@ -501,7 +501,7 @@ final class UsageViewModel: ObservableObject {
         localUsageObserver?.stop()
         activeExecutions.removeAll()
         trackedChatExecutions.removeAll()
-        dismissedChatExecutionKeys.removeAll()
+        dismissedChatExecutionTurns.removeAll()
         retiredActiveExecutionKeys.removeAll()
         client.stop()
         accountManagementService.stopAllLogins()
@@ -1437,7 +1437,8 @@ final class UsageViewModel: ObservableObject {
     }
 
     private func updateActiveExecutionProjection(_ event: CodexLocalTurnActivityEvent) {
-        guard localUsageObserver?.containsObservationRoot(event.physicalRootURL) == true else { return }
+        guard event.kind != .metadataUpdated,
+              localUsageObserver?.containsObservationRoot(event.physicalRootURL) == true else { return }
         let key = CodexExecutionProjectionPolicy.key(for: event)
         func makeProjection() -> CodexExecutionProjection {
             let identity = event.sessionIdentity
@@ -1488,6 +1489,9 @@ final class UsageViewModel: ObservableObject {
             }
             activeExecutions = CodexExecutionProjectionPolicy.sorted(activeExecutions)
 
+        case .metadataUpdated:
+            return
+
         case .tokenUpdated:
             guard !retiredActiveExecutionKeys.contains(key),
                   !retiredActiveExecutionKeys.contains(CodexExecutionProjectionPolicy.keyWithoutRepositoryIdentity(for: event)) else {
@@ -1533,152 +1537,18 @@ final class UsageViewModel: ObservableObject {
 
     private func updateTrackedChatExecution(_ event: CodexLocalTurnActivityEvent) {
         guard localUsageObserver?.containsObservationRoot(event.physicalRootURL) == true else { return }
-        let key = CodexChatExecutionTrackingPolicy.key(for: event)
-
-        if event.kind == .started {
-            // A new Turn is a new run of the same Chat. A prior user dismissal
-            // applies only to the old card and must not hide the new run.
-            let dismissedKeysToReopen = dismissedChatExecutionKeys.filter {
-                CodexChatExecutionTrackingPolicy.compatible($0, with: key)
-            }
-            dismissedKeysToReopen.forEach { dismissedChatExecutionKeys.remove($0) }
-        } else if dismissedChatExecutionKeys.contains(where: {
-            CodexChatExecutionTrackingPolicy.compatible($0, with: key)
-        }) {
-            return
-        }
-
-        let exactIndex = trackedChatExecutions.firstIndex { $0.key == key }
-        let partialIndices = exactIndex == nil
-            ? trackedChatExecutions.indices.filter {
-                CodexChatExecutionTrackingPolicy.compatible(trackedChatExecutions[$0], with: key)
-            }
-            : []
-        guard partialIndices.count <= 1 else { return }
-        let index = exactIndex ?? partialIndices.first
-
-        func normalizedChatName(current: String?, incoming: String?, identityProven: Bool) -> String? {
-            CodexExecutionProjectionPolicy.updatedChatName(
-                current: current,
-                incoming: incoming,
-                identityProven: identityProven
-            )
-        }
-
-        func modelMetadata(current: CodexExecutionModelMetadata) -> CodexExecutionModelMetadata {
-            event.modelMetadata ?? current
-        }
-
-        switch event.kind {
-        case .started:
-            let identity = event.sessionIdentity
-            let card = CodexChatExecutionTracking(
-                key: key,
-                turnID: event.turnID,
-                repositoryDisplayName: identity?.repositoryDisplayName,
-                workspaceDisplayName: identity?.workspaceDisplayName,
-                chatName: event.programName,
-                model: event.modelMetadata ?? .unavailable,
-                state: .running,
-                startedAt: event.startedAt ?? event.observedAt,
-                completedAt: nil,
-                tokenTotal: event.turnTokenTotal,
-                plan: nil,
-                lastObservedAt: event.observedAt,
-                presentationLineage: event.presentationLineage
-            )
-            if let index {
-                trackedChatExecutions[index] = card
-            } else {
-                trackedChatExecutions.append(card)
-            }
-            trackedChatExecutions = CodexChatExecutionTrackingPolicy.sorted(trackedChatExecutions)
-
-        case .tokenUpdated:
-            guard let index else {
-                guard event.turnTokenTotal != nil else { return }
-                let identity = event.sessionIdentity
-                trackedChatExecutions.append(
-                    CodexChatExecutionTracking(
-                        key: key,
-                        turnID: event.turnID,
-                        repositoryDisplayName: identity?.repositoryDisplayName,
-                        workspaceDisplayName: identity?.workspaceDisplayName,
-                        chatName: event.programName,
-                        model: event.modelMetadata ?? .unavailable,
-                        state: .running,
-                        startedAt: event.startedAt ?? event.observedAt,
-                        completedAt: nil,
-                        tokenTotal: event.turnTokenTotal,
-                        plan: nil,
-                        lastObservedAt: event.observedAt,
-                        presentationLineage: event.presentationLineage
-                    )
-                )
-                trackedChatExecutions = CodexChatExecutionTrackingPolicy.sorted(trackedChatExecutions)
-                return
-            }
-            let previousObservedAt = trackedChatExecutions[index].lastObservedAt
-            let identityProven = event.sessionIdentity != nil
-            trackedChatExecutions[index].key = CodexChatExecutionTrackingPolicy.mergedKey(
-                current: trackedChatExecutions[index].key,
-                incoming: key
-            )
-            trackedChatExecutions[index].turnID = event.turnID
-            trackedChatExecutions[index].tokenTotal = event.turnTokenTotal ?? trackedChatExecutions[index].tokenTotal
-            trackedChatExecutions[index].lastObservedAt = CodexExecutionProjectionPolicy.monotonicLastObservedAt(
-                current: previousObservedAt,
-                incoming: event.observedAt
-            )
-            trackedChatExecutions[index].chatName = normalizedChatName(
-                current: trackedChatExecutions[index].chatName,
-                incoming: event.programName,
-                identityProven: identityProven
-            )
-            if let identity = event.sessionIdentity {
-                trackedChatExecutions[index].repositoryDisplayName = identity.repositoryDisplayName ?? trackedChatExecutions[index].repositoryDisplayName
-                trackedChatExecutions[index].workspaceDisplayName = identity.workspaceDisplayName ?? trackedChatExecutions[index].workspaceDisplayName
-            }
-            trackedChatExecutions[index].model = modelMetadata(current: trackedChatExecutions[index].model)
-            if let lineage = event.presentationLineage {
-                trackedChatExecutions[index].presentationLineage = lineage
-            }
-            trackedChatExecutions = CodexChatExecutionTrackingPolicy.sorted(trackedChatExecutions)
-
-        case .completed, .failed, .interrupted:
-            guard let index else { return }
-            trackedChatExecutions[index].key = CodexChatExecutionTrackingPolicy.mergedKey(
-                current: trackedChatExecutions[index].key,
-                incoming: key
-            )
-            trackedChatExecutions[index].turnID = event.turnID
-            trackedChatExecutions[index].state = {
-                switch event.kind {
-                case .completed: return .completed
-                case .failed: return .failed
-                case .interrupted: return .interrupted
-                default: return trackedChatExecutions[index].state
-                }
-            }()
-            trackedChatExecutions[index].completedAt = event.completedAt ?? event.observedAt
-            trackedChatExecutions[index].lastObservedAt = CodexExecutionProjectionPolicy.monotonicLastObservedAt(
-                current: trackedChatExecutions[index].lastObservedAt,
-                incoming: event.observedAt
-            )
-            trackedChatExecutions[index].tokenTotal = event.turnTokenTotal ?? trackedChatExecutions[index].tokenTotal
-            trackedChatExecutions[index].chatName = normalizedChatName(
-                current: trackedChatExecutions[index].chatName,
-                incoming: event.programName,
-                identityProven: event.sessionIdentity != nil
-            )
-            trackedChatExecutions[index].model = modelMetadata(current: trackedChatExecutions[index].model)
-            trackedChatExecutions = CodexChatExecutionTrackingPolicy.sorted(trackedChatExecutions)
-        }
+        let current = CodexChatTrackingState(cards: trackedChatExecutions, dismissedTurns: dismissedChatExecutionTurns)
+        applyChatTrackingState(CodexChatExecutionTrackingPolicy.applying(event, to: current))
     }
 
     func dismissTrackedChatExecution(_ key: CodexChatExecutionKey) {
-        dismissedChatExecutionKeys.insert(key)
-        trackedChatExecutions.removeAll { $0.key == key }
+        let current = CodexChatTrackingState(cards: trackedChatExecutions, dismissedTurns: dismissedChatExecutionTurns)
+        applyChatTrackingState(CodexChatExecutionTrackingPolicy.dismissing(key, in: current))
+    }
+
+    private func applyChatTrackingState(_ state: CodexChatTrackingState) {
+        if trackedChatExecutions != state.cards { trackedChatExecutions = state.cards }
+        dismissedChatExecutionTurns = state.dismissedTurns
     }
 
     private func handleActiveExecutionReconciliation(
@@ -1687,7 +1557,7 @@ final class UsageViewModel: ObservableObject {
         if reconciliation.resetActiveExecutions {
             activeExecutions.removeAll()
             trackedChatExecutions.removeAll()
-            dismissedChatExecutionKeys.removeAll()
+            dismissedChatExecutionTurns.removeAll()
             retiredActiveExecutionKeys.removeAll()
             activeExecutionObservationEpoch = reconciliation.observationEpoch
             return
@@ -1818,6 +1688,10 @@ final class UsageViewModel: ObservableObject {
     }
 
     private func handleLocalTurnActivity(_ event: CodexLocalTurnActivityEvent) {
+        if event.kind == .metadataUpdated {
+            updateTrackedChatExecution(event)
+            return
+        }
         // Capture completed duration metadata before the lifecycle projection
         // removes its terminal row. Failed/interrupted Turns are excluded from
         // the completed-duration distribution.
@@ -1866,6 +1740,9 @@ final class UsageViewModel: ObservableObject {
                 repositoryDisplayName: event.sessionIdentity?.repositoryDisplayName,
                 workspaceDisplayName: event.sessionIdentity?.workspaceDisplayName
             )
+
+        case .metadataUpdated:
+            return
 
         case .tokenUpdated:
             guard CodexLocalTurnActivityAuthority.matchesActiveTurn(
@@ -2480,7 +2357,7 @@ final class UsageViewModel: ObservableObject {
         historyErrorMessage = historyStore.errorMessage
         activeTurnPlan = nil
         trackedChatExecutions.removeAll()
-        dismissedChatExecutionKeys.removeAll()
+        dismissedChatExecutionTurns.removeAll()
         tokenActivity = nil
         tokenActivityLastFetchedAt = nil
         hudTokenActivityFeedback = nil

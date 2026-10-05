@@ -433,6 +433,8 @@ enum CodexExecutionDurationHistoryScanner {
                             eventThreadID: activity.threadID
                         ).isProven else { continue }
                         switch activity.kind {
+                        case .metadataUpdated:
+                            continue
                         case .started:
                             if let startedAt = activity.startedAt {
                                 startedAtByTurn[activity.turnID] = startedAt
