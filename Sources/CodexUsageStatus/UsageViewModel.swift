@@ -37,6 +37,8 @@ final class UsageViewModel: ObservableObject {
     @Published private(set) var hudTokenActivityFeedback: TokenHeroUpdateFeedback?
     @Published private(set) var tokenActivityState: TokenActivityState = .idle
     @Published private(set) var tokenActivityErrorMessage: String?
+    @Published private(set) var localUsageSourceAvailability: CodexLocalUsageSourceAvailability = .checking
+    @Published private(set) var localUsageRootPreference: CodexLocalUsageRootPreference
     @Published private(set) var resetCredits: RateLimitResetCredits?
     @Published private(set) var selectedResetCreditID: String?
     @Published private(set) var resetCreditOperationState: ResetCreditOperationState = .idle
@@ -198,6 +200,7 @@ final class UsageViewModel: ObservableObject {
     init() {
         RetiredFeatureCleanup.run()
         AppSettingsSchema.migrate(defaults: defaults)
+        localUsageRootPreference = CodexLocalUsageRootPreference.load(from: defaults)
         let store = HistoryStore(loadOnInit: false, asynchronousPersistence: true)
         historyStore = store
         legacyHistoryURL = store.fileURL
@@ -409,6 +412,11 @@ final class UsageViewModel: ObservableObject {
             },
             activeExecutionReconciliationHandler: { [weak self] reconciliation in
                 self?.handleActiveExecutionReconciliation(reconciliation)
+            },
+            sourceAvailabilityHandler: { [weak self] availability in
+                guard let self, self.localUsageSourceAvailability != availability else { return }
+                self.localUsageSourceAvailability = availability
+                self.refreshHUDTokenActivitySummary()
             }
         )
     }
@@ -1369,7 +1377,8 @@ final class UsageViewModel: ObservableObject {
         }
         let nextMetrics = LocalTokenUsageLedgerPresentation.metrics(
             snapshot: localTokenUsageLedgerStore.snapshot,
-            now: currentDate
+            now: currentDate,
+            sourceAvailability: localUsageSourceAvailability
         )
         hudTokenActivitySummary = summary
         refreshHUDTokenActivityFetchedAt(fallback: summary?.fetchedAt)
@@ -1387,6 +1396,9 @@ final class UsageViewModel: ObservableObject {
             if hudTokenActivityFeedback?.tokens != todayTokens {
                 hudTokenActivityFeedback = nil
             }
+        }
+        if localUsageSourceAvailability != .available {
+            hudTokenActivityFeedback = nil
         }
 
     }
@@ -1428,8 +1440,9 @@ final class UsageViewModel: ObservableObject {
                 now: record.observedAt
             )
         )
-        hudTokenActivityFeedback = feedback
-        if tokenActivitySoundGate.consume(feedback: feedback, enabled: effectiveTokenReelSoundEnabled) {
+        hudTokenActivityFeedback = localUsageSourceAvailability == .available ? feedback : nil
+        if localUsageSourceAvailability == .available,
+           tokenActivitySoundGate.consume(feedback: feedback, enabled: effectiveTokenReelSoundEnabled) {
             tokenReelAudioPlayer.play(
                 reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
             )
@@ -1879,17 +1892,20 @@ final class UsageViewModel: ObservableObject {
     }
 
     private func localUsageObservationRoots() -> [CodexLocalUsageObservationRoot] {
-        let defaultHome = CodexLocalUsageObservationRoot.canonicalDefaultHomeURL()
-        // The physical default CODEX_HOME is a stable machine observation
-        // source. It must not change high-water namespace when the selected
-        // UsageStatus account changes; managed homes carry their own profile.
+        let defaultHome = localUsageRootPreference.resolveHomeURL()
+        // The selected primary home remains a stable machine observation
+        // source when the UsageStatus account changes; managed homes keep
+        // their own profile attribution.
         var roots = [CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: defaultHome)]
-        roots.append(contentsOf: profileStore.accountProfiles().map {
-            CodexLocalUsageObservationRoot(
-                profileID: $0.id,
-                codexHomeURL: profileStore.codexHomeURL(for: $0)
-            )
-        })
+        var seenPaths = Set([CodexLocalTurnActivityAuthority.normalizedRoot(defaultHome).path])
+        for profile in profileStore.accountProfiles() {
+            let homeURL = profileStore.codexHomeURL(for: profile)
+            guard seenPaths.insert(CodexLocalTurnActivityAuthority.normalizedRoot(homeURL).path).inserted else { continue }
+            roots.append(CodexLocalUsageObservationRoot(
+                profileID: profile.id,
+                codexHomeURL: homeURL
+            ))
+        }
         return roots
     }
 
@@ -2079,6 +2095,65 @@ final class UsageViewModel: ObservableObject {
 
     var localTokenUsageLastObservedAt: Date? {
         localTokenUsageLedgerStore.snapshot.lastObservedAt
+    }
+
+    var localUsageSourceStatusText: String {
+        switch localUsageSourceAvailability {
+        case .checking:
+            return "正在檢查資料來源"
+        case .available:
+            return "資料來源正常"
+        case .unavailable:
+            if let lastObservedAt = localTokenUsageLastObservedAt {
+                return "資料來源暫時離線 · 最後觀測 \(lastObservedAt.formatted(date: .omitted, time: .shortened))"
+            }
+            return "資料來源暫時離線 · 尚無觀測紀錄"
+        }
+    }
+
+    var localUsageRootDescription: String {
+        switch localUsageRootPreference.mode {
+        case .automatic:
+            return "自動偵測 · \(localUsageRootPreference.resolveHomeURL().path)"
+        case .defaultHome:
+            return "預設資料夾 · ~/.codex"
+        case .custom:
+            return localUsageRootPreference.customPath ?? "尚未選擇資料夾"
+        }
+    }
+
+    func setLocalUsageRootMode(_ mode: CodexLocalUsageRootMode) {
+        guard mode != .custom else {
+            chooseLocalUsageRoot()
+            return
+        }
+        var preference = localUsageRootPreference
+        preference.mode = mode
+        preference.persist(to: defaults)
+        localUsageRootPreference = preference
+        refreshLocalUsageObserverRoots()
+        refreshHUDTokenActivitySummary()
+    }
+
+    func chooseLocalUsageRoot() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "選擇資料夾"
+        panel.message = "選擇包含 Codex sessions 或 sessions.local 的資料夾"
+        if let currentPath = localUsageRootPreference.customPath {
+            panel.directoryURL = URL(fileURLWithPath: currentPath, isDirectory: true)
+        }
+        guard panel.runModal() == .OK, let selectedURL = panel.url else { return }
+
+        var preference = localUsageRootPreference
+        preference.mode = .custom
+        preference.customPath = selectedURL.standardizedFileURL.path
+        preference.persist(to: defaults)
+        localUsageRootPreference = preference
+        refreshLocalUsageObserverRoots()
+        refreshHUDTokenActivitySummary()
     }
 
     /// Profile-scoped activity evidence comes only from the existing local

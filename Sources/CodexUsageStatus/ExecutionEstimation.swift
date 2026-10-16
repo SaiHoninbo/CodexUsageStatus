@@ -396,8 +396,9 @@ enum CodexExecutionDurationHistoryScanner {
             for directoryName in ["sessions.local", "sessions"] {
                 guard examinedFiles < maximumFiles else { break }
                 let directory = root.codexHomeURL.appendingPathComponent(directoryName, isDirectory: true)
+                let resolvedDirectory = directory.standardizedFileURL.resolvingSymlinksInPath()
                 guard let enumerator = fileManager.enumerator(
-                    at: directory,
+                    at: resolvedDirectory,
                     includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
                     options: [.skipsHiddenFiles]
                 ) else { continue }

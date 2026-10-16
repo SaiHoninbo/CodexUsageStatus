@@ -473,6 +473,9 @@ struct CodexFloatingHUDView: View {
                     height: metrics.tokenSummaryHeight,
                     scaleFactor: metrics.factor,
                     isStale: presentation.tokenActivityIsStale,
+                    sourceStatusText: model.localUsageSourceAvailability == .available
+                        ? nil
+                        : model.localUsageSourceStatusText,
                     reduceMotion: presentation.reduceMotion
                 )
                 // The Token Hero consumes the theme palette from the environment.

@@ -280,6 +280,7 @@ struct HUDTokenActivitySummaryView: View, Equatable {
     let height: CGFloat
     let scaleFactor: CGFloat
     let isStale: Bool
+    let sourceStatusText: String?
     let reduceMotion: Bool
     @Environment(\.hudThemePalette) private var palette
 
@@ -294,6 +295,7 @@ struct HUDTokenActivitySummaryView: View, Equatable {
             && lhs.height == rhs.height
             && lhs.scaleFactor == rhs.scaleFactor
             && lhs.isStale == rhs.isStale
+            && lhs.sourceStatusText == rhs.sourceStatusText
             && lhs.reduceMotion == rhs.reduceMotion
     }
 
@@ -326,8 +328,12 @@ struct HUDTokenActivitySummaryView: View, Equatable {
         .opacity(isStale ? 0.88 : 1)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("本機今日 Token 與帳號歷史")
-        .accessibilityValue(metrics.map { "\($0.label) \($0.value)" }.joined(separator: "；") + (isStale ? "；資料較舊" : ""))
-        .help(isStale ? "本機今日觀測 Token；次要帳號歷史資料較舊" : "本機今日觀測 Token 與帳號歷史摘要")
+        .accessibilityValue(
+            metrics.map { "\($0.label) \($0.value)" }.joined(separator: "；")
+                + (sourceStatusText.map { "；\($0)" } ?? "")
+                + (isStale ? "；資料較舊" : "")
+        )
+        .help(sourceStatusText ?? (isStale ? "本機今日觀測 Token；次要帳號歷史資料較舊" : "本機今日觀測 Token 與帳號歷史摘要"))
     }
 
     private func lifetimeHero(_ metric: TokenActivityMetric, columnWidth: CGFloat) -> some View {
@@ -352,6 +358,15 @@ struct HUDTokenActivitySummaryView: View, Equatable {
                 Spacer(minLength: 0)
             }
             .frame(width: columnWidth, alignment: .center)
+            if let sourceStatusText {
+                Text(sourceStatusText)
+                    .font(.system(size: max(8, 8.5 * scaleFactor), weight: .medium, design: .rounded))
+                    .foregroundStyle(palette.warning)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+                    .allowsTightening(true)
+                    .frame(width: columnWidth)
+            }
         }
     }
 

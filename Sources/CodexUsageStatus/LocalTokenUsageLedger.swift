@@ -1,5 +1,11 @@
 import Foundation
 
+enum CodexLocalUsageSourceAvailability: Equatable, Sendable {
+    case checking
+    case available
+    case unavailable
+}
+
 struct LocalTokenUsageLedgerThread: Codable, Equatable {
     let profileID: UUID?
     let threadID: String
@@ -400,14 +406,15 @@ enum LocalTokenUsageLedgerPresentation {
     static func metrics(
         snapshot: LocalTokenUsageLedgerSnapshot,
         now: Date,
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        sourceAvailability: CodexLocalUsageSourceAvailability = .available
     ) -> [TokenActivityMetric] {
         let todayTokens = todayObservedTokens(snapshot: snapshot, now: now, calendar: calendar)
         let streaks = streaks(from: snapshot.dailyUsageBuckets)
         return [
             TokenActivityMetric(
                 label: dailyObservedLabel,
-                value: heroTokenCount(todayTokens)
+                value: sourceAvailability == .available ? heroTokenCount(todayTokens) : "—"
             ),
             TokenActivityMetric(
                 label: dailyPeakLabel,

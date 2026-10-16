@@ -56,3 +56,71 @@ enum GlobalSoundPreference {
         masterEnabled && featureEnabled
     }
 }
+
+enum CodexLocalUsageRootMode: String, CaseIterable, Identifiable, Sendable {
+    case automatic
+    case defaultHome
+    case custom
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .automatic: "自動偵測"
+        case .defaultHome: "預設 ~/.codex"
+        case .custom: "自訂位置…"
+        }
+    }
+}
+
+/// The observation root is runtime data. Automatic mode preserves the
+/// existing CODEX_HOME behavior, while the other modes let the user choose a
+/// stable local or mounted home without changing the observer implementation.
+struct CodexLocalUsageRootPreference: Equatable, Sendable {
+    static let modeKey = "usage.localObservationRoot.mode"
+    static let customPathKey = "usage.localObservationRoot.customPath"
+
+    var mode: CodexLocalUsageRootMode
+    var customPath: String?
+
+    static func load(from defaults: UserDefaults = .standard) -> CodexLocalUsageRootPreference {
+        let storedMode = defaults.string(forKey: modeKey).flatMap(CodexLocalUsageRootMode.init(rawValue:))
+        let storedPath = defaults.string(forKey: customPathKey)
+        let mode = storedMode == .custom && (storedPath?.isEmpty ?? true) ? .automatic : (storedMode ?? .automatic)
+        return CodexLocalUsageRootPreference(mode: mode, customPath: storedPath)
+    }
+
+    func resolveHomeURL(
+        fileManager: FileManager = .default,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL {
+        switch mode {
+        case .automatic:
+            if let configured = environment["CODEX_HOME"], !configured.isEmpty {
+                return URL(fileURLWithPath: configured, isDirectory: true).standardizedFileURL
+            }
+            return Self.defaultHomeURL(fileManager: fileManager)
+        case .defaultHome:
+            return Self.defaultHomeURL(fileManager: fileManager)
+        case .custom:
+            guard let customPath, !customPath.isEmpty else { return Self.defaultHomeURL(fileManager: fileManager) }
+            return URL(fileURLWithPath: customPath, isDirectory: true).standardizedFileURL
+        }
+    }
+
+    func persist(to defaults: UserDefaults = .standard) {
+        defaults.set(mode.rawValue, forKey: Self.modeKey)
+        if let customPath, !customPath.isEmpty {
+            defaults.set(customPath, forKey: Self.customPathKey)
+        } else {
+            defaults.removeObject(forKey: Self.customPathKey)
+        }
+        defaults.set(AppSettingsSchema.currentVersion, forKey: AppSettingsSchema.versionKey)
+    }
+
+    private static func defaultHomeURL(fileManager: FileManager) -> URL {
+        fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex", isDirectory: true)
+            .standardizedFileURL
+    }
+}

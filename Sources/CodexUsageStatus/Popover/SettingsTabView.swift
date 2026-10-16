@@ -10,6 +10,13 @@ extension UsagePopoverView {
         VStack(alignment: .leading, spacing: 7) {
             settingsAlertSummary
             disclosureSection(
+                title: "本機資料來源",
+                systemImage: "externaldrive",
+                isExpanded: $isLocalUsageSourceExpanded
+            ) {
+                localUsageSourceSettingsContent
+            }
+            disclosureSection(
                 title: "通知",
                 systemImage: "bell.badge",
                 isExpanded: $isNotificationsExpanded
@@ -47,6 +54,45 @@ extension UsagePopoverView {
                     actions
                 }
             }
+        }
+    }
+
+    private var localUsageSourceSettingsContent: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Picker("Session 資料來源", selection: Binding(
+                get: { model.localUsageRootPreference.mode },
+                set: { model.setLocalUsageRootMode($0) }
+            )) {
+                ForEach(CodexLocalUsageRootMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.menu)
+
+            Text(model.localUsageRootDescription)
+                .font(.caption2)
+                .foregroundStyle(HUDColorPalette.secondaryText)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button("選擇資料夾…") {
+                model.chooseLocalUsageRoot()
+            }
+            .buttonStyle(.link)
+            .font(.caption)
+            .popoverControlPressProbe("settings.localUsageRoot")
+
+            Text(model.localUsageSourceStatusText)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(model.localUsageSourceAvailability == .available
+                    ? HUDColorPalette.continueAction
+                    : HUDColorPalette.warning)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("來源可放在本機、符號連結或掛載磁碟。來源不可用時會顯示 —，不會當成零用量。")
+                .font(.caption2)
+                .foregroundStyle(HUDColorPalette.tertiaryText)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import CryptoKit
 
 /// The subset of a Codex Desktop `token_usage_record` that is safe and useful
@@ -1009,6 +1010,8 @@ struct CodexLocalUsageScanResult: Sendable {
     let seededPaths: Set<String>
     let knownRolloutPaths: Set<String>
     let fastPollPaths: Set<String>
+    let availableRootPaths: Set<String>
+    let unavailableRootPaths: Set<String>
     let sessionIdentityReadCount: Int
     let metrics: CodexLocalUsageScanMetrics
 }
@@ -1028,8 +1031,22 @@ enum CodexLocalUsageDiscoveryProbeEvent: Sendable {
 }
 
 struct CodexLocalUsageDiscoveryRootIdentity: Equatable, Sendable {
-    let resourceIdentifier: String
+    /// A filesystem resource ID is the strongest identity when the volume
+    /// provides one. Mounted filesystems may omit it, so canonical path and
+    /// creation date remain part of the root identity as a portable fallback.
+    let resourceIdentifier: String?
     let creationDate: Date?
+    let canonicalPath: String
+
+    init(
+        resourceIdentifier: String?,
+        creationDate: Date?,
+        canonicalPath: String = ""
+    ) {
+        self.resourceIdentifier = resourceIdentifier
+        self.creationDate = creationDate
+        self.canonicalPath = canonicalPath
+    }
 }
 
 /// Bounded reconciliation metadata emitted by the existing rollout scan. It
@@ -1109,6 +1126,8 @@ final class CodexLocalUsageObserver {
     private var rolloutSeedMode: RolloutSeedMode?
     private var rolloutSeedBlocksScan = false
     private var activeTurnRecoveryPending = false
+    private(set) var sourceAvailability: CodexLocalUsageSourceAvailability = .checking
+    private var sourceAvailabilityHandler: ((CodexLocalUsageSourceAvailability) -> Void)?
 
     init(
         cursorURL: URL,
@@ -1116,6 +1135,7 @@ final class CodexLocalUsageObserver {
         turnCompletionHandler: TurnCompletionHandler? = nil,
         turnActivityHandler: TurnActivityHandler? = nil,
         activeExecutionReconciliationHandler: ActiveExecutionReconciliationHandler? = nil,
+        sourceAvailabilityHandler: ((CodexLocalUsageSourceAvailability) -> Void)? = nil,
         sessionIdentityReader: SessionIdentityReader? = nil,
         sessionMetadataReader: SessionMetadataReader? = nil
     ) {
@@ -1124,6 +1144,7 @@ final class CodexLocalUsageObserver {
         self.turnCompletionHandler = turnCompletionHandler
         self.turnActivityHandler = turnActivityHandler
         self.activeExecutionReconciliationHandler = activeExecutionReconciliationHandler
+        self.sourceAvailabilityHandler = sourceAvailabilityHandler
         let identityReader = sessionIdentityReader ?? { CodexLocalUsageObserver.sessionIdentity(for: $0) }
         self.sessionIdentityReader = identityReader
         self.sessionMetadataReader = sessionMetadataReader ?? {
@@ -1137,9 +1158,11 @@ final class CodexLocalUsageObserver {
 
     func setRoots(_ roots: [CodexLocalUsageObservationRoot]) {
         let previousRoots = self.roots
+        guard previousRoots != roots else { return }
         let previousRootPaths = Set(previousRoots.map { $0.codexHomeURL.path })
         self.roots = roots
         rootsGeneration &+= 1
+        updateSourceAvailability(roots.isEmpty ? .unavailable : .checking)
         guard hasStarted else { return }
 
         if previousRoots != roots {
@@ -1191,6 +1214,7 @@ final class CodexLocalUsageObserver {
     func start() {
         stop()
         hasStarted = true
+        updateSourceAvailability(roots.isEmpty ? .unavailable : .checking)
         lifecycleGeneration &+= 1
         observationEpoch &+= 1
         activeExecutionReconciliationHandler?(
@@ -1420,6 +1444,7 @@ final class CodexLocalUsageObserver {
                 self.seededPaths = result.seededPaths
                 self.knownRolloutPaths = result.knownRolloutPaths
                 self.fastPollPaths = result.fastPollPaths
+                self.updateSourceAvailability(result.unavailableRootPaths.isEmpty ? .available : .unavailable)
                 if recoverActiveTurns { self.activeTurnRecoveryPending = false }
                 if cursorsChanged { self.persistCursors() }
                 for event in result.events {
@@ -1443,6 +1468,12 @@ final class CodexLocalUsageObserver {
         }
     }
 
+    private func updateSourceAvailability(_ availability: CodexLocalUsageSourceAvailability) {
+        guard sourceAvailability != availability else { return }
+        sourceAvailability = availability
+        sourceAvailabilityHandler?(availability)
+    }
+
     nonisolated static func scanRoots(
         _ roots: [CodexLocalUsageObservationRoot],
         cursors: [String: CodexLocalUsageCursor],
@@ -1454,6 +1485,7 @@ final class CodexLocalUsageObserver {
         discoveryProbe: @escaping @Sendable (CodexLocalUsageDiscoveryProbeEvent, URL) -> Void = { _, _ in },
         discoveryFailureInjector: @escaping @Sendable (URL) -> Bool = { _ in false },
         discoveryRootIdentityReader: @escaping @Sendable (URL) -> CodexLocalUsageDiscoveryRootIdentity? = { CodexLocalUsageObserver.discoveryRootIdentity(for: $0) },
+        fileResourceIdentifierReader: (@Sendable (URL) -> String?)? = nil,
         fastPollPaths: Set<String>? = nil,
         statePathsAreCanonical: Bool = false,
         recoverActiveTurns: Bool = false
@@ -1468,8 +1500,20 @@ final class CodexLocalUsageObserver {
         func canonicalPath(_ path: String) -> String {
             URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
         }
-        let canonicalRootPaths = roots.map { canonicalPath($0.codexHomeURL.path) }
-        let rootByCanonicalPath = Dictionary(zip(canonicalRootPaths, roots), uniquingKeysWith: { first, _ in first })
+        // Rollout files can live outside CODEX_HOME after a sessions
+        // symlink is resolved (for example, onto a mounted volume). The
+        // observer's authority boundary is therefore the resolved session
+        // namespaces, not the enclosing home directory path.
+        let namespaceScopes = roots.flatMap { root in
+            ["sessions.local", "sessions"].map { directoryName in
+                (path: canonicalPath(root.codexHomeURL.appendingPathComponent(directoryName, isDirectory: true).path), root: root)
+            }
+        }
+        let canonicalNamespacePaths = Array(Set(namespaceScopes.map(\.path))).sorted()
+        let rootByCanonicalNamespacePath = Dictionary(
+            namespaceScopes.map { ($0.path, $0.root) },
+            uniquingKeysWith: { first, _ in first }
+        )
         var updatedCursors: [String: CodexLocalUsageCursor] = [:]
         if statePathsAreCanonical {
             updatedCursors = cursors
@@ -1510,13 +1554,62 @@ final class CodexLocalUsageObserver {
             url.pathExtension == "jsonl" && url.lastPathComponent.hasPrefix("rollout-")
         }
 
+        // Probe source availability on every poll without recursively walking
+        // the session tree. A present home directory alone is not proof that
+        // it is a usable Codex source: at least one known session namespace
+        // must be reachable. This also prevents an empty local mount-point
+        // directory from turning a disconnected network home into zero usage.
+        var availableRootPaths = Set<String>()
+        var unavailableRootPaths = Set<String>()
+        for root in roots {
+            let rootURL = root.codexHomeURL
+            let rootPath = canonicalPath(rootURL.path)
+            guard let preflightIdentity = discoveryRootIdentityReader(rootURL) else {
+                unavailableRootPaths.insert(rootPath)
+                continue
+            }
+            var foundNamespace = false
+            var namespaceProbeSucceeded = true
+            for directoryName in ["sessions.local", "sessions"] {
+                let directory = rootURL.appendingPathComponent(directoryName, isDirectory: true)
+                var isDirectory = ObjCBool(false)
+                guard fileManager.fileExists(atPath: directory.path, isDirectory: &isDirectory) else {
+                    if Self.isSymbolicLink(at: directory) {
+                        namespaceProbeSucceeded = false
+                        break
+                    }
+                    continue
+                }
+                guard isDirectory.boolValue,
+                      let namespaceIdentity = discoveryRootIdentityReader(directory),
+                      discoveryRootIdentityReader(directory) == namespaceIdentity else {
+                    namespaceProbeSucceeded = false
+                    break
+                }
+                foundNamespace = true
+            }
+            if foundNamespace,
+               namespaceProbeSucceeded,
+               discoveryRootIdentityReader(rootURL) == preflightIdentity {
+                availableRootPaths.insert(rootPath)
+            } else {
+                unavailableRootPaths.insert(rootPath)
+            }
+        }
+
         if discoverNewRollouts {
             for root in roots {
                 let rootURL = root.codexHomeURL
                 let preflightIdentity = discoveryRootIdentityReader(rootURL)
                 var rootDiscoverySucceeded = preflightIdentity != nil
-                guard rootDiscoverySucceeded else { continue }
+                guard rootDiscoverySucceeded else {
+                    let rootPath = canonicalPath(rootURL.path)
+                    availableRootPaths.remove(rootPath)
+                    unavailableRootPaths.insert(rootPath)
+                    continue
+                }
                 discoveryProbe(.afterRootPreflight, rootURL)
+                var foundNamespace = false
 
                 for directoryName in ["sessions.local", "sessions"] {
                     guard rootDiscoverySucceeded,
@@ -1530,20 +1623,29 @@ final class CodexLocalUsageObserver {
                     // empty namespace only while the root identity remains
                     // stable before and after that observation.
                     guard fileManager.fileExists(atPath: directory.path) else {
+                        if Self.isSymbolicLink(at: directory) {
+                            rootDiscoverySucceeded = false
+                            break
+                        }
                         discoveryProbe(.afterNamespace, directory)
                         if discoveryRootIdentityReader(rootURL) != preflightIdentity {
                             rootDiscoverySucceeded = false
                         }
                         continue
                     }
-                    guard discoveryRootIdentityReader(directory) != nil,
+                    foundNamespace = true
+                    guard let namespaceIdentity = discoveryRootIdentityReader(directory),
                           !discoveryFailureInjector(directory) else {
                         rootDiscoverySucceeded = false
                         break
                     }
                     var enumerationHadError = false
+                    let resolvedDirectory = URL(
+                        fileURLWithPath: canonicalPath(directory.path),
+                        isDirectory: true
+                    )
                     guard let enumerator = fileManager.enumerator(
-                        at: directory,
+                        at: resolvedDirectory,
                         includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
                         options: [.skipsHiddenFiles],
                         errorHandler: { _, _ in
@@ -1560,18 +1662,26 @@ final class CodexLocalUsageObserver {
                     }
                     discoveryProbe(.afterNamespace, directory)
                     if enumerationHadError
+                        || discoveryRootIdentityReader(directory) != namespaceIdentity
                         || discoveryRootIdentityReader(rootURL) != preflightIdentity {
                         rootDiscoverySucceeded = false
                         break
                     }
                 }
                 discoveryProbe(.beforeRootFinalize, rootURL)
-                if rootDiscoverySucceeded,
+                if rootDiscoverySucceeded, foundNamespace,
                    discoveryRootIdentityReader(rootURL) == preflightIdentity {
                     successfulRootPaths.insert(canonicalPath(rootURL.path))
+                } else {
+                    let rootPath = canonicalPath(rootURL.path)
+                    availableRootPaths.remove(rootPath)
+                    unavailableRootPaths.insert(rootPath)
                 }
             }
             updatedKnownRolloutPaths.formUnion(discoveredPaths)
+            availableRootPaths = successfulRootPaths
+            unavailableRootPaths = Set(roots.map { canonicalPath($0.codexHomeURL.path) })
+                .subtracting(successfulRootPaths)
         }
 
         // Once a path has been discovered, regular 2-second polls stat only
@@ -1588,8 +1698,8 @@ final class CodexLocalUsageObserver {
             : updatedFastPollPaths.union(persistedEvidencePaths)
         let candidatePaths = pollPaths
             .filter { path in
-                canonicalRootPaths.contains { rootPath in
-                    path == rootPath || path.hasPrefix(rootPath + "/")
+                canonicalNamespacePaths.contains { namespacePath in
+                    path == namespacePath || path.hasPrefix(namespacePath + "/")
                 }
             }
             .sorted()
@@ -1600,17 +1710,27 @@ final class CodexLocalUsageObserver {
         for path in candidatePaths {
             let fileURL = URL(fileURLWithPath: path)
             guard isRolloutFile(fileURL), seenPaths.insert(path).inserted else { continue }
-            guard let rootPath = canonicalRootPaths.first(where: { path == $0 || path.hasPrefix($0 + "/") }),
-                  let root = rootByCanonicalPath[rootPath] else { continue }
+            guard let namespacePath = canonicalNamespacePaths.first(where: { path == $0 || path.hasPrefix($0 + "/") }),
+                  let root = rootByCanonicalNamespacePath[namespacePath] else { continue }
             rolloutMetadataReadCount += 1
-            guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey, .fileResourceIdentifierKey]),
+            guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey, .creationDateKey, .fileResourceIdentifierKey]),
                   values.isRegularFile == true,
                   let fileSize = values.fileSize,
                   fileSize >= 0 else { continue }
 
             let size = UInt64(fileSize)
             let modificationTime = values.contentModificationDate
-            let fileResourceIdentifier = values.fileResourceIdentifier.map { String(describing: $0) }
+            let resourceIdentifier: String?
+            if let fileResourceIdentifierReader {
+                resourceIdentifier = fileResourceIdentifierReader(fileURL)
+            } else {
+                resourceIdentifier = values.fileResourceIdentifier.map { String(describing: $0) }
+            }
+            let fileResourceIdentifier = Self.portableFileIdentity(
+                fileURL: fileURL,
+                resourceIdentifier: resourceIdentifier,
+                creationDate: values.creationDate
+            )
             var cursor = updatedCursors[path]
             let metadataUnchanged = cursor?.fileSize != nil
                 && cursor?.fileSize == size
@@ -1920,7 +2040,7 @@ final class CodexLocalUsageObserver {
                                        let sessionIdentity = identity.sessionIdentity,
                                        let lineage = canonicalLineage,
                                        lineage.isTopLevelUserChat,
-                                       let fileResourceIdentifier {
+                                       !fileResourceIdentifier.isEmpty {
                                         cursor?.activeTurnEvidence = CodexLocalActiveTurnEvidence(
                                             threadID: activity.threadID,
                                             turnID: activity.turnID,
@@ -2019,6 +2139,8 @@ final class CodexLocalUsageObserver {
             seededPaths: updatedSeededPaths,
             knownRolloutPaths: updatedKnownRolloutPaths,
             fastPollPaths: updatedFastPollPaths,
+            availableRootPaths: availableRootPaths,
+            unavailableRootPaths: unavailableRootPaths,
             sessionIdentityReadCount: sessionIdentityReadCount,
             metrics: CodexLocalUsageScanMetrics(
                 directoryEnumerationCount: directoryEnumerationCount,
@@ -2069,8 +2191,12 @@ final class CodexLocalUsageObserver {
 
         var refreshedURL = fileURL
         refreshedURL.removeAllCachedResourceValues()
-        guard let values = try? refreshedURL.resourceValues(forKeys: [.fileSizeKey, .fileResourceIdentifierKey]),
-              values.fileResourceIdentifier.map({ String(describing: $0) }) == resourceIdentifier,
+        guard let values = try? refreshedURL.resourceValues(forKeys: [.fileSizeKey, .creationDateKey, .fileResourceIdentifierKey]),
+              Self.portableFileIdentity(
+                fileURL: refreshedURL,
+                resourceIdentifier: values.fileResourceIdentifier.map { String(describing: $0) },
+                creationDate: values.creationDate
+              ) == resourceIdentifier,
               let currentSize = values.fileSize, currentSize >= 0,
               UInt64(currentSize) == size else { return nil }
         return recoverPersistedActiveTurnSnapshot(
@@ -2216,8 +2342,12 @@ final class CodexLocalUsageObserver {
             }
             var refreshedURL = fileURL
             refreshedURL.removeAllCachedResourceValues()
-            let values = try refreshedURL.resourceValues(forKeys: [.fileSizeKey, .fileResourceIdentifierKey])
-            guard values.fileResourceIdentifier.map({ String(describing: $0) }) == resourceIdentifier,
+            let values = try refreshedURL.resourceValues(forKeys: [.fileSizeKey, .creationDateKey, .fileResourceIdentifierKey])
+            guard Self.portableFileIdentity(
+                fileURL: refreshedURL,
+                resourceIdentifier: values.fileResourceIdentifier.map { String(describing: $0) },
+                creationDate: values.creationDate
+            ) == resourceIdentifier,
                   let currentSize = values.fileSize, currentSize >= 0,
                   UInt64(currentSize) >= size else { return nil }
             return recoverActiveTurnSnapshot(data, metadata: metadata, root: root, now: Date())
@@ -2309,12 +2439,13 @@ final class CodexLocalUsageObserver {
             for directoryName in ["sessions.local", "sessions"] {
                 if Task.isCancelled { return [] }
                 let directory = root.codexHomeURL.appendingPathComponent(directoryName, isDirectory: true)
-                guard let enumerator = fileManager.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey]) else { continue }
+                let resolvedDirectory = URL(fileURLWithPath: canonicalPath(directory.path), isDirectory: true)
+                guard let enumerator = fileManager.enumerator(at: resolvedDirectory, includingPropertiesForKeys: [.isRegularFileKey]) else { continue }
                 for case let fileURL as URL in enumerator where fileURL.pathExtension == "jsonl" && fileURL.lastPathComponent.hasPrefix("rollout-") {
                     if Task.isCancelled { return [] }
                     let path = canonicalPath(fileURL.path)
                     guard let values = try? fileURL.resourceValues(
-                        forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey, .fileResourceIdentifierKey]
+                        forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey, .creationDateKey, .fileResourceIdentifierKey]
                     ),
                     values.isRegularFile == true,
                     let size = values.fileSize else { continue }
@@ -2323,7 +2454,11 @@ final class CodexLocalUsageObserver {
                         path: path,
                         fileSize: UInt64(size),
                         modificationTime: values.contentModificationDate,
-                        fileResourceIdentifier: values.fileResourceIdentifier.map { String(describing: $0) },
+                        fileResourceIdentifier: Self.portableFileIdentity(
+                            fileURL: fileURL,
+                            resourceIdentifier: values.fileResourceIdentifier.map { String(describing: $0) },
+                            creationDate: values.creationDate
+                        ),
                         threadID: threadID
                     )
                 }
@@ -2370,14 +2505,35 @@ final class CodexLocalUsageObserver {
         URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
     }
 
+    private nonisolated static func isSymbolicLink(at url: URL) -> Bool {
+        var status = stat()
+        let result = url.path.withCString { Darwin.lstat($0, &status) }
+        return result == 0 && (status.st_mode & S_IFMT) == S_IFLNK
+    }
+
+    /// Resource IDs are optional on mounted filesystems. Keep the fast
+    /// filesystem identity when supplied, and otherwise use the canonical
+    /// rollout path plus creation time as a portable identity token.
+    private nonisolated static func portableFileIdentity(
+        fileURL: URL,
+        resourceIdentifier: String?,
+        creationDate: Date?
+    ) -> String {
+        if let resourceIdentifier { return resourceIdentifier }
+        let createdAt = creationDate.map { String(Int64(($0.timeIntervalSince1970 * 1_000_000).rounded())) } ?? "unknown"
+        return "path:\(canonicalPath(fileURL.path))|created:\(createdAt)"
+    }
+
     private nonisolated static func discoveryRootIdentity(for url: URL) -> CodexLocalUsageDiscoveryRootIdentity? {
-        guard FileManager.default.fileExists(atPath: url.path),
-              let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileResourceIdentifierKey, .creationDateKey]),
-              values.isDirectory == true,
-              let identifier = values.fileResourceIdentifier else { return nil }
+        var isDirectory = ObjCBool(false)
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else { return nil }
+        let resolvedURL = url.standardizedFileURL.resolvingSymlinksInPath()
+        let values = try? resolvedURL.resourceValues(forKeys: [.isDirectoryKey, .fileResourceIdentifierKey, .creationDateKey])
+        guard values?.isDirectory != false else { return nil }
         return CodexLocalUsageDiscoveryRootIdentity(
-            resourceIdentifier: String(describing: identifier),
-            creationDate: values.creationDate
+            resourceIdentifier: values?.fileResourceIdentifier.map { String(describing: $0) },
+            creationDate: values?.creationDate,
+            canonicalPath: canonicalPath(url.path)
         )
     }
 

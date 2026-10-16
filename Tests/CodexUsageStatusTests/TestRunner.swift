@@ -229,6 +229,7 @@ struct CodexUsageStatusTests {
             ("desktop activity authority", testDesktopActivityAuthority),
             ("local token usage ledger", testLocalTokenUsageLedger),
             ("daily Token Hero presentation", testDailyTokenHeroPresentation),
+            ("Codex local usage root preference", testCodexLocalUsageRootPreference),
             ("token activity aggregation", testTokenActivityAggregation),
             ("local Token Hero update feedback", testTokenActivityUpdateFeedback),
             ("token reel audio feedback", testTokenReelAudioFeedback),
@@ -263,6 +264,7 @@ struct CodexUsageStatusTests {
             ("bounded duration history scan", testBoundedDurationHistoryScan),
             ("incremental observer identity scan", testIncrementalObserverIdentityScan),
             ("observer residual I/O metrics and discovery", testObserverResidualIOMetricsAndDiscovery),
+            ("portable observation root discovery", testPortableObservationRootDiscovery),
             ("observer bounded fast poll scaling", testObserverBoundedFastPollScaling),
             ("session index bounded cache", testSessionIndexBoundedCache),
             ("observer discovery epoch prune guards", testObserverDiscoveryEpochPruneGuards),
@@ -2669,6 +2671,24 @@ struct CodexUsageStatusTests {
             "missing today bucket renders zero without deleting historical buckets"
         )
         try expect(
+            LocalTokenUsageLedgerPresentation.metrics(
+                snapshot: noToday,
+                now: day1,
+                calendar: calendar,
+                sourceAvailability: .unavailable
+            ).first?.value == "—",
+            "an unavailable observation source cannot be projected as zero"
+        )
+        try expect(
+            LocalTokenUsageLedgerPresentation.metrics(
+                snapshot: noToday,
+                now: day1,
+                calendar: calendar,
+                sourceAvailability: .checking
+            ).first?.value == "—",
+            "an unverified observation source remains unknown while checking"
+        )
+        try expect(
             LocalTokenUsageLedgerPresentation.metrics(snapshot: snapshot, now: day2, calendar: calendar).first?.value == "0",
             "next local calendar day starts the Hero at zero"
         )
@@ -2694,6 +2714,37 @@ struct CodexUsageStatusTests {
             .replacingOccurrences(of: " ", with: "")
         try expect(crossBillionValue == "1,000,000,001", "crossing one billion keeps a numeric ten-digit reel value")
         try expect(crossBillionSlots.contains(where: { $0.isChangedDigit }), "crossing one billion keeps changed numeric slots for animation")
+    }
+
+    private static func testCodexLocalUsageRootPreference() throws {
+        let suite = "CodexUsageStatusTests.\(UUID().uuidString)"
+        let defaults = try unwrap(UserDefaults(suiteName: suite), "isolated local usage root defaults")
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let environmentHome = URL(fileURLWithPath: "/tmp/codex-home-from-environment", isDirectory: true)
+        let customHome = URL(fileURLWithPath: "/Volumes/ExampleShare/CodexData", isDirectory: true)
+        let automatic = CodexLocalUsageRootPreference(mode: .automatic, customPath: nil)
+        let defaultHome = CodexLocalUsageRootPreference(mode: .defaultHome, customPath: nil)
+        let custom = CodexLocalUsageRootPreference(mode: .custom, customPath: customHome.path)
+
+        try expect(
+            automatic.resolveHomeURL(environment: ["CODEX_HOME": environmentHome.path]) == environmentHome.standardizedFileURL,
+            "automatic source preserves the CODEX_HOME environment override"
+        )
+        try expect(
+            defaultHome.resolveHomeURL(environment: ["CODEX_HOME": environmentHome.path]) == home.appendingPathComponent(".codex", isDirectory: true).standardizedFileURL,
+            "explicit default mode resolves ~/.codex independently of the environment"
+        )
+        try expect(
+            custom.resolveHomeURL(environment: ["CODEX_HOME": environmentHome.path]) == customHome.standardizedFileURL,
+            "custom source path is runtime data and overrides CODEX_HOME"
+        )
+        custom.persist(to: defaults)
+        try expect(
+            CodexLocalUsageRootPreference.load(from: defaults) == custom,
+            "custom observation root selection persists across launches"
+        )
     }
 
     private static func testTokenActivityUpdateFeedback() throws {
@@ -5187,6 +5238,174 @@ struct CodexUsageStatusTests {
         try expect(pruned.cursors[canonicalA] == nil, "confirmed missing rollout cursor is pruned")
         try expect(pruned.events.isEmpty, "cursor pruning does not replay historical content")
         print("PERF residual observer discoveryDirs=\(first.metrics.directoryEnumerationCount), knownPollDirs=\(second.metrics.directoryEnumerationCount), knownPollMetadata=\(second.metrics.rolloutMetadataReadCount), changedContentHandles=\(third.metrics.rolloutContentFileHandleOpenCount)")
+    }
+
+    private static func testPortableObservationRootDiscovery() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-portable-observation-root-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let namespace = base.appendingPathComponent("sessions.local", isDirectory: true)
+        try FileManager.default.createDirectory(at: namespace, withIntermediateDirectories: true)
+
+        let noResourceIdentifier: @Sendable (URL) -> CodexLocalUsageDiscoveryRootIdentity? = { url in
+            var isDirectory = ObjCBool(false)
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else { return nil }
+            let values = try? url.resourceValues(forKeys: [.creationDateKey])
+            return CodexLocalUsageDiscoveryRootIdentity(
+                resourceIdentifier: nil,
+                creationDate: values?.creationDate,
+                canonicalPath: url.standardizedFileURL.resolvingSymlinksInPath().path
+            )
+        }
+        let root = CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: base)
+        let localResult = CodexLocalUsageObserver.scanRoots(
+            [root],
+            cursors: [:],
+            seededPaths: [],
+            knownRolloutPaths: [],
+            discoverNewRollouts: false,
+            discoveryRootIdentityReader: noResourceIdentifier
+        )
+        let canonicalBase = base.standardizedFileURL.resolvingSymlinksInPath().path
+        try expect(localResult.availableRootPaths.contains(canonicalBase), "a local source remains available without resource identifiers")
+        try expect(localResult.unavailableRootPaths.isEmpty, "capability fallback does not mark a readable local source offline")
+
+        let alias = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-portable-observation-alias-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: alias) }
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: base)
+        let symlinkResult = CodexLocalUsageObserver.scanRoots(
+            [CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: alias)],
+            cursors: [:],
+            seededPaths: [],
+            knownRolloutPaths: [],
+            discoverNewRollouts: false,
+            discoveryRootIdentityReader: noResourceIdentifier
+        )
+        try expect(symlinkResult.availableRootPaths.contains(canonicalBase), "symlinked roots resolve to the same portable observation identity")
+
+        let symlinkHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-symlink-home-\(UUID().uuidString)", isDirectory: true)
+        let mountedSessions = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-mounted-sessions-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: symlinkHome) }
+        defer { try? FileManager.default.removeItem(at: mountedSessions) }
+        try FileManager.default.createDirectory(at: symlinkHome.appendingPathComponent("sessions.local", isDirectory: true), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: mountedSessions, withIntermediateDirectories: true)
+        let mountedRollout = mountedSessions.appendingPathComponent("rollout-portable.jsonl")
+        let mountedContents = [
+            #"{"type":"session_meta","payload":{"id":"thread-portable","cwd":"/tmp/Portable"}}"#,
+            #"{"timestamp":"2026-10-16T01:00:00.000Z","type":"token_usage_record","payload":{"thread_id":"thread-portable","turn_id":"turn-portable","usage":{"total_tokens":3},"turn_token_usage":{"total_tokens":3},"thread_token_usage":{"total_tokens":3}}}"#
+        ].joined(separator: "\n") + "\n"
+        try Data(mountedContents.utf8).write(to: mountedRollout)
+        try FileManager.default.createSymbolicLink(
+            at: symlinkHome.appendingPathComponent("sessions", isDirectory: true),
+            withDestinationURL: mountedSessions
+        )
+        let symlinkHomeRoot = CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: symlinkHome)
+        let symlinkHomeResult = CodexLocalUsageObserver.scanRoots(
+            [symlinkHomeRoot],
+            cursors: [:],
+            seededPaths: [],
+            discoveryRootIdentityReader: noResourceIdentifier
+        )
+        try expect(symlinkHomeResult.events.count == 1, "rollout files outside the home path remain in scope through a session symlink")
+        let canonicalSymlinkHome = symlinkHome.standardizedFileURL.resolvingSymlinksInPath().path
+        try expect(symlinkHomeResult.availableRootPaths.contains(canonicalSymlinkHome), "a home with an external session target is available")
+
+        try FileManager.default.removeItem(at: mountedSessions)
+        let disconnectedResult = CodexLocalUsageObserver.scanRoots(
+            [symlinkHomeRoot],
+            cursors: symlinkHomeResult.cursors,
+            seededPaths: symlinkHomeResult.seededPaths,
+            knownRolloutPaths: symlinkHomeResult.knownRolloutPaths,
+            discoverNewRollouts: true,
+            discoveryRootIdentityReader: noResourceIdentifier
+        )
+        try expect(disconnectedResult.unavailableRootPaths.contains(canonicalSymlinkHome), "a broken session symlink marks the source unavailable even when sessions.local exists")
+
+        try FileManager.default.createDirectory(at: mountedSessions, withIntermediateDirectories: true)
+        let reconnectedRollout = mountedSessions.appendingPathComponent("rollout-reconnected.jsonl")
+        try Data(mountedContents.replacingOccurrences(of: "thread-portable", with: "thread-reconnected").replacingOccurrences(of: "turn-portable", with: "turn-reconnected").utf8)
+            .write(to: reconnectedRollout)
+        let reconnectedResult = CodexLocalUsageObserver.scanRoots(
+            [symlinkHomeRoot],
+            cursors: disconnectedResult.cursors,
+            seededPaths: disconnectedResult.seededPaths,
+            knownRolloutPaths: disconnectedResult.knownRolloutPaths,
+            discoverNewRollouts: true,
+            discoveryRootIdentityReader: noResourceIdentifier
+        )
+        try expect(reconnectedResult.unavailableRootPaths.isEmpty, "a reconnected namespace is rediscovered without changing the configured root")
+        try expect(reconnectedResult.events.count == 1, "reconnected rollout data resumes observation")
+
+        let emptyHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-empty-observation-root-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: emptyHome) }
+        try FileManager.default.createDirectory(at: emptyHome, withIntermediateDirectories: true)
+        let emptyResult = CodexLocalUsageObserver.scanRoots(
+            [CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: emptyHome)],
+            cursors: [:],
+            seededPaths: [],
+            knownRolloutPaths: [],
+            discoverNewRollouts: false,
+            discoveryRootIdentityReader: noResourceIdentifier
+        )
+        let canonicalEmptyHome = emptyHome.standardizedFileURL.resolvingSymlinksInPath().path
+        try expect(emptyResult.unavailableRootPaths.contains(canonicalEmptyHome), "a home without a reachable session namespace is unknown, not confirmed zero")
+
+        let configuredHome = CodexLocalUsageRootPreference(mode: .defaultHome, customPath: nil).resolveHomeURL()
+        let configuredNamespaces = ["sessions.local", "sessions"].map {
+            configuredHome.appendingPathComponent($0, isDirectory: true)
+        }
+        if configuredNamespaces.contains(where: { FileManager.default.fileExists(atPath: $0.path) }) {
+            let configuredResult = CodexLocalUsageObserver.scanRoots(
+                [CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: configuredHome)],
+                cursors: [:],
+                seededPaths: [],
+                knownRolloutPaths: [],
+                discoverNewRollouts: false,
+                discoveryRootIdentityReader: noResourceIdentifier
+            )
+            let canonicalConfiguredHome = configuredHome.standardizedFileURL.resolvingSymlinksInPath().path
+            try expect(
+                configuredResult.availableRootPaths.contains(canonicalConfiguredHome),
+                "the configured session root is available when its resource identifier capability is suppressed"
+            )
+            if let mountedNamespace = configuredNamespaces.first(where: { namespaceURL in
+                let resolvedURL = namespaceURL.standardizedFileURL.resolvingSymlinksInPath()
+                return (try? resolvedURL.resourceValues(forKeys: [.volumeIsLocalKey]).volumeIsLocal) == false
+            }) {
+                let resolvedMountedNamespace = mountedNamespace.standardizedFileURL.resolvingSymlinksInPath()
+                if let enumerator = FileManager.default.enumerator(
+                    at: resolvedMountedNamespace,
+                    includingPropertiesForKeys: [.isRegularFileKey],
+                    options: [.skipsHiddenFiles]
+                ), let rollout = enumerator.compactMap({ $0 as? URL }).first(where: {
+                    $0.pathExtension == "jsonl" && $0.lastPathComponent.hasPrefix("rollout-")
+                }) {
+                    let canonicalRollout = rollout.standardizedFileURL.resolvingSymlinksInPath().path
+                    let mountedFallbackResult = CodexLocalUsageObserver.scanRoots(
+                        [CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: configuredHome)],
+                        cursors: [:],
+                        seededPaths: [canonicalRollout],
+                        knownRolloutPaths: [canonicalRollout],
+                        discoverNewRollouts: false,
+                        discoveryRootIdentityReader: noResourceIdentifier,
+                        fileResourceIdentifierReader: { _ in nil }
+                    )
+                    try expect(
+                        mountedFallbackResult.cursors[canonicalRollout]?.fileResourceIdentifier?.hasPrefix("path:") == true,
+                        "a mounted rollout remains discoverable when its file resource identifier is unavailable"
+                    )
+                    print("VERIFY mounted session source: resolved symlink scope and path-based file identity fallback")
+                } else {
+                    print("SKIP mounted rollout check: mounted session namespace contains no rollout file")
+                }
+            }
+        } else {
+            print("SKIP mounted session source probe: no automatic Codex session namespace is present")
+        }
     }
 
     private static func testObserverBoundedFastPollScaling() throws {

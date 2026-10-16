@@ -25,6 +25,7 @@ struct UsagePopoverView: View {
     // view tree rather than UserDefaults so the compact Settings surface does
     // not introduce a new persistent product preference.
     @State var isNotificationsExpanded = false
+    @State var isLocalUsageSourceExpanded = false
     @State var isHUDExpanded = false
     @State var isSyncExpanded = false
     @State var isUpdateExpanded = false
