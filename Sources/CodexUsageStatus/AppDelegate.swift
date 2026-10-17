@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var outsideClickMonitor: Any?
     private var localClickMonitor: Any?
     private var model: UsageViewModel!
+    private var accountQuotaBridgeServer: CodexUsageAccountQuotaBridgeServer?
     private var statusItemObservation: AnyCancellable?
     private var rapidDrainEventObservation: AnyCancellable?
     private var statusItemUpdateTask: Task<Void, Never>?
@@ -101,6 +102,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         model.start()
         updateStatusItem()
+        startAccountQuotaBridge()
+    }
+
+    private func startAccountQuotaBridge() {
+        guard accountQuotaBridgeServer == nil else { return }
+        do {
+            let socketURL = try CodexUsageAccountQuotaBridgePaths.selected()
+            let server = CodexUsageAccountQuotaBridgeServer(socketURL: socketURL, source: model)
+            try server.start()
+            accountQuotaBridgeServer = server
+        } catch {
+            NSLog("CodexUsageStatus account/quota bridge unavailable: \(String(describing: error))")
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -112,6 +126,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rapidDrainEventObservation = nil
         rapidDrainAnimator?.stop()
         floatingHUD?.stop()
+        accountQuotaBridgeServer?.stop()
+        accountQuotaBridgeServer = nil
         model?.stop()
     }
 

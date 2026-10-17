@@ -5,7 +5,7 @@ import UserNotifications
 import AppKit
 
 @MainActor
-final class UsageViewModel: ObservableObject {
+final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSource {
     @Published private(set) var snapshot: UsageSnapshot? {
         didSet { refreshStatusItemPresentation() }
     }
@@ -1960,6 +1960,49 @@ final class UsageViewModel: ObservableObject {
         guard let email = health?.identity.email?.trimmingCharacters(in: .whitespacesAndNewlines),
               !email.isEmpty else { return nil }
         return email
+    }
+
+    /// Read-only, credential-free projection of the account and quota state
+    /// already held by this existing UsageViewModel session. No App Server
+    /// request or credential lookup is initiated by this property.
+    var accountQuotaSnapshot: CodexUsageAccountQuotaSnapshot {
+        let health = accountHealth ?? currentProfileID.flatMap { managedAccountHealth[$0] }
+        let observedAt = [health?.receivedAt, snapshot?.receivedAt, lastUpdated]
+            .compactMap { $0 }
+            .max()
+        let availability: CodexUsageAccountQuotaAvailability
+        switch accountHealthState {
+        case .loaded:
+            availability = observedAt == nil ? .notProven : .available
+        case .offline, .unsupported, .error:
+            availability = observedAt == nil ? .notProven : .unavailable
+        case .idle, .loading:
+            availability = observedAt == nil ? .notProven : .checking
+        }
+
+        let windows = [snapshot?.primary, snapshot?.secondary].compactMap { $0 }
+        let quotaWindow = HUDQuotaPresentationPolicy.makeWindow(.sevenDay, from: windows, now: currentDate)
+            ?? HUDQuotaPresentationPolicy.makeWindow(.fiveHour, from: windows, now: currentDate)
+            ?? HUDQuotaPresentationPolicy.makeWindow(.thirtyDay, from: windows, now: currentDate)
+            ?? HUDQuotaPresentationPolicy.makeWindow(.gptReserveWeekly, from: [snapshot?.gptReserveWeekly].compactMap { $0 }, now: currentDate)
+
+        let expiryTimestamp = resetCredits?.availableCredits.compactMap(\.expiresAt).min()
+        let resetExpiry = expiryTimestamp.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        let resetAt = quotaWindow?.resetsAt.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+
+        return CodexUsageAccountQuotaSnapshot(
+            availability: availability,
+            observedAt: observedAt,
+            accountDisplayIdentity: currentAccountEmail,
+            plan: health?.identity.planType,
+            appVersion: AppVersion.current,
+            rollingQuotaPercent: quotaWindow?.remainingPercent,
+            quotaWindowLabel: quotaWindow?.label,
+            quotaRemainingDuration: quotaWindow?.resetDescription,
+            resetAt: resetAt,
+            resetCredits: resetCredits?.availableCount,
+            resetCreditExpiry: resetExpiry
+        )
     }
 
     /// One shared, value-semantic warning projection used by Overview,
