@@ -5269,6 +5269,39 @@ struct CodexUsageStatusTests {
         let canonicalBase = base.standardizedFileURL.resolvingSymlinksInPath().path
         try expect(localResult.availableRootPaths.contains(canonicalBase), "a local source remains available without resource identifiers")
         try expect(localResult.unavailableRootPaths.isEmpty, "capability fallback does not mark a readable local source offline")
+        try expect(
+            CodexLocalUsageObserver.sourceAvailability(for: localResult) == .available,
+            "a readable observation root projects as an available source"
+        )
+
+        let emptyProfileHome = base.appendingPathComponent("empty-profile", isDirectory: true)
+        try FileManager.default.createDirectory(at: emptyProfileHome, withIntermediateDirectories: true)
+        let emptyProfileRoot = CodexLocalUsageObservationRoot(
+            profileID: UUID(),
+            codexHomeURL: emptyProfileHome
+        )
+        for discoverNewRollouts in [false, true] {
+            let mixedRootsResult = CodexLocalUsageObserver.scanRoots(
+                [root, emptyProfileRoot],
+                cursors: [:],
+                seededPaths: [],
+                knownRolloutPaths: [],
+                discoverNewRollouts: discoverNewRollouts,
+                discoveryRootIdentityReader: noResourceIdentifier
+            )
+            try expect(
+                mixedRootsResult.availableRootPaths.contains(canonicalBase),
+                "an empty not-yet-used profile does not hide the reachable primary root"
+            )
+            try expect(
+                mixedRootsResult.unavailableRootPaths.isEmpty,
+                "an empty optional profile is not reported as a failed source"
+            )
+            try expect(
+                CodexLocalUsageObserver.sourceAvailability(for: mixedRootsResult) == .available,
+                "the source remains available while empty profiles are watched for future sessions"
+            )
+        }
 
         let alias = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-portable-observation-alias-\(UUID().uuidString)", isDirectory: true)
@@ -5353,6 +5386,10 @@ struct CodexUsageStatusTests {
         )
         let canonicalEmptyHome = emptyHome.standardizedFileURL.resolvingSymlinksInPath().path
         try expect(emptyResult.unavailableRootPaths.contains(canonicalEmptyHome), "a home without a reachable session namespace is unknown, not confirmed zero")
+        try expect(
+            CodexLocalUsageObserver.sourceAvailability(for: emptyResult) == .unavailable,
+            "no reachable session root remains unknown, not available zero"
+        )
 
         let configuredHome = CodexLocalUsageRootPreference(mode: .defaultHome, customPath: nil).resolveHomeURL()
         let configuredNamespaces = ["sessions.local", "sessions"].map {

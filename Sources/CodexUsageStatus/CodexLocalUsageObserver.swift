@@ -1444,7 +1444,7 @@ final class CodexLocalUsageObserver {
                 self.seededPaths = result.seededPaths
                 self.knownRolloutPaths = result.knownRolloutPaths
                 self.fastPollPaths = result.fastPollPaths
-                self.updateSourceAvailability(result.unavailableRootPaths.isEmpty ? .available : .unavailable)
+                self.updateSourceAvailability(Self.sourceAvailability(for: result))
                 if recoverActiveTurns { self.activeTurnRecoveryPending = false }
                 if cursorsChanged { self.persistCursors() }
                 for event in result.events {
@@ -1472,6 +1472,16 @@ final class CodexLocalUsageObserver {
         guard sourceAvailability != availability else { return }
         sourceAvailability = availability
         sourceAvailabilityHandler?(availability)
+    }
+
+    nonisolated static func sourceAvailability(
+        for result: CodexLocalUsageScanResult
+    ) -> CodexLocalUsageSourceAvailability {
+        guard !result.availableRootPaths.isEmpty,
+              result.unavailableRootPaths.isEmpty else {
+            return .unavailable
+        }
+        return .available
     }
 
     nonisolated static func scanRoots(
@@ -1561,6 +1571,7 @@ final class CodexLocalUsageObserver {
         // directory from turning a disconnected network home into zero usage.
         var availableRootPaths = Set<String>()
         var unavailableRootPaths = Set<String>()
+        var uninitializedOptionalRootPaths = Set<String>()
         for root in roots {
             let rootURL = root.codexHomeURL
             let rootPath = canonicalPath(rootURL.path)
@@ -1588,16 +1599,25 @@ final class CodexLocalUsageObserver {
                 }
                 foundNamespace = true
             }
-            if foundNamespace,
-               namespaceProbeSucceeded,
-               discoveryRootIdentityReader(rootURL) == preflightIdentity {
+            let rootIdentityIsStable = discoveryRootIdentityReader(rootURL) == preflightIdentity
+            if foundNamespace, namespaceProbeSucceeded, rootIdentityIsStable {
                 availableRootPaths.insert(rootPath)
+            } else if root.profileID != nil,
+                      !foundNamespace,
+                      namespaceProbeSucceeded,
+                      rootIdentityIsStable {
+                // Account profile homes are pre-published before their first
+                // Codex session exists. Keep watching those roots, but don't
+                // let an unused empty profile make a reachable primary source
+                // appear offline.
+                uninitializedOptionalRootPaths.insert(rootPath)
             } else {
                 unavailableRootPaths.insert(rootPath)
             }
         }
 
         if discoverNewRollouts {
+            uninitializedOptionalRootPaths.removeAll()
             for root in roots {
                 let rootURL = root.codexHomeURL
                 let preflightIdentity = discoveryRootIdentityReader(rootURL)
@@ -1669,9 +1689,17 @@ final class CodexLocalUsageObserver {
                     }
                 }
                 discoveryProbe(.beforeRootFinalize, rootURL)
-                if rootDiscoverySucceeded, foundNamespace,
-                   discoveryRootIdentityReader(rootURL) == preflightIdentity {
+                let rootIdentityIsStable = discoveryRootIdentityReader(rootURL) == preflightIdentity
+                if rootDiscoverySucceeded, foundNamespace, rootIdentityIsStable {
                     successfulRootPaths.insert(canonicalPath(rootURL.path))
+                } else if rootDiscoverySucceeded,
+                          !foundNamespace,
+                          root.profileID != nil,
+                          rootIdentityIsStable {
+                    // Empty secondary roots are watched for later sessions,
+                    // while broken links and failed discovery remain
+                    // unavailable below.
+                    uninitializedOptionalRootPaths.insert(canonicalPath(rootURL.path))
                 } else {
                     let rootPath = canonicalPath(rootURL.path)
                     availableRootPaths.remove(rootPath)
@@ -1682,6 +1710,7 @@ final class CodexLocalUsageObserver {
             availableRootPaths = successfulRootPaths
             unavailableRootPaths = Set(roots.map { canonicalPath($0.codexHomeURL.path) })
                 .subtracting(successfulRootPaths)
+                .subtracting(uninitializedOptionalRootPaths)
         }
 
         // Once a path has been discovered, regular 2-second polls stat only
