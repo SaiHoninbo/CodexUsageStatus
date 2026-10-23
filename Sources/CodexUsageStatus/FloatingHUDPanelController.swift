@@ -39,7 +39,7 @@ enum FloatingHUDLayout {
 @MainActor
 final class FloatingHUDLayoutState: ObservableObject {
     @Published var placement: HUDPlacement = .bottomRight
-    @Published var scaleLevel: HUDScaleLevel = HUDScaleLevel.load()
+    @Published var scaleLevel: HUDScaleLevel
     /// The HUD is a Codex-only overlay. This state is also used by the view
     /// to keep actions disabled during a focus transition.
     @Published var isCodexFocused = true
@@ -54,6 +54,10 @@ final class FloatingHUDLayoutState: ObservableObject {
     /// SwiftUI tree uses this as a per-show render marker while the panel
     /// itself remains persistent and reusable.
     @Published var visibilityGeneration: UInt64 = 0
+
+    init(defaults: UserDefaults = .standard) {
+        scaleLevel = HUDScaleLevel.load(from: defaults)
+    }
 
     var size: NSSize {
         FloatingHUDLayout.size(
@@ -165,6 +169,8 @@ final class FloatingHUDPanelController: NSObject {
     }
 
     private let model: UsageViewModel
+    private let readOnlyPreview: Bool
+    private let allowsCommitAndPush: Bool
     var onShowDetails: (() -> Void)?
     var onOpenSettingsForAlert: ((HUDAlertPresentation) -> Void)?
     var onOpenCodex: (() -> Void)?
@@ -187,7 +193,7 @@ final class FloatingHUDPanelController: NSObject {
     private var visibilityRefreshCoalescedCount: UInt64 = 0
     private let minimumVisibilityRefreshIntervalNanoseconds: UInt64 = 250_000_000
     private var geometryRefreshTask: Task<Void, Never>?
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
     private let bottomRightPositionKey = "ui.floatingHUD.bottomRightOffset"
     private let anchorPositionKey = "ui.floatingHUD.anchor"
     private let relativePositionKey = "ui.floatingHUD.relativeOffset"
@@ -207,7 +213,7 @@ final class FloatingHUDPanelController: NSObject {
     private var positioningSessionGeneration: UInt64 = 0
     private var pendingMeaningfulRender: (generation: UInt64, requestUptimeNanoseconds: UInt64, trigger: VisibilityRefreshTrigger)?
     private var lastPlacement: HUDPlacement = .bottomRight
-    private let layoutState = FloatingHUDLayoutState()
+    private let layoutState: FloatingHUDLayoutState
     private var isUserDraggingHUD = false
     /// Only a confirmed focus loss may hide the HUD. AX/Quartz and quota
     /// gaps retain the current panel without scheduling a timeout hide.
@@ -215,8 +221,16 @@ final class FloatingHUDPanelController: NSObject {
     private var focusLossGeneration: UInt64 = 0
     private let focusLossGrace: Duration = .milliseconds(500)
 
-    init(model: UsageViewModel) {
+    init(
+        model: UsageViewModel,
+        defaults: UserDefaults = .standard,
+        allowsCommitAndPush: Bool? = nil
+    ) {
         self.model = model
+        readOnlyPreview = model.isReadOnlyPreview
+        self.allowsCommitAndPush = allowsCommitAndPush ?? !model.isPlanLoopIntegration
+        self.defaults = defaults
+        layoutState = FloatingHUDLayoutState(defaults: defaults)
         super.init()
     }
 
@@ -278,8 +292,8 @@ final class FloatingHUDPanelController: NSObject {
                 self?.recordMeaningfulRender(generation: generation)
             }
         )
-        let hostingView = FirstClickHostingView(rootView: rootView)
-        let initialAppearance = HUDThemePalette.forTheme(HUDThemePreference.loadTheme()).appearance
+        let hostingView = FirstClickHostingView(rootView: rootView.defaultAppStorage(defaults))
+        let initialAppearance = HUDThemePalette.forTheme(HUDThemePreference.loadTheme(from: defaults)).appearance
         let appKitAppearance = nsAppearance(for: initialAppearance)
         hostingView.appearance = appKitAppearance
         let newPanel = DraggableHUDPanel(
@@ -834,6 +848,10 @@ final class FloatingHUDPanelController: NSObject {
     }
 
     private func pasteClipboard(completion: @escaping (Bool) -> Void) {
+        guard !readOnlyPreview else {
+            completion(false)
+            return
+        }
         ClipboardPasteService.pasteToCodex(
             processID: lastCodexProcessID,
             completion: completion
@@ -841,6 +859,10 @@ final class FloatingHUDPanelController: NSObject {
     }
 
     private func pasteAndSubmit(completion: @escaping (Bool) -> Void) {
+        guard !readOnlyPreview else {
+            completion(false)
+            return
+        }
         ClipboardPasteService.pasteAndSubmitToCodex(
             processID: lastCodexProcessID,
             completion: completion
@@ -851,6 +873,11 @@ final class FloatingHUDPanelController: NSObject {
         _ shortcut: CodexPromptShortcut,
         completion: @escaping (Bool) -> Void
     ) {
+        guard !readOnlyPreview,
+              shortcut != .commitAndPush || allowsCommitAndPush else {
+            completion(false)
+            return
+        }
         ClipboardPasteService.pasteTemporaryTextToCodex(
             shortcut,
             processID: lastCodexProcessID,

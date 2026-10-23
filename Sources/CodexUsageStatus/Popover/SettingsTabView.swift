@@ -478,7 +478,13 @@ extension UsagePopoverView {
                 updateStatusLabel
             }
 
-            switch model.updateState {
+            if model.isPlanLoopIntegration {
+                Text("PlanLoop 的更新通道尚未接入。整合模式已停用 CodexUsageStatus 獨立更新器，避免錯誤覆蓋宿主 App。")
+                    .font(.body)
+                    .foregroundStyle(HUDColorPalette.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                switch model.updateState {
             case .idle:
                 Text("啟動後會檢查 GitHub Release。")
                     .font(.body)
@@ -558,23 +564,28 @@ extension UsagePopoverView {
                         .font(.subheadline)
                         .popoverControlPressProbe("settings.github")
                 }
+                }
             }
         }
     }
 
     @ViewBuilder
     private var updateStatusLabel: some View {
-        switch model.updateState {
-        case .checking, .downloading, .installing:
-            Text("處理中").font(.subheadline).foregroundStyle(HUDColorPalette.secondaryText)
-        case .available:
-            Text("有新版").font(.subheadline).foregroundStyle(HUDColorPalette.sevenDay)
-        case .upToDate:
-            Text("最新").font(.subheadline).foregroundStyle(HUDColorPalette.continueAction)
-        case .error:
-            Text("檢查失敗").font(.subheadline).foregroundStyle(HUDColorPalette.warning)
-        case .idle:
-            EmptyView()
+        if model.isPlanLoopIntegration {
+            Text("未接入").font(.subheadline).foregroundStyle(HUDColorPalette.warning)
+        } else {
+            switch model.updateState {
+            case .checking, .downloading, .installing:
+                Text("處理中").font(.subheadline).foregroundStyle(HUDColorPalette.secondaryText)
+            case .available:
+                Text("有新版").font(.subheadline).foregroundStyle(HUDColorPalette.sevenDay)
+            case .upToDate:
+                Text("最新").font(.subheadline).foregroundStyle(HUDColorPalette.continueAction)
+            case .error:
+                Text("檢查失敗").font(.subheadline).foregroundStyle(HUDColorPalette.warning)
+            case .idle:
+                EmptyView()
+            }
         }
     }
 

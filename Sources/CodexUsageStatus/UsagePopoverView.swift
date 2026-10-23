@@ -11,6 +11,8 @@ private struct PopoverContentHeightPreferenceKey: PreferenceKey {
 struct UsagePopoverView: View {
     @ObservedObject var model: UsageViewModel
     @ObservedObject var selectionController: PopoverSelectionController
+    var planLoopProjection: CodexUsageProjectionSnapshot? = nil
+    var isReadOnlyPreview = false
     let openCodex: () -> Void
     let resetHUDPosition: () -> Void
     let quit: () -> Void
@@ -45,9 +47,9 @@ struct UsagePopoverView: View {
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 16) {
-                header
+                header.disabled(isReadOnlyPreview)
                 tabBar
-                tabContent
+                tabContent.disabled(isReadOnlyPreview)
             }
             .padding(20)
             .background {
@@ -79,7 +81,7 @@ struct UsagePopoverView: View {
             applyPendingSettingsSection()
         }
         .onChange(of: selectionController.selectedTab) { _, tab in
-            if tab == .overview, model.accountScope != .current {
+            if !isReadOnlyPreview, tab == .overview, model.accountScope != .current {
                 model.setAccountScope(.current)
             }
             DispatchQueue.main.async {
@@ -89,7 +91,7 @@ struct UsagePopoverView: View {
         .onAppear {
             didLogColdOpenFreshData = false
             coldOpenBaselineLastUpdated = model.lastUpdated
-            if selectedTab == .overview, model.accountScope != .current {
+            if !isReadOnlyPreview, selectedTab == .overview, model.accountScope != .current {
                 model.setAccountScope(.current)
             }
             syncUpdateDisclosure(with: model.updateState)
@@ -199,7 +201,17 @@ struct UsagePopoverView: View {
     private var tabContent: some View {
         switch selectedTab {
         case .overview:
-            overviewTab
+            VStack(alignment: .leading, spacing: 12) {
+                if isReadOnlyPreview, let planLoopProjection {
+                    PlanLoopQuotaProjectionSection(snapshot: planLoopProjection.accountQuotaSnapshot)
+                }
+                overviewTab
+                if model.activeExecutions.isEmpty,
+                   model.trackedChatExecutions.isEmpty,
+                   let planLoopProjection {
+                    PlanLoopSessionProjectionSection(snapshot: planLoopProjection)
+                }
+            }
         case .history:
             historyTab
         case .accounts:
@@ -324,6 +336,97 @@ struct UsagePopoverView: View {
         case .offline: return "wifi.slash"
         case .error: return "exclamationmark.triangle"
         default: return "circle"
+        }
+    }
+}
+
+private struct PlanLoopQuotaProjectionSection: View {
+    let snapshot: CodexUsageAccountQuotaSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Staging Bridge 額度", systemImage: "point.3.connected.trianglepath.dotted")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(HUDColorPalette.primaryText)
+            row("來源狀態", snapshot.availability.rawValue)
+            row("帳號", snapshot.accountDisplayIdentity ?? "未提供")
+            row("方案", snapshot.plan ?? "未提供")
+            row("額度窗口", snapshot.quotaWindowLabel ?? "未提供")
+            row("剩餘時間", snapshot.quotaRemainingDuration ?? "未提供")
+            row("重置券", snapshot.resetCredits.map(String.init) ?? "未提供")
+            if let percent = snapshot.rollingQuotaPercent {
+                ProgressView(value: Double(min(max(percent, 0), 100)), total: 100)
+                row("剩餘額度", "\(percent)%")
+            }
+            if let resetAt = snapshot.resetAt {
+                row("重置時間", resetAt.formatted(date: .abbreviated, time: .shortened))
+            }
+            Text("唯讀預覽只顯示指定 Staging Bridge 投影；donor 帳號、憑證與更新操作未啟動。")
+                .font(.caption2)
+                .foregroundStyle(HUDColorPalette.secondaryText)
+        }
+        .padding(12)
+        .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func row(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title).foregroundStyle(HUDColorPalette.secondaryText)
+            Spacer(minLength: 8)
+            Text(value).foregroundStyle(HUDColorPalette.primaryText)
+                .multilineTextAlignment(.trailing)
+        }
+        .font(.caption)
+    }
+}
+
+private struct PlanLoopSessionProjectionSection: View {
+    let snapshot: CodexUsageProjectionSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("PlanLoop Chats", systemImage: "bubble.left.and.bubble.right")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(HUDColorPalette.primaryText)
+
+            if snapshot.trackedSessions.isEmpty {
+                Text(emptyState)
+                    .font(.caption)
+                    .foregroundStyle(HUDColorPalette.secondaryText)
+            } else {
+                ForEach(snapshot.trackedSessions, id: \.id) { session in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(session.displayName ?? session.workspaceName ?? "Codex Chat")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(HUDColorPalette.primaryText)
+                        HStack(spacing: 8) {
+                            Text(session.state)
+                            if let model = session.model { Text(model) }
+                            if let tokenRate = session.tokenRate { Text(tokenRate) }
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(HUDColorPalette.secondaryText)
+                        if let eta = session.eta {
+                            Text("ETA · \(eta)")
+                                .font(.caption2)
+                                .foregroundStyle(HUDColorPalette.secondaryText)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(9)
+                    .background(HUDColorPalette.elevatedSurface, in: RoundedRectangle(cornerRadius: 8))
+                }
+            }
+        }
+        .padding(12)
+        .background(HUDColorPalette.surface, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var emptyState: String {
+        switch snapshot.availability {
+        case .checking: "正在檢查工作階段來源…"
+        case .available: "目前沒有已追蹤的 Chat。"
+        case .unavailable: "工作階段來源目前無法使用。"
         }
     }
 }

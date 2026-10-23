@@ -4,8 +4,22 @@ import SwiftUI
 import UserNotifications
 import AppKit
 
+enum UsageViewModelRuntimeMode: Equatable {
+    case standalone
+    case planLoopIntegration
+    case planLoopStagingPreview
+
+    var ownsLocalUsageObserver: Bool { self == .standalone }
+    var registersLoginItem: Bool { self == .standalone }
+    var checksForUpdates: Bool { self == .standalone }
+    var isReadOnlyPreview: Bool { self == .planLoopStagingPreview }
+}
+
 @MainActor
-final class UsageViewModel: ObservableObject {
+final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSource {
+    private let runtimeMode: UsageViewModelRuntimeMode
+    var isPlanLoopIntegration: Bool { runtimeMode != .standalone }
+    var isReadOnlyPreview: Bool { runtimeMode.isReadOnlyPreview }
     @Published private(set) var snapshot: UsageSnapshot? {
         didSet { refreshStatusItemPresentation() }
     }
@@ -94,6 +108,9 @@ final class UsageViewModel: ObservableObject {
     @Published private(set) var showTurnContentInNotifications: Bool
     @Published private(set) var notifyOnAccountSwitch: Bool
     @Published private(set) var floatingHUDEnabled: Bool
+    private var stagingPreviewAccountDisplayIdentity: String?
+    var planLoopHUDEnabledDidChange: ((Bool) -> Void)?
+    var planLoopObservationRootsDidChange: (([CodexUsageObservationRootConfiguration]) -> Void)?
     @Published private(set) var updateState: AppUpdateState = .idle
     @Published var historyRange: HistoryRange = .week
     @Published var tokenActivityRange: TokenActivityRange = .week
@@ -138,7 +155,7 @@ final class UsageViewModel: ObservableObject {
     private let turnNotificationService = TurnNotificationService()
     private let updateService = AppUpdateService()
     private let updateNotificationService = AppUpdateNotificationService()
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
     private var displayTimer: Timer?
     private var hudTokenActivityFetchedAt: Date?
     /// Latest successful fetch timestamps are kept separate from semantic
@@ -168,10 +185,11 @@ final class UsageViewModel: ObservableObject {
     /// The updater must not launch its replacement helper until this barrier
     /// is complete, otherwise helper-owned SIGTERM could race local writes.
     private var boundedShutdownHandoffCompleted = false
+    private var shutdownPersistenceGeneration: UInt64 = 0
     private var localStoresLoaded = false
     private var startupTask: Task<Void, Never>?
     private var defaultClientStopTask: Task<Void, Never>?
-    private var shutdownPersistenceTask: Task<Bool, Never>?
+    private var shutdownPersistenceTask: Task<PersistenceFlushResult, Never>?
     private var estimationHistoryScanTask: Task<Void, Never>?
     private var completedDurationSamples: [CodexExecutionDurationSample] = []
 
@@ -197,20 +215,47 @@ final class UsageViewModel: ObservableObject {
         static let floatingHUDEnabled = "ui.floatingHUD.enabled"
     }
 
-    init() {
-        RetiredFeatureCleanup.run()
-        AppSettingsSchema.migrate(defaults: defaults)
+    init(
+        runtimeMode: UsageViewModelRuntimeMode = .standalone,
+        defaults injectedDefaults: UserDefaults? = nil,
+        isolatedStorageRoot: URL? = nil
+    ) {
+        self.runtimeMode = runtimeMode
+        if runtimeMode.isReadOnlyPreview, injectedDefaults == nil {
+            preconditionFailure("Staging preview requires profile-scoped UserDefaults.")
+        }
+        defaults = injectedDefaults ?? .standard
+        if runtimeMode == .standalone {
+            RetiredFeatureCleanup.run()
+            AppSettingsSchema.migrate(defaults: defaults)
+        }
         localUsageRootPreference = CodexLocalUsageRootPreference.load(from: defaults)
-        let store = HistoryStore(loadOnInit: false, asynchronousPersistence: true)
+        let previewStorageRoot = runtimeMode.isReadOnlyPreview ? isolatedStorageRoot : nil
+        let store: HistoryStore
+        let activityStore: TokenActivityStore
+        if let previewStorageRoot {
+            store = HistoryStore(
+                fileURL: previewStorageRoot.appendingPathComponent("history.json"),
+                loadOnInit: false,
+                asynchronousPersistence: true
+            )
+            activityStore = TokenActivityStore(
+                fileURL: previewStorageRoot.appendingPathComponent("token-activity.json"),
+                loadOnInit: false,
+                asynchronousPersistence: true
+            )
+        } else {
+            store = HistoryStore(loadOnInit: false, asynchronousPersistence: true)
+            activityStore = TokenActivityStore(loadOnInit: false, asynchronousPersistence: true)
+        }
         historyStore = store
         legacyHistoryURL = store.fileURL
         historySamples = store.samples
         historyErrorMessage = store.errorMessage
-        let activityStore = TokenActivityStore(loadOnInit: false, asynchronousPersistence: true)
         tokenActivityStore = activityStore
         localTokenUsageLedgerStore = LocalTokenUsageLedgerStore(
-            fileURL: activityStore.fileURL.deletingLastPathComponent()
-                .appendingPathComponent("local-token-usage-ledger.json"),
+            fileURL: previewStorageRoot?.appendingPathComponent("local-token-usage-ledger.json")
+                ?? activityStore.fileURL.deletingLastPathComponent().appendingPathComponent("local-token-usage-ledger.json"),
             loadOnInit: false,
             asynchronousPersistence: true
         )
@@ -227,7 +272,9 @@ final class UsageViewModel: ObservableObject {
         // key so an existing OFF choice remains OFF after upgrade.
         notificationSoundEnabled = GlobalSoundPreference.load(from: defaults)
         tokenReelSoundEnabled = TokenReelSoundPreference.load(from: defaults)
-        accessibilityPermissionState = AccessibilityPermissionPolicy.current()
+        accessibilityPermissionState = runtimeMode.isReadOnlyPreview
+            ? .unavailable
+            : AccessibilityPermissionPolicy.current()
         notificationThresholds = Self.loadThresholds(from: defaults)
         notifyOnTurnSuccess = defaults.object(forKey: PreferenceKey.turnSuccess) as? Bool ?? false
         notifyOnTurnFailure = defaults.object(forKey: PreferenceKey.turnFailure) as? Bool ?? true
@@ -241,7 +288,11 @@ final class UsageViewModel: ObservableObject {
         showTurnContentInNotifications = defaults.object(forKey: PreferenceKey.turnContent) as? Bool ?? false
         notifyOnAccountSwitch = defaults.object(forKey: PreferenceKey.accountSwitch) as? Bool ?? false
         floatingHUDEnabled = defaults.object(forKey: PreferenceKey.floatingHUDEnabled) as? Bool ?? true
-        profileStore = AccountProfileStore(loadOnInit: false, asynchronousPersistence: true)
+        profileStore = AccountProfileStore(
+            applicationSupportURL: previewStorageRoot,
+            loadOnInit: false,
+            asynchronousPersistence: true
+        )
         accountProfiles = []
         activeTurnPlan = nil
         profileStoreErrorMessage = profileStore.errorMessage
@@ -393,32 +444,36 @@ final class UsageViewModel: ObservableObject {
             if outcome.succeeded { self.selectedResetCreditID = nil }
         }
 
-        notificationService.refreshAuthorization { [weak self] status in
-            self?.notificationAuthorizationStatus = status
+        if !runtimeMode.isReadOnlyPreview {
+            notificationService.refreshAuthorization { [weak self] status in
+                self?.notificationAuthorizationStatus = status
+            }
         }
         refreshHUDTokenActivitySummary()
         refreshStatusItemPresentation()
 
-        localUsageObserver = CodexLocalUsageObserver(
-            cursorURL: profileStore.containerURL.appendingPathComponent("codex-local-usage-cursors.json"),
-            handler: { [weak self] profileID, record in
-                self?.handleLocalUsageRecord(profileID: profileID, record: record)
-            },
-            turnCompletionHandler: { [weak self] profileID, record in
-                self?.handleLocalTurnCompletion(profileID: profileID, record: record)
-            },
-            turnActivityHandler: { [weak self] event in
-                self?.handleLocalTurnActivity(event)
-            },
-            activeExecutionReconciliationHandler: { [weak self] reconciliation in
-                self?.handleActiveExecutionReconciliation(reconciliation)
-            },
-            sourceAvailabilityHandler: { [weak self] availability in
-                guard let self, self.localUsageSourceAvailability != availability else { return }
-                self.localUsageSourceAvailability = availability
-                self.refreshHUDTokenActivitySummary()
-            }
-        )
+        if runtimeMode.ownsLocalUsageObserver {
+            localUsageObserver = CodexLocalUsageObserver(
+                cursorURL: profileStore.containerURL.appendingPathComponent("codex-local-usage-cursors.json"),
+                handler: { [weak self] profileID, record in
+                    self?.handleLocalUsageRecord(profileID: profileID, record: record)
+                },
+                turnCompletionHandler: { [weak self] profileID, record in
+                    self?.handleLocalTurnCompletion(profileID: profileID, record: record)
+                },
+                turnActivityHandler: { [weak self] event in
+                    self?.handleLocalTurnActivity(event)
+                },
+                activeExecutionReconciliationHandler: { [weak self] reconciliation in
+                    self?.handleActiveExecutionReconciliation(reconciliation)
+                },
+                sourceAvailabilityHandler: { [weak self] availability in
+                    guard let self, self.localUsageSourceAvailability != availability else { return }
+                    self.localUsageSourceAvailability = availability
+                    self.refreshHUDTokenActivitySummary()
+                }
+            )
+        }
     }
 
     deinit {
@@ -429,17 +484,22 @@ final class UsageViewModel: ObservableObject {
     }
 
     func start() {
+        guard !runtimeMode.isReadOnlyPreview else { return }
         isStopping = false
-        updateService.start()
-        loginItemManager.refresh()
-        loginItemManager.registerIfNeeded()
+        if runtimeMode.registersLoginItem {
+            loginItemManager.refresh()
+            loginItemManager.registerIfNeeded()
+        }
         startDisplayTimer()
         // Start the existing bounded update cadence as soon as the model is
         // alive. The request is asynchronous and must not wait for the
         // slower local-store hydration path; otherwise a delayed profile or
         // history read can suppress the first automatic release prompt.
-        startUpdateCheckTimer()
-        checkForUpdatesIfNeeded()
+        if runtimeMode.checksForUpdates {
+            updateService.start()
+            startUpdateCheckTimer()
+            checkForUpdatesIfNeeded()
+        }
         startupTask?.cancel()
         startupTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -493,8 +553,13 @@ final class UsageViewModel: ObservableObject {
         } else {
             client.start()
         }
-        refreshLocalUsageObserverRoots()
-        localUsageObserver?.start()
+        CodexLocalUsageObservationRootPolicy.completeProfileHydration(
+            ownsLocalObserver: runtimeMode.ownsLocalUsageObserver,
+            refreshRoots: { self.refreshLocalUsageObserverRoots() },
+            startOwnedObserver: {
+                if let observer = self.localUsageObserver { observer.start() }
+            }
+        )
         startManagedWorkers()
     }
 
@@ -525,12 +590,16 @@ final class UsageViewModel: ObservableObject {
         defaultClientStopTask?.cancel()
         defaultClientStopTask = nil
         guard shutdownPersistenceTask == nil else { return }
+        shutdownPersistenceGeneration &+= 1
         let deadline = DispatchTime.now().uptimeNanoseconds &+ TerminationFlushPolicy.timeoutNanoseconds
         shutdownPersistenceTask = Task { [historyStore, tokenActivityStore] in
-            let historyFlushed = await historyStore.flushPendingWrites(untilUptimeNanoseconds: deadline)
-            let tokenActivityFlushed = await tokenActivityStore.flushPendingWrites(untilUptimeNanoseconds: deadline)
-            let coordinatorFlushed = await PersistenceWriteCoordinator.shared.flush(untilUptimeNanoseconds: deadline)
-            return historyFlushed && tokenActivityFlushed && coordinatorFlushed
+            _ = await historyStore.flushPendingWritesResult(untilUptimeNanoseconds: deadline)
+            _ = await tokenActivityStore.flushPendingWritesResult(untilUptimeNanoseconds: deadline)
+            // All stores feed this same coordinator. The final readback after
+            // their bounded flush calls is the authoritative aggregate result;
+            // a transient first attempt that was successfully retried does not
+            // make the completed hand-off look like a failed save.
+            return await PersistenceWriteCoordinator.shared.flushResult(untilUptimeNanoseconds: deadline)
         }
     }
 
@@ -539,32 +608,88 @@ final class UsageViewModel: ObservableObject {
     /// primitive shared prevents the helper's direct SIGTERM from bypassing
     /// observer shutdown and pending history/token persistence.
     @discardableResult
-    private func prepareForBoundedShutdownHandoff() async -> Bool {
+    private func prepareForBoundedShutdownHandoff() async -> PersistenceFlushResult {
         if !boundedShutdownHandoffCompleted {
             if !isStopping { stop() }
             // `stop()` schedules the stores against one shared deadline. Await
             // that exact task; otherwise an empty coordinator could report
             // ready before the stores enqueue their final writes.
-            boundedShutdownHandoffCompleted = await shutdownPersistenceTask?.value ?? false
+            guard let shutdownPersistenceTask else { return .timedOut }
+            let generation = shutdownPersistenceGeneration
+            let result = await shutdownPersistenceTask.value
+            // A watchdog cancellation may have resumed the model while this
+            // await was suspended. A late save result must not re-mark the
+            // now-running model as already shut down.
+            guard generation == shutdownPersistenceGeneration, isStopping else { return result }
+            boundedShutdownHandoffCompleted = result == .saved
+            return result
         }
-        return boundedShutdownHandoffCompleted
+        return .saved
     }
 
     /// Bounded termination hook used by AppDelegate's terminate-later reply.
     /// All disk work happens off the main actor and is capped by the shared
     /// coordinator timeout so shutdown cannot hang indefinitely.
-    func prepareForTermination() async {
-        _ = await prepareForBoundedShutdownHandoff()
+    @discardableResult
+    func prepareForTermination() async -> Bool {
+        await prepareForTerminationResult().shouldTerminate
+    }
+
+    func prepareForTerminationResult() async -> CodexUsageTerminationPreparationResult {
+        if runtimeMode.isReadOnlyPreview { return .saved }
+        switch await prepareForBoundedShutdownHandoff() {
+        case .saved:
+            return .saved
+        case .writeFailed:
+            return .persistenceFailure
+        case .timedOut:
+            return .timedOut
+        }
+    }
+
+    /// AppKit can cancel termination after a failed flush or watchdog timeout.
+    /// Wait for that bounded attempt, reset only its completed barrier, and
+    /// restart the same model so the still-open app remains usable.
+    func resumeAfterCancelledTermination() async {
+        guard !runtimeMode.isReadOnlyPreview else { return }
+        if let shutdownPersistenceTask {
+            let previousResult = await shutdownPersistenceTask.value
+            if previousResult != .saved {
+                let retryDeadline = DispatchTime.now().uptimeNanoseconds &+ TerminationFlushPolicy.timeoutNanoseconds
+                let retryResult = await PersistenceWriteCoordinator.shared.flushResult(untilUptimeNanoseconds: retryDeadline)
+                if retryResult != .saved {
+                    // Keep the diagnosis non-sensitive and actionable. The
+                    // coordinator retains failed payloads for a later retry.
+                    NSLog("Codex Usage Status persistence recovery remains %@ after cancelled termination", String(describing: retryResult))
+                }
+            }
+        }
+        shutdownPersistenceGeneration &+= 1
+        boundedShutdownHandoffCompleted = false
+        shutdownPersistenceTask = nil
+        if isStopping {
+            // `finishStartupAfterLocalStores()` is guarded against duplicate
+            // hydration. A cancelled termination must re-run that bootstrap
+            // after `stop()` has torn down clients and workers.
+            localStoresLoaded = false
+            start()
+        }
     }
 
     /// Called after an update archive has been validated but before the helper
     /// is launched. A false result is fail-closed: no helper, SIGTERM, backup,
     /// or bundle replacement may occur when persistence did not drain.
     func prepareForUpdateReplacement() async -> Bool {
-        await prepareForBoundedShutdownHandoff()
+        let result = await prepareForBoundedShutdownHandoff()
+        guard result == .saved else {
+            await resumeAfterCancelledTermination()
+            return false
+        }
+        return true
     }
 
     func refresh() {
+        guard !runtimeMode.isReadOnlyPreview else { return }
         currentDate = Date()
         refreshHUDTokenActivitySummary()
         refreshAccessibilityPermissionState()
@@ -572,14 +697,17 @@ final class UsageViewModel: ObservableObject {
     }
 
     func refreshAccessibilityPermissionState() {
+        guard !runtimeMode.isReadOnlyPreview else { return }
         accessibilityPermissionState = AccessibilityPermissionPolicy.current()
     }
 
     func openAccessibilitySettings() {
+        guard !runtimeMode.isReadOnlyPreview else { return }
         AccessibilityPermissionPolicy.openSettings()
     }
 
     func refreshTokenActivity() {
+        guard !runtimeMode.isReadOnlyPreview else { return }
         activeClient.refreshTokenActivity()
     }
 
@@ -588,6 +716,10 @@ final class UsageViewModel: ObservableObject {
     }
 
     func checkForUpdates(onCompletion: ((Bool) -> Void)? = nil) {
+        guard runtimeMode.checksForUpdates else {
+            onCompletion?(false)
+            return
+        }
         // Manual checks are explicit user actions and therefore bypass the
         // automatic cadence. Recording the attempt also prevents an immediate
         // foreground/popover lifecycle callback from starting a duplicate
@@ -616,6 +748,7 @@ final class UsageViewModel: ObservableObject {
     /// for an app that remains open while GitHub publishes a new version,
     /// without adding another timer or updater subsystem.
     func checkForUpdatesIfNeeded(now: Date = Date()) {
+        guard runtimeMode.checksForUpdates else { return }
         guard AppUpdateCheckPolicy.shouldStartAutomaticCheck(
             now: now,
             lastCheckAt: lastAutomaticUpdateCheckAt,
@@ -626,10 +759,12 @@ final class UsageViewModel: ObservableObject {
     }
 
     func openUpdateReleasePage() {
+        guard runtimeMode.checksForUpdates else { return }
         updateService.openReleasePage()
     }
 
     func installUpdate(_ release: AppUpdateRelease) {
+        guard runtimeMode.checksForUpdates else { return }
         updateService.install(release) { [weak self] in
             guard let self else { return false }
             return await self.prepareForUpdateReplacement()
@@ -837,7 +972,19 @@ final class UsageViewModel: ObservableObject {
     func setPlanProgressNotifications(_ enabled: Bool) { notifyOnPlanProgress = enabled; defaults.set(enabled, forKey: PreferenceKey.turnPlanProgress) }
     func setTurnContentInNotifications(_ enabled: Bool) { showTurnContentInNotifications = enabled; defaults.set(enabled, forKey: PreferenceKey.turnContent) }
     func setAccountSwitchNotifications(_ enabled: Bool) { notifyOnAccountSwitch = enabled; defaults.set(enabled, forKey: PreferenceKey.accountSwitch) }
-    func setFloatingHUDEnabled(_ enabled: Bool) { floatingHUDEnabled = enabled; defaults.set(enabled, forKey: PreferenceKey.floatingHUDEnabled) }
+    func synchronizeFloatingHUDEnabledFromPlanLoop(_ enabled: Bool) {
+        guard runtimeMode != .standalone else { return }
+        floatingHUDEnabled = enabled
+    }
+
+    func setFloatingHUDEnabled(_ enabled: Bool) {
+        floatingHUDEnabled = enabled
+        if runtimeMode != .standalone {
+            planLoopHUDEnabledDidChange?(enabled)
+        } else {
+            defaults.set(enabled, forKey: PreferenceKey.floatingHUDEnabled)
+        }
+    }
 
     func selectResetCredit(id: String?) {
         guard let id,
@@ -1816,6 +1963,26 @@ final class UsageViewModel: ObservableObject {
         }
     }
 
+    /// Receives metadata-only lifecycle events from PlanLoop's canonical
+    /// observer. This keeps notification and lifecycle behavior on the donor
+    /// model while ensuring integration mode does not create a second scanner.
+    func receivePlanLoopObservedTurnActivity(_ event: CodexLocalTurnActivityEvent) {
+        guard runtimeMode == .planLoopIntegration, !isStopping else { return }
+        handleLocalTurnActivity(event)
+    }
+
+    /// Routes the canonical observer's accepted completion into the donor's
+    /// existing local completion ledger. The provider remains the sole
+    /// observer in integration mode, and the ledger keeps its existing
+    /// duplicate/longest-turn admission behavior.
+    func receivePlanLoopObservedTurnCompletion(
+        profileID: UUID?,
+        record: CodexLocalTurnCompletionRecord
+    ) {
+        guard runtimeMode == .planLoopIntegration, !isStopping else { return }
+        handleLocalTurnCompletion(profileID: profileID, record: record)
+    }
+
     /// Applies an App Server plan update to the current local Turn identity.
     /// The App Server supplies plan authority, while the existing local
     /// rollout/session observer supplies the visible Turn lifecycle. This
@@ -1892,29 +2059,65 @@ final class UsageViewModel: ObservableObject {
     }
 
     private func localUsageObservationRoots() -> [CodexLocalUsageObservationRoot] {
-        let defaultHome = localUsageRootPreference.resolveHomeURL()
         // The selected primary home remains a stable machine observation
         // source when the UsageStatus account changes; managed homes keep
         // their own profile attribution.
-        var roots = [CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: defaultHome)]
-        var seenPaths = Set([CodexLocalTurnActivityAuthority.normalizedRoot(defaultHome).path])
-        for profile in profileStore.accountProfiles() {
-            let homeURL = profileStore.codexHomeURL(for: profile)
-            guard seenPaths.insert(CodexLocalTurnActivityAuthority.normalizedRoot(homeURL).path).inserted else { continue }
-            roots.append(CodexLocalUsageObservationRoot(
-                profileID: profile.id,
-                codexHomeURL: homeURL
-            ))
+        return CodexLocalUsageObservationRootPolicy.resolve(
+            defaultHomeURL: localUsageRootPreference.resolveHomeURL(),
+            profiles: profileStore.accountProfiles(),
+            homeURLForProfile: { profileStore.codexHomeURL(for: $0) }
+        )
+    }
+
+    var planLoopObservationRootConfigurations: [CodexUsageObservationRootConfiguration] {
+        guard !runtimeMode.isReadOnlyPreview else { return [] }
+        return localUsageObservationRoots().map {
+            CodexUsageObservationRootConfiguration(profileID: $0.profileID, codexHomeURL: $0.codexHomeURL)
         }
-        return roots
+    }
+
+    func applyPlanLoopStagingProjection(
+        _ projection: CodexUsageProjectionSnapshot,
+        trackedChatExecutions: [CodexChatExecutionTracking] = []
+    ) {
+        guard runtimeMode.isReadOnlyPreview else { return }
+        let quota = projection.accountQuotaSnapshot
+        stagingPreviewAccountDisplayIdentity = quota.availability == .available
+            ? quota.accountDisplayIdentity
+            : nil
+        snapshot = PlanLoopStagingPreviewProjection.usageSnapshot(from: quota)
+        resetCredits = snapshot?.rateLimitResetCredits
+        lastUpdated = snapshot?.receivedAt
+        hudTokenActivityMetrics = PlanLoopStagingPreviewProjection.tokenActivityMetrics(from: projection)
+        hudTokenActivityFetchedAt = projection.localTokenMetricsLastObservedAt
+        self.trackedChatExecutions = trackedChatExecutions
+        activeExecutions = trackedChatExecutions
+            .filter { !$0.state.isTerminal }
+            .map(\.executionProjection)
+        currentDate = Date()
+        errorMessage = nil
+        switch quota.availability {
+        case .available:
+            connectionState = .connected
+        case .checking:
+            connectionState = .connecting
+        case .unavailable:
+            connectionState = .offline
+        case .notProven:
+            connectionState = .disconnected
+        }
     }
 
     private func refreshLocalUsageObserverRoots() {
-        guard let localUsageObserver else { return }
         let roots = localUsageObservationRoots()
-        localUsageObserver.setRoots(roots)
-        if localStoresLoaded {
+        localUsageObserver?.setRoots(roots)
+        if localUsageObserver != nil, localStoresLoaded {
             startExecutionDurationHistoryScan()
+        }
+        CodexLocalUsageObservationRootPolicy.publishToIntegrationHost(roots) { publishedRoots in
+            self.planLoopObservationRootsDidChange?(publishedRoots.map {
+                CodexUsageObservationRootConfiguration(profileID: $0.profileID, codexHomeURL: $0.codexHomeURL)
+            })
         }
     }
 
@@ -1948,6 +2151,9 @@ final class UsageViewModel: ObservableObject {
     }
 
     var accountDisplayName: String {
+        if runtimeMode.isReadOnlyPreview {
+            return stagingPreviewAccountDisplayIdentity ?? "Staging 帳號資料未提供"
+        }
         guard let profile = currentProfile else { return "未識別帳號 1" }
         return accountProfileDisplay(for: profile).title
     }
@@ -1956,10 +2162,54 @@ final class UsageViewModel: ObservableObject {
     /// in-memory presentation value for the HUD. It is never part of a
     /// profile, history, UserDefaults value, notification, or log payload.
     var currentAccountEmail: String? {
+        if runtimeMode.isReadOnlyPreview { return stagingPreviewAccountDisplayIdentity }
         let health = accountHealth ?? currentProfileID.flatMap { managedAccountHealth[$0] }
         guard let email = health?.identity.email?.trimmingCharacters(in: .whitespacesAndNewlines),
               !email.isEmpty else { return nil }
         return email
+    }
+
+    /// Read-only, credential-free projection of the account and quota state
+    /// already held by this existing UsageViewModel session. No App Server
+    /// request or credential lookup is initiated by this property.
+    var accountQuotaSnapshot: CodexUsageAccountQuotaSnapshot {
+        let health = accountHealth ?? currentProfileID.flatMap { managedAccountHealth[$0] }
+        let observedAt = [health?.receivedAt, snapshot?.receivedAt, lastUpdated]
+            .compactMap { $0 }
+            .max()
+        let availability: CodexUsageAccountQuotaAvailability
+        switch accountHealthState {
+        case .loaded:
+            availability = observedAt == nil ? .notProven : .available
+        case .offline, .unsupported, .error:
+            availability = observedAt == nil ? .notProven : .unavailable
+        case .idle, .loading:
+            availability = observedAt == nil ? .notProven : .checking
+        }
+
+        let windows = [snapshot?.primary, snapshot?.secondary].compactMap { $0 }
+        let quotaWindow = HUDQuotaPresentationPolicy.makeWindow(.sevenDay, from: windows, now: currentDate)
+            ?? HUDQuotaPresentationPolicy.makeWindow(.fiveHour, from: windows, now: currentDate)
+            ?? HUDQuotaPresentationPolicy.makeWindow(.thirtyDay, from: windows, now: currentDate)
+            ?? HUDQuotaPresentationPolicy.makeWindow(.gptReserveWeekly, from: [snapshot?.gptReserveWeekly].compactMap { $0 }, now: currentDate)
+
+        let expiryTimestamp = resetCredits?.availableCredits.compactMap(\.expiresAt).min()
+        let resetExpiry = expiryTimestamp.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        let resetAt = quotaWindow?.resetsAt.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+
+        return CodexUsageAccountQuotaSnapshot(
+            availability: availability,
+            observedAt: observedAt,
+            accountDisplayIdentity: currentAccountEmail,
+            plan: health?.identity.planType,
+            appVersion: AppVersion.current,
+            rollingQuotaPercent: quotaWindow?.remainingPercent,
+            quotaWindowLabel: quotaWindow?.label,
+            quotaRemainingDuration: quotaWindow?.resetDescription,
+            resetAt: resetAt,
+            resetCredits: resetCredits?.availableCount,
+            resetCreditExpiry: resetExpiry
+        )
     }
 
     /// One shared, value-semantic warning projection used by Overview,

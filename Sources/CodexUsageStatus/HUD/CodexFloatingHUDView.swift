@@ -969,7 +969,7 @@ struct CodexFloatingHUDView: View {
                     isPasteInFlight = false
                 }
             },
-            isDisabled: presentation.isPasteInFlight || !presentation.isCodexFocused || !presentation.isAccessibilityTrusted,
+            isDisabled: model.isReadOnlyPreview || presentation.isPasteInFlight || !presentation.isCodexFocused || !presentation.isAccessibilityTrusted,
             helpText: !presentation.isAccessibilityTrusted
                 ? "允許輔助功能後可貼上"
                 : (presentation.isCodexFocused ? "貼上剪貼簿內容" : "切換回 Codex 後可貼上"),
@@ -996,7 +996,7 @@ struct CodexFloatingHUDView: View {
                     isPasteAndSubmitInFlight = false
                 }
             },
-            isDisabled: presentation.isPasteAndSubmitInFlight || !presentation.isCodexFocused || !presentation.isAccessibilityTrusted,
+            isDisabled: model.isReadOnlyPreview || presentation.isPasteAndSubmitInFlight || !presentation.isCodexFocused || !presentation.isAccessibilityTrusted,
             helpText: !presentation.isAccessibilityTrusted
                 ? "允許輔助功能後可貼上並送出"
                 : (presentation.isCodexFocused ? "貼上並送出" : "切換回 Codex 後可貼上並送出"),
@@ -1032,6 +1032,8 @@ struct CodexFloatingHUDView: View {
     ) -> some View {
         let cardHeight = height ?? metrics.workflowActionHeight
         let isDisabled = presentation.isPromptShortcutInFlight
+            || model.isReadOnlyPreview
+            || (shortcut == .commitAndPush && model.isPlanLoopIntegration)
             || !presentation.isCodexFocused
             || presentation.clipboardOperationInFlight
         let helpText = !presentation.isCodexFocused
@@ -1065,6 +1067,8 @@ struct CodexFloatingHUDView: View {
 
     private func performPromptShortcut(_ shortcut: CodexPromptShortcut) {
         guard !isPromptShortcutInFlight,
+              !model.isReadOnlyPreview,
+              shortcut != .commitAndPush || !model.isPlanLoopIntegration,
               layoutState.isCodexFocused,
               !ClipboardPasteService.isTemporaryOperationInFlight else { return }
         isPromptShortcutInFlight = true
@@ -1147,6 +1151,7 @@ struct CodexFloatingHUDView: View {
             Button(action: refresh) {
                 Label("重新整理", systemImage: "arrow.clockwise")
             }
+            .disabled(model.isReadOnlyPreview)
             Button(action: showDetails) {
                 Label("開啟詳細面板", systemImage: "rectangle.and.text.magnifyingglass")
             }
@@ -1156,6 +1161,7 @@ struct CodexFloatingHUDView: View {
             Button(action: openCodex) {
                 Label("開啟 Codex", systemImage: "arrow.up.forward.app")
             }
+            .disabled(model.isReadOnlyPreview)
             Button(action: resetPosition) {
                 Label("重設 HUD 位置", systemImage: "scope")
             }
@@ -1221,7 +1227,8 @@ struct CodexFloatingHUDView: View {
                 Label("貼上剪貼簿內容", systemImage: "doc.on.clipboard")
             }
             .disabled(
-                isPasteInFlight
+                model.isReadOnlyPreview
+                    || isPasteInFlight
                     || !HUDContextMenuPolicy.pasteActionsEnabled(
                         isCodexFocused: layoutState.isCodexFocused,
                         isAccessibilityTrusted: model.accessibilityPermissionState == .trusted
@@ -1238,7 +1245,8 @@ struct CodexFloatingHUDView: View {
                 Label("貼上並送出", systemImage: "paperplane.fill")
             }
             .disabled(
-                    isPasteAndSubmitInFlight
+                    model.isReadOnlyPreview
+                    || isPasteAndSubmitInFlight
                     || !HUDContextMenuPolicy.pasteActionsEnabled(
                         isCodexFocused: layoutState.isCodexFocused,
                         isAccessibilityTrusted: model.accessibilityPermissionState == .trusted
@@ -1246,33 +1254,40 @@ struct CodexFloatingHUDView: View {
             )
         }
 
-        Section {
-            Button(action: requestUpdateCheck) {
-                Label("檢查更新", systemImage: "arrow.down.circle")
+        if model.isPlanLoopIntegration {
+            Section {
+                Label("更新由 PlanLoop 管理", systemImage: "arrow.down.circle")
+                    .foregroundStyle(.secondary)
             }
+        } else {
+            Section {
+                Button(action: requestUpdateCheck) {
+                    Label("檢查更新", systemImage: "arrow.down.circle")
+                }
 
-            switch model.updateState {
-            case .available(let release):
-                Button(action: { installUpdate(release) }) {
-                    Label(AppUpdatePresentationPolicy.installButtonTitle + " \(release.version)", systemImage: "arrow.down.circle.fill")
+                switch model.updateState {
+                case .available(let release):
+                    Button(action: { installUpdate(release) }) {
+                        Label(AppUpdatePresentationPolicy.installButtonTitle + " \(release.version)", systemImage: "arrow.down.circle.fill")
+                    }
+                    Button(action: openReleasePage) {
+                        Label("開啟 Release 頁面 \(release.version)", systemImage: "safari")
+                    }
+                case .checking:
+                    Label("正在檢查 GitHub Release", systemImage: "arrow.down.circle")
+                case .downloading(let release):
+                    Label("正在下載 \(release.version)", systemImage: "arrow.down.circle")
+                case .installing(let release):
+                    Label("正在覆蓋並重新啟動 \(release.version)", systemImage: "arrow.triangle.2.circlepath")
+                case .upToDate:
+                    Label("目前已是最新版本", systemImage: "checkmark.circle")
+                case .error(let message):
+                    Label(message, systemImage: "exclamationmark.triangle")
+                        .lineLimit(2)
+                    Button("重試更新檢查", action: requestUpdateCheck)
+                case .idle:
+                    EmptyView()
                 }
-                Button(action: openReleasePage) {
-                    Label("開啟 Release 頁面 \(release.version)", systemImage: "safari")
-                }
-            case .checking:
-                Label("正在檢查 GitHub Release", systemImage: "arrow.down.circle")
-            case .downloading(let release):
-                Label("正在下載 \(release.version)", systemImage: "arrow.down.circle")
-            case .installing(let release):
-                Label("正在覆蓋並重新啟動 \(release.version)", systemImage: "arrow.triangle.2.circlepath")
-            case .upToDate:
-                Label("目前已是最新版本", systemImage: "checkmark.circle")
-            case .error(let message):
-                Label(message, systemImage: "exclamationmark.triangle")
-                    .lineLimit(2)
-                Button("重試更新檢查", action: requestUpdateCheck)
-            case .idle:
-                EmptyView()
             }
         }
 
@@ -1322,6 +1337,7 @@ struct CodexFloatingHUDView: View {
         } label: {
             Label("帳號管理", systemImage: "person.2")
         }
+        .disabled(model.isReadOnlyPreview)
 
         Menu {
             Button {
@@ -1367,8 +1383,9 @@ struct CodexFloatingHUDView: View {
 
         Divider()
         Button(action: quit) {
-            Label("結束 Codex Usage Status", systemImage: "power")
+            Label(model.isPlanLoopIntegration ? "結束 PlanLoop Desktop" : "結束 Codex Usage Status", systemImage: "power")
         }
+        .disabled(model.isReadOnlyPreview)
     }
 
     @ViewBuilder

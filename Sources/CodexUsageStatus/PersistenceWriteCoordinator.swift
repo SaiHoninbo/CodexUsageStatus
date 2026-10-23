@@ -6,14 +6,14 @@ import Foundation
 final class TerminationReplyGate: @unchecked Sendable {
     private let lock = NSLock()
     private var didReply = false
-    private let reply: @Sendable () -> Void
+    private let reply: @Sendable (CodexUsageTerminationPreparationResult) -> Void
 
-    init(reply: @escaping @Sendable () -> Void) {
+    init(reply: @escaping @Sendable (CodexUsageTerminationPreparationResult) -> Void) {
         self.reply = reply
     }
 
     @discardableResult
-    func replyOnce() -> Bool {
+    func replyOnce(result: CodexUsageTerminationPreparationResult) -> Bool {
         lock.lock()
         guard !didReply else {
             lock.unlock()
@@ -21,9 +21,15 @@ final class TerminationReplyGate: @unchecked Sendable {
         }
         didReply = true
         lock.unlock()
-        reply()
+        reply(result)
         return true
     }
+}
+
+enum PersistenceFlushResult: Equatable, Sendable {
+    case saved
+    case writeFailed
+    case timedOut
 }
 
 enum TerminationFlushPolicy {
@@ -49,6 +55,9 @@ actor PersistenceWriteCoordinator {
 
     private var pending: [String: Pending] = [:]
     private var active: Set<String> = []
+    private var failedDestinations: Set<String> = []
+    private var failedWrites: [String: Pending] = [:]
+    private var reportedFailureDestinations: Set<String> = []
 
     func enqueue(url: URL, data: Data?, fileManager: FileManager = .default) {
         let key = url.standardizedFileURL.path
@@ -63,7 +72,10 @@ actor PersistenceWriteCoordinator {
         value: Value,
         fileManager: FileManager = .default
     ) {
-        guard let data = try? JSONEncoder().encode(value) else { return }
+        guard let data = try? JSONEncoder().encode(value) else {
+            failedDestinations.insert(url.standardizedFileURL.path)
+            return
+        }
         enqueue(url: url, data: data, fileManager: fileManager)
     }
 
@@ -79,24 +91,49 @@ actor PersistenceWriteCoordinator {
     /// shutdown hand-off cannot accidentally spend 500 ms per store.
     @discardableResult
     func flush(untilUptimeNanoseconds deadline: UInt64) async -> Bool {
+        await flushResult(untilUptimeNanoseconds: deadline) == .saved
+    }
+
+    func flushResult(untilUptimeNanoseconds deadline: UInt64) async -> PersistenceFlushResult {
+        retryFailedWrites()
         while !pending.isEmpty || !active.isEmpty {
-            if DispatchTime.now().uptimeNanoseconds >= deadline { return false }
+            if DispatchTime.now().uptimeNanoseconds >= deadline { return .timedOut }
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
-        return true
+        guard !failedDestinations.isEmpty else { return .saved }
+        reportedFailureDestinations.formUnion(failedDestinations)
+        return .writeFailed
+    }
+
+    private func retryFailedWrites() {
+        for key in Array(failedWrites.keys)
+            where !active.contains(key) && reportedFailureDestinations.contains(key) {
+            reportedFailureDestinations.remove(key)
+            guard let failed = failedWrites.removeValue(forKey: key) else { continue }
+            if pending[key] == nil { pending[key] = failed }
+            startIfNeeded(key: key)
+        }
     }
 
     private func startIfNeeded(key: String) {
         guard !active.contains(key), let item = pending.removeValue(forKey: key) else { return }
         active.insert(key)
         Task.detached(priority: .utility) { [weak self] in
-            item.fileManager.write(data: item.data, to: item.url)
-            await self?.finish(key: key)
+            let succeeded = item.fileManager.write(data: item.data, to: item.url)
+            await self?.finish(key: key, succeeded: succeeded, item: item)
         }
     }
 
-    private func finish(key: String) {
+    private func finish(key: String, succeeded: Bool, item: Pending) {
         active.remove(key)
+        if succeeded {
+            failedDestinations.remove(key)
+            failedWrites.removeValue(forKey: key)
+            reportedFailureDestinations.remove(key)
+        } else {
+            failedDestinations.insert(key)
+            failedWrites[key] = item
+        }
         startIfNeeded(key: key)
     }
 }
@@ -121,7 +158,7 @@ struct PersistenceFileManager: @unchecked Sendable {
 
     init(_ fileManager: FileManager = .default) { self.fileManager = fileManager }
 
-    func write(data: Data?, to url: URL) {
+    func write(data: Data?, to url: URL) -> Bool {
 #if CODEX_USAGE_TESTING
         Self.testCounterLock.lock()
         Self.testDiskWriteCount += 1
@@ -137,13 +174,16 @@ struct PersistenceFileManager: @unchecked Sendable {
             )
             guard let data else {
                 if fileManager.fileExists(atPath: url.path) { try fileManager.removeItem(at: url) }
-                return
+                return true
             }
             try data.write(to: url, options: [.atomic])
             try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            return true
         } catch {
-            // Persistence errors are intentionally fail-safe. The in-memory
-            // snapshot remains authoritative until the next successful write.
+            // The in-memory snapshot remains authoritative, while the
+            // coordinator reports this destination as unflushed until a later
+            // successful write supersedes the failure.
+            return false
         }
     }
 }

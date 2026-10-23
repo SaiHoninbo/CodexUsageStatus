@@ -46,6 +46,67 @@ private final class FailingMoveFileManager: FileManager {
     }
 }
 
+private final class FailingCreateDirectoryFileManager: FileManager {
+    override func createDirectory(
+        at url: URL,
+        withIntermediateDirectories createIntermediates: Bool,
+        attributes: [FileAttributeKey: Any]? = nil
+    ) throws {
+        throw NSError(domain: "PersistenceWriteCoordinatorTests", code: 1)
+    }
+}
+
+private final class FailOnceCreateDirectoryFileManager: FileManager {
+    private let lock = NSLock()
+    private var hasFailed = false
+
+    override func createDirectory(
+        at url: URL,
+        withIntermediateDirectories createIntermediates: Bool,
+        attributes: [FileAttributeKey: Any]? = nil
+    ) throws {
+        lock.lock()
+        let shouldFail = !hasFailed
+        hasFailed = true
+        lock.unlock()
+        if shouldFail {
+            throw NSError(domain: "PersistenceWriteCoordinatorTests", code: 2)
+        }
+        try super.createDirectory(
+            at: url,
+            withIntermediateDirectories: createIntermediates,
+            attributes: attributes
+        )
+    }
+}
+
+private final class BlockingCreateDirectoryFileManager: FileManager {
+    private let entered = DispatchSemaphore(value: 0)
+    private let releaseGate = DispatchSemaphore(value: 0)
+
+    override func createDirectory(
+        at url: URL,
+        withIntermediateDirectories createIntermediates: Bool,
+        attributes: [FileAttributeKey: Any]? = nil
+    ) throws {
+        entered.signal()
+        releaseGate.wait()
+        try super.createDirectory(
+            at: url,
+            withIntermediateDirectories: createIntermediates,
+            attributes: attributes
+        )
+    }
+
+    func waitUntilEntered(timeout: TimeInterval) -> Bool {
+        entered.wait(timeout: .now() + timeout) == .success
+    }
+
+    func release() {
+        releaseGate.signal()
+    }
+}
+
 private final class LockedCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var valueStorage = 0
@@ -59,6 +120,23 @@ private final class LockedCounter: @unchecked Sendable {
     func increment() {
         lock.lock()
         valueStorage += 1
+        lock.unlock()
+    }
+}
+
+private final class LockedTerminationResultRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var resultsStorage: [CodexUsageTerminationPreparationResult] = []
+
+    var results: [CodexUsageTerminationPreparationResult] {
+        lock.lock()
+        defer { lock.unlock() }
+        return resultsStorage
+    }
+
+    func append(_ result: CodexUsageTerminationPreparationResult) {
+        lock.lock()
+        resultsStorage.append(result)
         lock.unlock()
     }
 }
@@ -236,6 +314,7 @@ struct CodexUsageStatusTests {
             ("rapid drain policy", testRapidDrainPolicy),
             ("rapid drain content projection", testRapidDrainContentProjection),
             ("status item presentation projection", testStatusItemPresentationProjection),
+            ("PlanLoop staging preview quota projection", testPlanLoopStagingPreviewProjection),
             ("HUD presentation boundary", testHUDPresentationBoundary),
             ("token activity store replacement and retention", testTokenActivityStoreReplacementAndRetention),
             ("token activity semantic dedupe", testTokenActivitySemanticDedupe),
@@ -273,6 +352,8 @@ struct CodexUsageStatusTests {
             ("account read disables refresh token", testAccountReadDisablesRefreshToken),
             ("unknown profile is marked", testUnknownProfileIsMarked),
             ("managed profile has isolated CODEX_HOME", testManagedProfileHasIsolatedCodexHome),
+            ("multi-account cold-start observation roots", testMultiAccountColdStartObservationRoots),
+            ("account lifecycle observation root refresh", testAccountLifecycleObservationRootRefresh),
             ("managed profile imports auth atomically", testManagedProfileImportsAuth),
             ("update version comparison", testUpdateVersionComparison),
             ("automatic update check policy", testAutomaticUpdateCheckPolicy),
@@ -340,6 +421,7 @@ struct CodexUsageStatusTests {
         let selectedTests = tests.filter { name, _ in filters.isEmpty || filters.contains(where: name.localizedCaseInsensitiveContains) }
         let asyncTestNames = ["active execution observer epochs", "observer restart during active turns",
                               "observer restart with durable active turn evidence",
+                              "PlanLoop Turn completion forwarding",
                               "login lifecycle shutdown", "persistence write coordinator", "observer cursor persistence is async"]
         if !filters.isEmpty && selectedTests.isEmpty
             && !asyncTestNames.contains(where: { name in filters.contains(where: name.localizedCaseInsensitiveContains) }) {
@@ -385,6 +467,16 @@ struct CodexUsageStatusTests {
         } catch {
             failures += 1
             print("FAIL observer restart with durable active turn evidence: \(error)")
+        }
+        }
+        if filters.isEmpty || filters.contains(where: { "PlanLoop Turn completion forwarding".localizedCaseInsensitiveContains($0) }) {
+        asyncTestCount += 1
+        do {
+            try await testPlanLoopTurnCompletionForwarding()
+            print("PASS PlanLoop Turn completion forwarding")
+        } catch {
+            failures += 1
+            print("FAIL PlanLoop Turn completion forwarding: \(error)")
         }
         }
         if filters.isEmpty || filters.contains(where: { "login lifecycle shutdown".localizedCaseInsensitiveContains($0) }) {
@@ -4680,6 +4772,127 @@ struct CodexUsageStatusTests {
     }
 
     @MainActor
+    private static func testPlanLoopTurnCompletionForwarding() async throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-planloop-completion-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let profileA = UUID()
+        let profileB = UUID()
+        let homes = [
+            (profileA, base.appendingPathComponent("home-a", isDirectory: true), Int64(12)),
+            (profileB, base.appendingPathComponent("home-b", isDirectory: true), Int64(20))
+        ]
+        var rolloutFiles: [(UUID, URL, Int64)] = []
+        for (profileID, home, duration) in homes {
+            let sessions = home.appendingPathComponent("sessions", isDirectory: true)
+            try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+            let rollout = sessions.appendingPathComponent("rollout-shared.jsonl")
+            let metadata = #"{"type":"session_meta","payload":{"id":"shared-thread","cwd":"/tmp/PlanLoopCompletionFixture","thread_source":"user"}}"# + "\n"
+            try Data(metadata.utf8).write(to: rollout)
+            rolloutFiles.append((profileID, rollout, duration))
+        }
+
+        let ledgerURL = base.appendingPathComponent("local-token-usage-ledger.json")
+        let ledger = LocalTokenUsageLedgerStore(fileURL: ledgerURL, loadOnInit: false)
+        let provider = CodexUsageProjectionProvider(
+            observationRoots: homes.map { item in
+                CodexUsageObservationRootConfiguration(profileID: item.0, codexHomeURL: item.1)
+            },
+            cursorURL: base.appendingPathComponent("state/cursors.json"),
+            localLedgerURL: base.appendingPathComponent("provider-local-token-usage-ledger.json"),
+            automaticallyStarts: false
+        )
+        var forwarded: [(UUID?, CodexLocalTurnCompletionRecord, Bool)] = []
+        provider.setPlanLoopTurnCompletionHandler { profileID, record in
+            let accepted = ledger.recordCompletedTurn(
+                profileID: profileID,
+                threadID: record.threadID,
+                turnID: record.turnID,
+                durationSeconds: record.durationSeconds,
+                at: record.completedAt
+            )
+            forwarded.append((profileID, record, accepted))
+        }
+        provider.start()
+        defer { provider.stop() }
+
+        let initialScanDeadline = Date().addingTimeInterval(5)
+        while provider.snapshot.availability != .available, Date() < initialScanDeadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try expect(provider.snapshot.availability == .available, "the single provider finishes its initial observation-root scan")
+
+        let now = Date()
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        for (_, rollout, duration) in rolloutFiles {
+            let start = now.addingTimeInterval(-TimeInterval(duration))
+            let completion = now
+            let lines: [[String: Any]] = [
+                [
+                    "timestamp": formatter.string(from: start),
+                    "type": "event_msg",
+                    "payload": [
+                        "type": "task_started",
+                        "turn_id": "shared-turn",
+                        "started_at": start.timeIntervalSince1970
+                    ]
+                ],
+                [
+                    "timestamp": formatter.string(from: completion),
+                    "type": "event_msg",
+                    "payload": [
+                        "type": "task_complete",
+                        "turn_id": "shared-turn",
+                        "started_at": start.timeIntervalSince1970,
+                        "completed_at": completion.timeIntervalSince1970,
+                        "duration_ms": duration * 1_000
+                    ]
+                ]
+            ]
+            let handle = try FileHandle(forWritingTo: rollout)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            for line in lines {
+                var data = try JSONSerialization.data(withJSONObject: line, options: [.sortedKeys])
+                data.append(0x0A)
+                try handle.write(contentsOf: data)
+            }
+        }
+
+        let completionDeadline = Date().addingTimeInterval(10)
+        while forwarded.count < 2, Date() < completionDeadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try expect(forwarded.count == 2, "both completed Turns reach the donor completion boundary")
+        try expect(
+            Set(forwarded.compactMap { $0.0 }) == Set([profileA, profileB]),
+            "completion callbacks retain the profile identity of each observation root"
+        )
+        try expect(
+            forwarded.allSatisfy { $0.1.threadID == "shared-thread" && $0.1.turnID == "shared-turn" },
+            "completion callbacks preserve the exact shared Chat and Turn identifiers"
+        )
+        try expect(forwarded.contains(where: { $0.2 }), "at least one valid completion is admitted to the existing local ledger")
+        try expect(ledger.snapshot.longestObservedTurnSec == 20, "the donor ledger keeps the longest accepted completion")
+
+        let repeated = try unwrap(
+            forwarded.first(where: { $0.1.durationSeconds == 20 }),
+            "the longest forwarded completion for the idempotency check"
+        )
+        try expect(!ledger.recordCompletedTurn(
+            profileID: repeated.0,
+            threadID: repeated.1.threadID,
+            turnID: repeated.1.turnID,
+            durationSeconds: repeated.1.durationSeconds,
+            at: repeated.1.completedAt
+        ), "replaying the same completion does not count or persist it twice")
+        try expect(ledger.snapshot.longestObservedTurnSec == 20, "duplicate completion leaves the donor aggregate unchanged")
+
+    }
+
+    @MainActor
     private static func testActiveExecutionObserverEpochs() async throws {
         let base = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-active-epoch-\(UUID().uuidString)", isDirectory: true)
@@ -5953,6 +6166,80 @@ struct CodexUsageStatusTests {
         try expect(first.isManaged && second.isManaged, "manual managed profiles should be marked managed")
     }
 
+    private static func testMultiAccountColdStartObservationRoots() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-profile-root-cold-start-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let initialStore = AccountProfileStore(applicationSupportURL: base)
+        let first = initialStore.createManagedProfile(displayName: "A")
+        let second = initialStore.createManagedProfile(displayName: "B")
+        let defaultHome = base.appendingPathComponent("default-codex-home", isDirectory: true)
+        let relaunchedStore = AccountProfileStore(applicationSupportURL: base)
+        var publishedRoots: [CodexLocalUsageObservationRoot]?
+        var ownedObserverStartCount = 0
+
+        CodexLocalUsageObservationRootPolicy.completeProfileHydration(
+            ownsLocalObserver: false,
+            refreshRoots: {
+                publishedRoots = CodexLocalUsageObservationRootPolicy.resolve(
+                    defaultHomeURL: defaultHome,
+                    profiles: relaunchedStore.accountProfiles(),
+                    homeURLForProfile: { relaunchedStore.codexHomeURL(for: $0) }
+                )
+            },
+            startOwnedObserver: { ownedObserverStartCount += 1 }
+        )
+
+        let roots = try unwrap(publishedRoots, "integration mode publishes roots after profile hydration")
+        try expect(roots.count == 3, "default root and both persisted account roots are published")
+        try expect(Set(roots.map(\.profileID)) == Set<UUID?>([nil, first.id, second.id]), "relaunch restores every saved profile attribution")
+        try expect(roots.first?.codexHomeURL == defaultHome, "default CODEX_HOME remains the primary root")
+        try expect(ownedObserverStartCount == 0, "integration mode does not start a second observer")
+    }
+
+    private static func testAccountLifecycleObservationRootRefresh() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-profile-root-lifecycle-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = AccountProfileStore(applicationSupportURL: base)
+        let defaultHome = base.appendingPathComponent("default-codex-home", isDirectory: true)
+        var observerRoots: [CodexLocalUsageObservationRoot] = []
+        var integrationSnapshots: [[CodexLocalUsageObservationRoot]] = []
+
+        func refresh() {
+            let roots = CodexLocalUsageObservationRootPolicy.resolve(
+                defaultHomeURL: defaultHome,
+                profiles: store.accountProfiles(),
+                homeURLForProfile: { store.codexHomeURL(for: $0) }
+            )
+            observerRoots = roots
+            CodexLocalUsageObservationRootPolicy.publishToIntegrationHost(roots) {
+                integrationSnapshots.append($0)
+            }
+        }
+
+        let firstIdentity = AccountIdentity(accountType: "chatgpt", authMode: "managed", planType: "pro", email: "first@example.com", requiresOpenAIAuth: true)
+        let secondIdentity = AccountIdentity(accountType: "chatgpt", authMode: "managed", planType: "pro", email: "second@example.com", requiresOpenAIAuth: true)
+        let first = store.select(identity: firstIdentity).profile
+        refresh()
+        let second = store.select(identity: secondIdentity).profile
+        refresh()
+        try expect(Set(observerRoots.map(\.profileID)) == Set<UUID?>([nil, first.id, second.id]), "switching accounts retains all valid observer roots")
+
+        _ = store.select(identity: firstIdentity)
+        refresh()
+        let third = store.createManagedProfile(displayName: "C")
+        refresh()
+        try expect(observerRoots.contains(where: { $0.profileID == third.id }), "creating an account publishes its isolated root")
+
+        try expect(store.deleteProfile(id: second.id), "removing a profile succeeds")
+        refresh()
+        try expect(!observerRoots.contains(where: { $0.profileID == second.id }), "removed account root is no longer published")
+        try expect(integrationSnapshots.count == 5, "switch/create/remove lifecycle changes each publish a root snapshot")
+        try expect(integrationSnapshots.last == observerRoots, "PlanLoop integration receives the same roots as the owned observer")
+        try expect(Set(observerRoots.map(\.codexHomeURL.path)).count == observerRoots.count, "physical root aliases are deduplicated")
+    }
+
     private static func testManagedProfileImportsAuth() throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent("codex-profile-import-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: base) }
@@ -7095,7 +7382,11 @@ struct CodexUsageStatusTests {
         try expect(modelSource.contains("prepareForUpdateReplacement"), "updater invokes the shared preparation primitive")
         try expect(modelSource.contains("TerminationFlushPolicy.timeoutNanoseconds"), "updater hand-off retains the 500ms persistence bound")
         try expect(modelSource.contains("boundedShutdownHandoffCompleted"), "successful preparation is recorded before helper launch")
-        try expect(modelSource.contains("await shutdownPersistenceTask?.value"), "updater hand-off awaits the stores' scheduled flush task")
+        try expect(
+            modelSource.contains("guard let shutdownPersistenceTask else { return .timedOut }")
+                && modelSource.contains("let result = await shutdownPersistenceTask.value"),
+            "updater hand-off awaits the stores' scheduled flush task",
+        )
         try expect(modelSource.contains("DispatchTime.now().uptimeNanoseconds &+ TerminationFlushPolicy.timeoutNanoseconds"), "all shutdown stores share one 500ms wall-clock deadline")
 
         let coordinatorSource = try String(
@@ -8170,32 +8461,97 @@ struct CodexUsageStatusTests {
     }
 
     private static func testTerminationReplyGate() throws {
-        let counter = LockedCounter()
-        let gate = TerminationReplyGate { counter.increment() }
-        try expect(gate.replyOnce(), "termination reply gate sends the first reply")
-        try expect(!gate.replyOnce(), "termination reply gate suppresses duplicate replies")
-        try expect(counter.value == 1, "termination reply gate invokes its callback exactly once")
+        let recorder = LockedTerminationResultRecorder()
+        let gate = TerminationReplyGate { recorder.append($0) }
+        try expect(gate.replyOnce(result: .saved), "termination reply gate sends the completed-save result")
+        try expect(!gate.replyOnce(result: .timedOut), "termination reply gate suppresses duplicate outcomes")
+        try expect(recorder.results == [.saved], "termination reply gate preserves the winning typed outcome")
 
-        let concurrentCounter = LockedCounter()
-        let concurrentGate = TerminationReplyGate { concurrentCounter.increment() }
-        DispatchQueue.concurrentPerform(iterations: 64) { _ in
-            _ = concurrentGate.replyOnce()
+        let concurrentRecorder = LockedTerminationResultRecorder()
+        let concurrentGate = TerminationReplyGate { concurrentRecorder.append($0) }
+        DispatchQueue.concurrentPerform(iterations: 64) { index in
+            _ = concurrentGate.replyOnce(result: index.isMultiple(of: 2) ? .persistenceFailure : .timedOut)
         }
-        try expect(concurrentCounter.value == 1, "termination reply gate remains exactly-once under concurrent races")
+        try expect(concurrentRecorder.results.count == 1, "termination reply gate remains exactly-once under concurrent races")
+        try expect(
+            concurrentRecorder.results.first.map { [.persistenceFailure, .timedOut].contains($0) } == true,
+            "watchdog and save-failure races retain a non-success result"
+        )
     }
 
     private static func testPersistenceWriteCoordinator() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("codex-persistence-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
+        let coordinator = PersistenceWriteCoordinator()
         let file = root.appendingPathComponent("snapshot.json")
-        await PersistenceWriteCoordinator.shared.enqueue(url: file, data: Data("latest".utf8))
-        await PersistenceWriteCoordinator.shared.enqueue(url: file, data: Data("newest".utf8))
-        await PersistenceWriteCoordinator.shared.flush(timeoutNanoseconds: 2_000_000_000)
+        await coordinator.enqueue(url: file, data: Data("latest".utf8))
+        await coordinator.enqueue(url: file, data: Data("newest".utf8))
+        let coalescedFlush = await coordinator.flush(timeoutNanoseconds: 2_000_000_000)
+        try expect(coalescedFlush, "successful coalesced writes flush cleanly")
         let persisted = try Data(contentsOf: file)
         try expect(persisted == Data("newest".utf8), "coalesced write keeps newest payload")
-        await PersistenceWriteCoordinator.shared.enqueue(url: file, data: nil)
-        await PersistenceWriteCoordinator.shared.flush(timeoutNanoseconds: 2_000_000_000)
+        await coordinator.enqueue(url: file, data: nil)
+        let removalFlush = await coordinator.flush(timeoutNanoseconds: 2_000_000_000)
+        try expect(removalFlush, "successful removal flushes cleanly")
         try expect(!FileManager.default.fileExists(atPath: file.path), "nil payload removes file")
+
+        let failedFile = root.appendingPathComponent("failed/snapshot.json")
+        await coordinator.enqueue(
+            url: failedFile,
+            data: Data("not-persisted".utf8),
+            fileManager: FailingCreateDirectoryFileManager()
+        )
+        let failedFlush = await coordinator.flush(timeoutNanoseconds: 2_000_000_000)
+        try expect(!failedFlush, "a completed disk-write failure is reported as an unflushed result")
+        await coordinator.enqueue(url: failedFile, data: Data("recovered".utf8))
+        let recoveredFlush = await coordinator.flush(timeoutNanoseconds: 2_000_000_000)
+        try expect(recoveredFlush, "a later successful write clears that destination's failure")
+        let recoveredContents = try Data(contentsOf: failedFile)
+        try expect(recoveredContents == Data("recovered".utf8), "retry persists the replacement snapshot")
+
+        let retryFile = root.appendingPathComponent("retry/snapshot.json")
+        let retryingCoordinator = PersistenceWriteCoordinator()
+        await retryingCoordinator.enqueue(
+            url: retryFile,
+            data: Data("preserved-after-failure".utf8),
+            fileManager: FailOnceCreateDirectoryFileManager()
+        )
+        let firstAttempt = await retryingCoordinator.flushResult(
+            untilUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds &+ 2_000_000_000
+        )
+        try expect(firstAttempt == .writeFailed, "the first failed write remains distinguishable from timeout")
+        let secondAttempt = await retryingCoordinator.flushResult(
+            untilUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds &+ 2_000_000_000
+        )
+        try expect(secondAttempt == .saved, "a later termination attempt retries the preserved failed payload")
+        let retryContents = try Data(contentsOf: retryFile)
+        try expect(retryContents == Data("preserved-after-failure".utf8), "retry writes the original failed payload")
+
+        let blockedFile = root.appendingPathComponent("blocked/snapshot.json")
+        let blockingFileManager = BlockingCreateDirectoryFileManager()
+        let blockingCoordinator = PersistenceWriteCoordinator()
+        await blockingCoordinator.enqueue(
+            url: blockedFile,
+            data: Data("eventually-persisted".utf8),
+            fileManager: blockingFileManager
+        )
+        let entered = await Task.detached { blockingFileManager.waitUntilEntered(timeout: 2) }.value
+        guard entered else {
+            blockingFileManager.release()
+            try expect(false, "blocking persistence write begins within the test deadline")
+            return
+        }
+        let timedOut = await blockingCoordinator.flushResult(
+            untilUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds &+ 20_000_000
+        )
+        blockingFileManager.release()
+        try expect(timedOut == .timedOut, "flush reports timeout distinctly while persistence remains active")
+        let resumedFlush = await blockingCoordinator.flushResult(
+            untilUptimeNanoseconds: DispatchTime.now().uptimeNanoseconds &+ 2_000_000_000
+        )
+        try expect(resumedFlush == .saved, "the released write completes and can be flushed")
+        let blockedContents = try Data(contentsOf: blockedFile)
+        try expect(blockedContents == Data("eventually-persisted".utf8), "the timed-out write finishes after its blocker is released")
     }
 
     private static func testObserverCursorPersistenceIsAsync() async throws {
@@ -8241,6 +8597,85 @@ struct CodexUsageStatusTests {
         await MainActor.run { observer.stop() }
     }
 
+
+    private static func testPlanLoopStagingPreviewProjection() throws {
+        let observedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let available = CodexUsageAccountQuotaSnapshot(
+            availability: .available,
+            observedAt: observedAt,
+            accountDisplayIdentity: "staging-account",
+            plan: "Plus",
+            rollingQuotaPercent: 75,
+            quotaWindowLabel: "7 天",
+            resetAt: observedAt.addingTimeInterval(3_600),
+            resetCredits: 2
+        )
+        let snapshot = try unwrap(
+            PlanLoopStagingPreviewProjection.usageSnapshot(from: available),
+            "a complete staging bridge quota snapshot is projected"
+        )
+        try expect(snapshot.receivedAt == observedAt, "projection preserves the source observation time")
+        try expect(snapshot.primary?.usedPercent == 25, "projection derives used percent from the observed remaining percent")
+        try expect(snapshot.primary?.windowDurationMins == 10_080, "projection preserves the exact canonical seven-day window")
+        try expect(snapshot.rateLimitResetCredits?.availableCount == 2, "projection preserves the observed reset-credit count")
+        try expect(snapshot.rateLimitResetCredits?.credits == nil, "projection does not invent reset-credit identities")
+
+        let tokenProjection = CodexUsageProjectionSnapshot(
+            availability: .available,
+            trackedSessions: [],
+            lastObservedAt: observedAt,
+            tokenRateRetentionSeconds: 900,
+            localTokenMetrics: [CodexUsageLocalMetricProjection(label: "今日用量", value: "2,400")],
+            localTokenMetricsLastObservedAt: observedAt,
+            accountQuotaSnapshot: available
+        )
+        try expect(
+            PlanLoopStagingPreviewProjection.tokenActivityMetrics(from: tokenProjection)
+                == [TokenActivityMetric(label: "今日用量", value: "2,400")],
+            "staging HUD reuses only the canonical observer's existing local token metrics"
+        )
+        let missingTokenProjection = CodexUsageProjectionSnapshot(
+            availability: .available,
+            trackedSessions: [],
+            lastObservedAt: observedAt,
+            tokenRateRetentionSeconds: 900,
+            accountQuotaSnapshot: available
+        )
+        try expect(
+            PlanLoopStagingPreviewProjection.tokenActivityMetrics(from: missingTokenProjection) == nil,
+            "missing staging token evidence remains unavailable instead of becoming zero"
+        )
+
+        let notProven = CodexUsageAccountQuotaSnapshot(
+            availability: .notProven,
+            rollingQuotaPercent: 0,
+            quotaWindowLabel: "7 天"
+        )
+        try expect(
+            PlanLoopStagingPreviewProjection.usageSnapshot(from: notProven) == nil,
+            "missing bridge data is not projected as a zero quota"
+        )
+        let unsupportedWindow = CodexUsageAccountQuotaSnapshot(
+            availability: .available,
+            observedAt: observedAt,
+            rollingQuotaPercent: 75,
+            quotaWindowLabel: "unknown window"
+        )
+        try expect(
+            PlanLoopStagingPreviewProjection.usageSnapshot(from: unsupportedWindow) == nil,
+            "unknown quota windows are not reclassified"
+        )
+        let invalidPercent = CodexUsageAccountQuotaSnapshot(
+            availability: .available,
+            observedAt: observedAt,
+            rollingQuotaPercent: 140,
+            quotaWindowLabel: "7 天"
+        )
+        try expect(
+            PlanLoopStagingPreviewProjection.usageSnapshot(from: invalidPercent) == nil,
+            "out-of-range percentages are rejected"
+        )
+    }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         guard condition() else { throw HarnessError.assertion(message) }

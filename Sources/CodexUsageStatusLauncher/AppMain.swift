@@ -1,8 +1,9 @@
 import SwiftUI
+@_spi(CodexUsageStatusApp) import CodexUsageStatusCore
 
 @main
 struct CodexUsageStatusApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @NSApplicationDelegateAdaptor(CodexUsageStatusApplicationDelegate.self) private var appDelegate
 
     var body: some Scene {
         Settings {

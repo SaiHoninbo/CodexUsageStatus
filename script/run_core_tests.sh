@@ -14,6 +14,8 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/TokenActivityStore.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/LocalTokenUsageLedger.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/CodexLocalUsageObserver.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/CodexUsageProjectionProvider.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/PlanLoopStagingPreviewProjection.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/ChatExecutionTracking.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/TurnNotificationContentPolicy.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDPresentation.swift" \
@@ -53,6 +55,7 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDColorPalette.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDThemePalette.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/RetiredFeatureCleanup.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/TerminationPreparationResult.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/PersistenceWriteCoordinator.swift" \
   "$ROOT_DIR/Tests/CodexUsageStatusTests/TestRunner.swift" \
   -o "$BUILD_DIR/CodexUsageStatusTests"

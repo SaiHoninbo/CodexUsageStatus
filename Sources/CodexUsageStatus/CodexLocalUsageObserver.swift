@@ -830,6 +830,45 @@ struct CodexLocalUsageObservationRoot: Equatable, Sendable {
     }
 }
 
+/// Produces one deduplicated root snapshot from the default CODEX_HOME and
+/// every persisted account profile. The same snapshot feeds the standalone
+/// observer and the PlanLoop-owned observer.
+enum CodexLocalUsageObservationRootPolicy {
+    static func resolve(
+        defaultHomeURL: URL,
+        profiles: [AccountProfile],
+        homeURLForProfile: (AccountProfile) -> URL
+    ) -> [CodexLocalUsageObservationRoot] {
+        var roots = [CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: defaultHomeURL)]
+        var seenPaths = Set([CodexLocalTurnActivityAuthority.normalizedRoot(defaultHomeURL).path])
+        for profile in profiles {
+            let homeURL = homeURLForProfile(profile)
+            guard seenPaths.insert(CodexLocalTurnActivityAuthority.normalizedRoot(homeURL).path).inserted else { continue }
+            roots.append(CodexLocalUsageObservationRoot(profileID: profile.id, codexHomeURL: homeURL))
+        }
+        return roots
+    }
+
+    /// Profile-store hydration must publish roots in both standalone and
+    /// integration modes. Only standalone mode starts its own observer;
+    /// integration mode leaves observation to its single host-owned provider.
+    static func completeProfileHydration(
+        ownsLocalObserver: Bool,
+        refreshRoots: () -> Void,
+        startOwnedObserver: () -> Void
+    ) {
+        refreshRoots()
+        if ownsLocalObserver { startOwnedObserver() }
+    }
+
+    static func publishToIntegrationHost(
+        _ roots: [CodexLocalUsageObservationRoot],
+        handler: (([CodexLocalUsageObservationRoot]) -> Void)?
+    ) {
+        handler?(roots)
+    }
+}
+
 /// Pure authority checks shared by the observer projection and its tests.
 /// Physical CODEX_HOME identity is part of the source boundary; a UUID alone
 /// is never sufficient to accept a lifecycle event.

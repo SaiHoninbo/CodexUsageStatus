@@ -9,6 +9,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var outsideClickMonitor: Any?
     private var localClickMonitor: Any?
     private var model: UsageViewModel!
+    private var accountQuotaBridgeServer: CodexUsageAccountQuotaBridgeServer?
+    private let planLoopIntegrationMode = ProcessInfo.processInfo.arguments.contains("--planloop-integration-mode")
     private var statusItemObservation: AnyCancellable?
     private var rapidDrainEventObservation: AnyCancellable?
     private var statusItemUpdateTask: Task<Void, Never>?
@@ -21,28 +23,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        rapidDrainAnimator = RapidDrainStatusItemAnimator(statusItem: statusItem)
-        if let button = statusItem.button {
-            button.target = self
-            button.action = #selector(togglePopover(_:))
-            // Keep the status item compact while making the product name and
-            // current percentage easy to scan as two centered lines.
-            // The two-line title is narrow; keep only a small amount of
-            // breathing room so it does not push neighboring menu-bar items.
-            statusItem.length = 40
-            button.cell?.wraps = true
-            button.cell?.isScrollable = false
-            button.cell?.truncatesLastVisibleLine = false
-            button.alignment = .center
-            button.toolTip = "Codex Usage Status"
-            button.attributedTitle = NSAttributedString(
-                string: "Codex\n—",
-                attributes: [
-                    .foregroundColor: NSColor.secondaryLabelColor,
-                    .font: NSFont.monospacedDigitSystemFont(ofSize: 8.5, weight: .medium)
-                ]
-            )
+        if !planLoopIntegrationMode {
+            statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+            rapidDrainAnimator = RapidDrainStatusItemAnimator(statusItem: statusItem)
+            if let button = statusItem.button {
+                button.target = self
+                button.action = #selector(togglePopover(_:))
+                // Keep the status item compact while making the product name and
+                // current percentage easy to scan as two centered lines.
+                // The two-line title is narrow; keep only a small amount of
+                // breathing room so it does not push neighboring menu-bar items.
+                statusItem.length = 40
+                button.cell?.wraps = true
+                button.cell?.isScrollable = false
+                button.cell?.truncatesLastVisibleLine = false
+                button.alignment = .center
+                button.toolTip = "Codex Usage Status"
+                button.attributedTitle = NSAttributedString(
+                    string: "Codex\n—",
+                    attributes: [
+                        .foregroundColor: NSColor.secondaryLabelColor,
+                        .font: NSFont.monospacedDigitSystemFont(ofSize: 8.5, weight: .medium)
+                    ]
+                )
+            }
         }
 
         // Make the status item interactive immediately. Model/store/App
@@ -57,50 +61,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func bootstrapModel() {
         guard model == nil else { return }
-        model = UsageViewModel()
+        model = UsageViewModel(runtimeMode: planLoopIntegrationMode ? .planLoopIntegration : .standalone)
 
-        popover = NSPopover()
-        popover.behavior = .transient
-        popover.animates = false
-        popover.delegate = self
-        popover.contentSize = NSSize(width: 430, height: 700)
-        popover.contentViewController = FirstClickHostingController(
-            rootView: UsagePopoverView(
-                model: model,
-                selectionController: popoverSelectionController,
-                openCodex: { [weak self] in self?.openCodex() },
-                resetHUDPosition: { [weak self] in self?.floatingHUD?.resetPosition() },
-                quit: { NSApp.terminate(nil) },
-                onContentHeightChange: { [weak self] height in
-                    self?.resizePopover(toFitContentHeight: height)
-                }
-            )
-        )
-
-        floatingHUD = FloatingHUDPanelController(model: model)
-        floatingHUD.onShowDetails = { [weak self] in self?.showPopover(tab: .overview) }
-        floatingHUD.onOpenSettingsForAlert = { [weak self] alert in
-            self?.showSettings(for: alert.settingsSection)
-        }
-        floatingHUD.onOpenCodex = { [weak self] in self?.openCodex() }
-        floatingHUD.onQuit = { NSApp.terminate(nil) }
-        floatingHUD.start()
-
-        statusItemObservation = model.$statusItemPresentation
-            .removeDuplicates()
-            .sink { [weak self] _ in
-                self?.scheduleStatusItemUpdate()
-            }
-        rapidDrainEventObservation = model.rapidDrainEvents
-            .sink { [weak self] event in
-                guard let self else { return }
-                self.rapidDrainAnimator.animate(
-                    event: event,
-                    reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if !planLoopIntegrationMode {
+            popover = NSPopover()
+            popover.behavior = .transient
+            popover.animates = false
+            popover.delegate = self
+            popover.contentSize = NSSize(width: 430, height: 700)
+            popover.contentViewController = FirstClickHostingController(
+                rootView: UsagePopoverView(
+                    model: model,
+                    selectionController: popoverSelectionController,
+                    openCodex: { [weak self] in self?.openCodex() },
+                    resetHUDPosition: { [weak self] in self?.floatingHUD?.resetPosition() },
+                    quit: { NSApp.terminate(nil) },
+                    onContentHeightChange: { [weak self] height in
+                        self?.resizePopover(toFitContentHeight: height)
+                    }
                 )
+            )
+
+            floatingHUD = FloatingHUDPanelController(model: model)
+            floatingHUD.onShowDetails = { [weak self] in self?.showPopover(tab: .overview) }
+            floatingHUD.onOpenSettingsForAlert = { [weak self] alert in
+                self?.showSettings(for: alert.settingsSection)
             }
+            floatingHUD.onOpenCodex = { [weak self] in self?.openCodex() }
+            floatingHUD.onQuit = { NSApp.terminate(nil) }
+            floatingHUD.start()
+        }
+
+        if !planLoopIntegrationMode {
+            statusItemObservation = model.$statusItemPresentation
+                .removeDuplicates()
+                .sink { [weak self] _ in
+                    self?.scheduleStatusItemUpdate()
+                }
+            rapidDrainEventObservation = model.rapidDrainEvents
+                .sink { [weak self] event in
+                    guard let self else { return }
+                    self.rapidDrainAnimator.animate(
+                        event: event,
+                        reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                    )
+                }
+        }
         model.start()
-        updateStatusItem()
+        if !planLoopIntegrationMode { updateStatusItem() }
+        startAccountQuotaBridge()
+    }
+
+    private func startAccountQuotaBridge() {
+        guard accountQuotaBridgeServer == nil else { return }
+        do {
+            let socketURL = try CodexUsageAccountQuotaBridgePaths.selected()
+            let server = CodexUsageAccountQuotaBridgeServer(socketURL: socketURL, source: model)
+            try server.start()
+            accountQuotaBridgeServer = server
+        } catch {
+            NSLog("CodexUsageStatus account/quota bridge unavailable: \(String(describing: error))")
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -112,22 +133,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rapidDrainEventObservation = nil
         rapidDrainAnimator?.stop()
         floatingHUD?.stop()
+        accountQuotaBridgeServer?.stop()
+        accountQuotaBridgeServer = nil
         model?.stop()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard !terminationReplyPending else { return .terminateNow }
+        guard !terminationReplyPending else { return .terminateCancel }
         guard let app = NSApp else { return .terminateNow }
         terminationReplyPending = true
-        let replySelector = #selector(NSApplication.reply(toApplicationShouldTerminate:))
-        let gate = TerminationReplyGate {
-            // This callback intentionally runs on the watchdog queue. The
-            // main queue may be inside AppKit's nested termination handshake.
-            app.perform(replySelector, with: NSNumber(value: true))
+        let gate = TerminationReplyGate { [weak self] result in
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    app.reply(toApplicationShouldTerminate: false)
+                    return
+                }
+                self.terminationReplyWatchdog?.cancel()
+                self.terminationReplyWatchdog = nil
+                self.terminationReplyGate = nil
+                app.reply(toApplicationShouldTerminate: result.shouldTerminate)
+                if !result.shouldTerminate {
+                    NSLog("Codex Usage Status termination cancelled: persistence %@", String(describing: result))
+                    await self.model?.resumeAfterCancelledTermination()
+                    self.terminationReplyPending = false
+                }
+            }
         }
         terminationReplyGate = gate
         let watchdog = DispatchWorkItem {
-            _ = gate.replyOnce()
+            _ = gate.replyOnce(result: .timedOut)
         }
         terminationReplyWatchdog = watchdog
         DispatchQueue.global(qos: .userInitiated).asyncAfter(
@@ -136,20 +170,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.model?.prepareForTermination()
-            self.replyToTerminationRequest()
+            let result = await self.model?.prepareForTerminationResult() ?? .saved
+            self.replyToTerminationRequest(result: result)
         }
         return .terminateLater
     }
 
     /// Replies exactly once and never lets an auxiliary shutdown task keep
     /// AppKit (and therefore the updater helper) waiting indefinitely.
-    private func replyToTerminationRequest() {
+    private func replyToTerminationRequest(result: CodexUsageTerminationPreparationResult) {
         guard terminationReplyPending, let gate = terminationReplyGate else { return }
-        guard gate.replyOnce() else { return }
-        terminationReplyWatchdog?.cancel()
-        terminationReplyWatchdog = nil
-        terminationReplyGate = nil
+        _ = gate.replyOnce(result: result)
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
