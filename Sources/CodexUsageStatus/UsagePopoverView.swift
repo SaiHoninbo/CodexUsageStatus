@@ -13,6 +13,7 @@ struct UsagePopoverView: View {
     @ObservedObject var selectionController: PopoverSelectionController
     var planLoopProjection: CodexUsageProjectionSnapshot? = nil
     var isReadOnlyPreview = false
+    var planLoopEmbeddedTab: UsagePopoverTab? = nil
     let openCodex: () -> Void
     let resetHUDPosition: () -> Void
     let quit: () -> Void
@@ -42,13 +43,15 @@ struct UsagePopoverView: View {
     @State var actionAcknowledgement: String?
     @State var actionAcknowledgementToken = UUID()
 
-    var selectedTab: UsagePopoverTab { selectionController.selectedTab }
+    var selectedTab: UsagePopoverTab { planLoopEmbeddedTab ?? selectionController.selectedTab }
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 16) {
-                header.disabled(isReadOnlyPreview)
-                tabBar
+                if planLoopEmbeddedTab == nil {
+                    header.disabled(isReadOnlyPreview)
+                    tabBar
+                }
                 tabContent.disabled(isReadOnlyPreview)
             }
             .padding(20)
@@ -59,7 +62,7 @@ struct UsagePopoverView: View {
                 }
             }
         }
-        .frame(width: 430)
+        .frame(width: planLoopEmbeddedTab == nil ? 430 : nil)
         .foregroundStyle(HUDColorPalette.primaryText)
         .background(.regularMaterial)
         .preferredColorScheme(.dark)
@@ -81,7 +84,9 @@ struct UsagePopoverView: View {
             applyPendingSettingsSection()
         }
         .onChange(of: selectionController.selectedTab) { _, tab in
-            if !isReadOnlyPreview, tab == .overview, model.accountScope != .current {
+            guard planLoopEmbeddedTab == nil || planLoopEmbeddedTab == tab else { return }
+            let visibleTab = planLoopEmbeddedTab ?? tab
+            if !isReadOnlyPreview, visibleTab == .overview, model.accountScope != .current {
                 model.setAccountScope(.current)
             }
             DispatchQueue.main.async {
@@ -89,6 +94,7 @@ struct UsagePopoverView: View {
             }
         }
         .onAppear {
+            applyPendingSettingsSection()
             didLogColdOpenFreshData = false
             coldOpenBaselineLastUpdated = model.lastUpdated
             if !isReadOnlyPreview, selectedTab == .overview, model.accountScope != .current {
@@ -199,7 +205,7 @@ struct UsagePopoverView: View {
 
     @ViewBuilder
     private var tabContent: some View {
-        switch selectedTab {
+        switch planLoopEmbeddedTab ?? selectedTab {
         case .overview:
             VStack(alignment: .leading, spacing: 12) {
                 if isReadOnlyPreview, let planLoopProjection {
@@ -305,6 +311,10 @@ struct UsagePopoverView: View {
     }
 
     private func applyPendingSettingsSection() {
+        // Embedded PlanLoop pages share the donor's selection controller.
+        // Only the settings page owns disclosure state and may consume a
+        // pending settings-section request.
+        guard planLoopEmbeddedTab == nil || planLoopEmbeddedTab == .settings else { return }
         guard let section = selectionController.consumePendingSettingsSection() else { return }
         switch section {
         case .notifications:

@@ -444,7 +444,6 @@ struct CodexFloatingHUDView: View {
         .accessibilityValue(ColdOpenPresentationPolicy.loadingDetail)
     }
 
-    @ViewBuilder
     private func hudContainer(presentation: HUDPresentation) -> some View {
         let metrics = HUDMetrics(
             scaleLevel: presentation.scaleLevel,
@@ -456,7 +455,22 @@ struct CodexFloatingHUDView: View {
             includesAccountInfoRow: presentation.showsAccountInfoRow,
             includesChatTrackingSection: !presentation.chatExecutions.isEmpty
         )
-        let displayedCredits = presentation.quota?.credits
+        let content = hudContainerContent(presentation: presentation, metrics: metrics)
+        let surface = hudContainerSurface(
+            content: content,
+            presentation: presentation,
+            metrics: metrics,
+            panelSize: panelSize,
+            cornerRadius: cornerRadius
+        )
+        return hudContainerLifecycle(to: surface, presentation: presentation)
+    }
+
+    @ViewBuilder
+    private func hudContainerContent(
+        presentation: HUDPresentation,
+        metrics: HUDMetrics
+    ) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             if !presentation.chatExecutions.isEmpty {
                 chatExecutionTrackingSection(
@@ -465,178 +479,231 @@ struct CodexFloatingHUDView: View {
                 )
                 Color.clear.frame(height: metrics.chatTrackingGap)
             }
-            VStack(alignment: .leading, spacing: 0) {
-                HUDTokenActivitySummaryView(
-                    summaryMetrics: presentation.tokenMetrics,
-                    feedback: presentation.tokenActivityFeedback,
+            hudPrimaryContent(presentation: presentation, metrics: metrics)
+        }
+    }
+
+    private func hudPrimaryContent(
+        presentation: HUDPresentation,
+        metrics: HUDMetrics
+    ) -> some View {
+        let displayedCredits = presentation.quota?.credits
+        return VStack(alignment: .leading, spacing: 0) {
+            HUDTokenActivitySummaryView(
+                summaryMetrics: presentation.tokenMetrics,
+                feedback: presentation.tokenActivityFeedback,
+                width: metrics.contentWidth,
+                height: metrics.tokenSummaryHeight,
+                scaleFactor: metrics.factor,
+                isStale: presentation.tokenActivityIsStale,
+                sourceStatusText: model.localUsageSourceAvailability == .available
+                    ? nil
+                    : model.localUsageSourceStatusText,
+                reduceMotion: presentation.reduceMotion
+            )
+            // The Token Hero consumes the theme palette from the environment.
+            // Do not put an Equatable gate in front of it: palette-only theme
+            // changes must repaint the secondary metric labels and values even
+            // when the usage payload itself is unchanged.
+            Color.clear.frame(height: metrics.tokenSummaryGap)
+            hudHeader(presentation: presentation, metrics: metrics)
+            Color.clear.frame(height: metrics.headerGap)
+            quotaStack(presentation: presentation, width: metrics.contentWidth, height: metrics.quotaRowHeight, gap: metrics.quotaGap)
+            Color.clear.frame(height: metrics.sectionGap)
+            if presentation.showsAccountInfoRow {
+                HUDAccountInfoRow(
+                    credits: displayedCredits,
+                    resetCreditCount: presentation.resetCreditCount,
+                    resetCreditCountdownText: presentation.resetCreditCountdownText,
+                    resetCreditExactExpiryText: presentation.resetCreditExactExpiryText,
                     width: metrics.contentWidth,
-                    height: metrics.tokenSummaryHeight,
-                    scaleFactor: metrics.factor,
-                    isStale: presentation.tokenActivityIsStale,
-                    sourceStatusText: model.localUsageSourceAvailability == .available
-                        ? nil
-                        : model.localUsageSourceStatusText,
-                    reduceMotion: presentation.reduceMotion
+                    sectionHeight: metrics.accountInfoSectionHeight,
+                    rowHeight: metrics.accountInfoRowHeight,
+                    scaleFactor: metrics.factor
                 )
-                // The Token Hero consumes the theme palette from the environment.
-                // Do not put an Equatable gate in front of it: palette-only theme
-                // changes must repaint the secondary metric labels and values even
-                // when the usage payload itself is unchanged.
-                Color.clear.frame(height: metrics.tokenSummaryGap)
-                hudHeader(presentation: presentation, metrics: metrics)
-                Color.clear.frame(height: metrics.headerGap)
-                quotaStack(presentation: presentation, width: metrics.contentWidth, height: metrics.quotaRowHeight, gap: metrics.quotaGap)
-                Color.clear.frame(height: metrics.sectionGap)
-                if presentation.showsAccountInfoRow {
-                    HUDAccountInfoRow(
-                        credits: displayedCredits,
-                        resetCreditCount: presentation.resetCreditCount,
-                        resetCreditCountdownText: presentation.resetCreditCountdownText,
-                        resetCreditExactExpiryText: presentation.resetCreditExactExpiryText,
-                        width: metrics.contentWidth,
-                        sectionHeight: metrics.accountInfoSectionHeight,
-                        rowHeight: metrics.accountInfoRowHeight,
-                        scaleFactor: metrics.factor
-                    )
-                }
-                Color.clear.frame(height: metrics.sectionGap)
-                actionCardsRow(presentation: presentation, metrics: metrics)
-                Color.clear.frame(height: metrics.workflowActionGap)
-                workflowShortcutsRow(presentation: presentation, metrics: metrics)
             }
-            .background {
-                GeometryReader { proxy in
-                    Color.clear.preference(
-                        key: HUDBaseContentFramePreference.self,
-                        value: proxy.frame(in: .named("CodexUsageStatusHUDPanel"))
-                    )
-                }
-            }
+            Color.clear.frame(height: metrics.sectionGap)
+            actionCardsRow(presentation: presentation, metrics: metrics)
+            Color.clear.frame(height: metrics.workflowActionGap)
+            workflowShortcutsRow(presentation: presentation, metrics: metrics)
         }
-        .padding(metrics.outerPadding)
-        .frame(width: panelSize.width, height: panelSize.height, alignment: .topLeading)
-        .coordinateSpace(name: "CodexUsageStatusHUDPanel")
-        .onPreferenceChange(HUDBaseContentFramePreference.self) { frame in
-            guard frame.width > 0, frame.height > 0 else { return }
-            baseHUDFrameChanged(frame)
-        }
-        // Keep theme surfaces behind the content.  They are panel chrome, not
-        // a foreground scrim: placing them in an overlay washes out text,
-        // controls, and the Token Reel when a theme uses an opaque surface.
         .background {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(.regularMaterial)
-                .overlay {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(selectedHUDPalette.panelSurface)
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: HUDBaseContentFramePreference.self,
+                    value: proxy.frame(in: .named("CodexUsageStatusHUDPanel"))
+                )
+            }
+        }
+    }
+
+    private func hudContainerSurface<Content: View>(
+        content: Content,
+        presentation: HUDPresentation,
+        metrics: HUDMetrics,
+        panelSize: CGSize,
+        cornerRadius: CGFloat
+    ) -> some View {
+        content
+            .padding(metrics.outerPadding)
+            .frame(width: panelSize.width, height: panelSize.height, alignment: .topLeading)
+            .coordinateSpace(name: "CodexUsageStatusHUDPanel")
+            .onPreferenceChange(HUDBaseContentFramePreference.self) { frame in
+                guard frame.width > 0, frame.height > 0 else { return }
+                baseHUDFrameChanged(frame)
+            }
+            .background(hudPanelBackground(cornerRadius: cornerRadius))
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .stroke(selectedHUDPalette.panelBorder, lineWidth: 1.0)
+                    .allowsHitTesting(false)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Codex 用量")
+            .accessibilityValue(hudAccessibilityValue(presentation: presentation))
+    }
+
+    private func hudPanelBackground(cornerRadius: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(.regularMaterial)
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(selectedHUDPalette.panelSurface)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(selectedHUDPalette.panelTint)
+            }
+    }
+
+    private func hudContainerLifecycle<Content: View>(
+        to content: Content,
+        presentation: HUDPresentation
+    ) -> some View {
+        attachHUDConnectionLifecycle(
+            to: attachHUDAccountLifecycle(
+                to: attachHUDUsageLifecycle(
+                    to: attachHUDProfileLifecycle(to: content, presentation: presentation)
+                )
+            )
+        )
+    }
+
+    private func attachHUDProfileLifecycle<Content: View>(
+        to content: Content,
+        presentation: HUDPresentation
+    ) -> some View {
+        content
+            .onAppear {
+                trackedProfileID = model.currentProfileID
+                displayedAccountEmail = AccountProfileDisplay.fullEmail(model.currentAccountEmail)
+                suppressedAccountEmail = nil
+                displayedPlan = normalizedPlanLabel(model.accountHealth?.identity.planType ?? model.snapshot?.planType)
+                cacheCurrentPresentation()
+                syncLiveBaseline()
+                quotaRowCountChanged(max(1, livePresentation?.rowCount ?? 1))
+                accountInfoRowVisibilityChanged(presentation.showsAccountInfoRow)
+                if presentation.chatExecutions.isEmpty { chatTrackingContentHeightChanged(0) }
+            }
+            .onChange(of: model.currentProfileID) { _, newProfileID in
+                // Never carry quota from one account identity into another. The
+                // panel remains mounted, but the new profile renders —/updating
+                // until it receives its own valid snapshot.
+                suppressedAccountEmail = displayedAccountEmail
+                displayedAccountEmail = nil
+                displayedPlan = nil
+                presentationCache = nil
+                quotaRowCountChanged(1)
+                accountInfoRowVisibilityChanged(false)
+                trackedProfileID = newProfileID
+                resetTracking(for: newProfileID)
+                // UsageViewModel clears the old snapshot and lastUpdated before
+                // publishing a profile switch. If the new profile already has a
+                // valid managed snapshot, recache it now even when its values are
+                // equal to the previous profile and SwiftUI coalesces onChange.
+                if newProfileID == model.currentProfileID,
+                   model.lastUpdated != nil,
+                   livePresentation != nil {
+                    cacheCurrentPresentation()
                 }
-                .overlay {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(selectedHUDPalette.panelTint)
+            }
+    }
+
+    private func attachHUDUsageLifecycle<Content: View>(
+        to content: Content
+    ) -> some View {
+        content
+            .onChange(of: model.snapshot) { _, _ in
+                cacheCurrentPresentation()
+                observePercentChange()
+                accountInfoRowVisibilityChanged(hudPresentation.showsAccountInfoRow)
+                if trackedProfileID == model.currentProfileID,
+                   let plan = normalizedPlanLabel(model.snapshot?.planType) {
+                    displayedPlan = plan
                 }
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .stroke(selectedHUDPalette.panelBorder, lineWidth: 1.0)
-                .allowsHitTesting(false)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Codex 用量")
-        .accessibilityValue(hudAccessibilityValue(presentation: presentation))
-        .onAppear {
-            trackedProfileID = model.currentProfileID
-            displayedAccountEmail = AccountProfileDisplay.fullEmail(model.currentAccountEmail)
-            suppressedAccountEmail = nil
-            displayedPlan = normalizedPlanLabel(model.accountHealth?.identity.planType ?? model.snapshot?.planType)
-            cacheCurrentPresentation()
-            syncLiveBaseline()
-            quotaRowCountChanged(max(1, livePresentation?.rowCount ?? 1))
-            accountInfoRowVisibilityChanged(presentation.showsAccountInfoRow)
-            if presentation.chatExecutions.isEmpty { chatTrackingContentHeightChanged(0) }
-        }
-        .onChange(of: model.currentProfileID) { _, newProfileID in
-            // Never carry quota from one account identity into another. The
-            // panel remains mounted, but the new profile renders —/updating
-            // until it receives its own valid snapshot.
-            suppressedAccountEmail = displayedAccountEmail
-            displayedAccountEmail = nil
-            displayedPlan = nil
-            presentationCache = nil
-            quotaRowCountChanged(1)
-            accountInfoRowVisibilityChanged(false)
-            trackedProfileID = newProfileID
-            resetTracking(for: newProfileID)
-            // UsageViewModel clears the old snapshot and lastUpdated before
-            // publishing a profile switch. If the new profile already has a
-            // valid managed snapshot, recache it now even when its values are
-            // equal to the previous profile and SwiftUI coalesces onChange.
-            if newProfileID == model.currentProfileID,
-               model.lastUpdated != nil,
-               livePresentation != nil {
+            }
+            .onChange(of: presentationCache) { _, _ in
+                quotaRowCountChanged(max(1, displayedPresentation?.rowCount ?? 1))
+                accountInfoRowVisibilityChanged(hudPresentation.showsAccountInfoRow)
+            }
+            .onChange(of: model.trackedChatExecutions) { _, executions in
+                if executions.isEmpty {
+                    chatTrackingContentHeightChanged(0)
+                }
+            }
+            .onChange(of: model.resetCredits) { _, _ in
+                accountInfoRowVisibilityChanged(hudPresentation.showsAccountInfoRow)
+            }
+            .onChange(of: model.lastUpdated) { _, newValue in
+                // A managed profile can restore a cached snapshot with the same
+                // percentage and reset timestamp as the previous account. The
+                // update marker changes independently, so use it to recache only
+                // after the new profile has delivered its own snapshot.
+                guard newValue != nil else { return }
                 cacheCurrentPresentation()
             }
-        }
-        .onChange(of: model.snapshot) { _, _ in
-            cacheCurrentPresentation()
-            observePercentChange()
-            accountInfoRowVisibilityChanged(hudPresentation.showsAccountInfoRow)
-            if trackedProfileID == model.currentProfileID,
-               let plan = normalizedPlanLabel(model.snapshot?.planType) {
-                displayedPlan = plan
+    }
+
+    private func attachHUDAccountLifecycle<Content: View>(
+        to content: Content
+    ) -> some View {
+        content
+            .onChange(of: model.accountHealth) { _, newHealth in
+                // Account health is the authoritative publication for a profile's
+                // identity. A new health snapshot clears any stale suppression
+                // and is the only point at which a replacement account email is
+                // accepted after a profile transition.
+                guard trackedProfileID == model.currentProfileID,
+                      let newHealth else { return }
+                displayedAccountEmail = AccountProfileDisplay.fullEmail(newHealth.identity.email)
+                suppressedAccountEmail = nil
+                if let plan = normalizedPlanLabel(newHealth.identity.planType) {
+                    displayedPlan = plan
+                }
             }
-        }
-        .onChange(of: presentationCache) { _, _ in
-            quotaRowCountChanged(max(1, displayedPresentation?.rowCount ?? 1))
-            accountInfoRowVisibilityChanged(hudPresentation.showsAccountInfoRow)
-        }
-        .onChange(of: model.trackedChatExecutions) { _, executions in
-            if executions.isEmpty {
-                chatTrackingContentHeightChanged(0)
+            .onChange(of: model.currentAccountEmail) { _, newValue in
+                let normalized = AccountProfileDisplay.fullEmail(newValue)
+                guard normalized != suppressedAccountEmail else { return }
+                displayedAccountEmail = normalized
+                suppressedAccountEmail = nil
             }
-        }
-        .onChange(of: model.resetCredits) { _, _ in
-            accountInfoRowVisibilityChanged(hudPresentation.showsAccountInfoRow)
-        }
-        .onChange(of: model.lastUpdated) { _, newValue in
-            // A managed profile can restore a cached snapshot with the same
-            // percentage and reset timestamp as the previous account. The
-            // update marker changes independently, so use it to recache only
-            // after the new profile has delivered its own snapshot.
-            guard newValue != nil else { return }
-            cacheCurrentPresentation()
-        }
-        .onChange(of: model.accountHealth) { _, newHealth in
-            // Account health is the authoritative publication for a profile's
-            // identity. A new health snapshot clears any stale suppression
-            // and is the only point at which a replacement account email is
-            // accepted after a profile transition.
-            guard trackedProfileID == model.currentProfileID,
-                  let newHealth else { return }
-            displayedAccountEmail = AccountProfileDisplay.fullEmail(newHealth.identity.email)
-            suppressedAccountEmail = nil
-            if let plan = normalizedPlanLabel(newHealth.identity.planType) {
-                displayedPlan = plan
+    }
+
+    private func attachHUDConnectionLifecycle<Content: View>(to content: Content) -> some View {
+        content
+            .onChange(of: model.connectionState) { _, _ in
+                syncLiveBaseline()
             }
-        }
-        .onChange(of: model.currentAccountEmail) { _, newValue in
-            let normalized = AccountProfileDisplay.fullEmail(newValue)
-            guard normalized != suppressedAccountEmail else { return }
-            displayedAccountEmail = normalized
-            suppressedAccountEmail = nil
-        }
-        .onChange(of: model.connectionState) { _, _ in
-            syncLiveBaseline()
-        }
-        .onChange(of: model.isStale) { _, _ in
-            syncLiveBaseline()
-        }
-        .task(id: decreaseAnimationID) {
-            guard decreaseAmount != nil else { return }
-            try? await Task.sleep(nanoseconds: 1_300_000_000)
-            guard !Task.isCancelled else { return }
-            decreaseAmount = nil
-        }
+            .onChange(of: model.isStale) { _, _ in
+                syncLiveBaseline()
+            }
+            .task(id: decreaseAnimationID) {
+                guard decreaseAmount != nil else { return }
+                try? await Task.sleep(nanoseconds: 1_300_000_000)
+                guard !Task.isCancelled else { return }
+                decreaseAmount = nil
+            }
     }
 
     @ViewBuilder

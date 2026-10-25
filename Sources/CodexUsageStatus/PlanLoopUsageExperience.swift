@@ -227,6 +227,84 @@ public struct CodexUsageStatusPlanLoopHUDControls: View {
     }
 }
 
+/// The donor-owned usage surfaces exposed to PlanLoop's navigation shell.
+/// Each case maps to an existing donor tab, so data and account actions remain
+/// backed by the same UsageViewModel rather than a second implementation.
+@_spi(CodexUsageStatusPlanLoopIntegration)
+public enum CodexUsageStatusPlanLoopSection: String, CaseIterable, Identifiable {
+    case overview
+    case history
+    case accounts
+    case preferences
+
+    public var id: String { rawValue }
+
+    fileprivate var usagePopoverTab: UsagePopoverTab {
+        switch self {
+        case .overview: .overview
+        case .history: .history
+        case .accounts: .accounts
+        case .preferences: .settings
+        }
+    }
+
+    fileprivate init(usagePopoverTab: UsagePopoverTab) {
+        switch usagePopoverTab {
+        case .overview: self = .overview
+        case .history: self = .history
+        case .accounts: self = .accounts
+        case .settings: self = .preferences
+        }
+    }
+}
+
+/// Embeds one existing donor tab in PlanLoop's navigation. The donor keeps
+/// its model, actions, confirmation UI, and pending-settings routing; only the
+/// donor header and tab bar are omitted in this embedded presentation.
+@MainActor
+@_spi(CodexUsageStatusPlanLoopIntegration)
+public struct CodexUsageStatusPlanLoopSectionView: View {
+    @ObservedObject private var selectionController: PopoverSelectionController
+    private let host: CodexUsageStatusPlanLoopIntegrationHost
+    private let section: CodexUsageStatusPlanLoopSection
+    private let projection: CodexUsageProjectionSnapshot
+    private let isActive: Bool
+    private let navigate: (CodexUsageStatusPlanLoopSection) -> Void
+
+    public init(
+        host: CodexUsageStatusPlanLoopIntegrationHost,
+        section: CodexUsageStatusPlanLoopSection,
+        projection: CodexUsageProjectionSnapshot,
+        isActive: Bool = true,
+        navigate: @escaping (CodexUsageStatusPlanLoopSection) -> Void
+    ) {
+        self.host = host
+        self.section = section
+        self.projection = projection
+        self.isActive = isActive
+        self.navigate = navigate
+        _selectionController = ObservedObject(wrappedValue: host.selectionController)
+    }
+
+    public var body: some View {
+        UsagePopoverView(
+            model: host.model,
+            selectionController: selectionController,
+            planLoopProjection: projection,
+            isReadOnlyPreview: host.isReadOnlyPreview,
+            openCodex: { host.onOpenCodex?() },
+            resetHUDPosition: { host.resetFloatingHUDPosition() },
+            quit: { host.onQuit?() },
+            onContentHeightChange: nil,
+            planLoopEmbeddedTab: section.usagePopoverTab
+        )
+        .onChange(of: selectionController.selectedTab) { _, tab in
+            guard isActive, tab != section.usagePopoverTab else { return }
+            navigate(CodexUsageStatusPlanLoopSection(usagePopoverTab: tab))
+        }
+    }
+}
+
 /// Reuses the donor's four existing tabs and their model-owned actions inside
 /// the PlanLoop menu-bar window; it never creates an NSStatusItem or HUD.
 @MainActor

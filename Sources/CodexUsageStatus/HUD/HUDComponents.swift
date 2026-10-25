@@ -288,6 +288,10 @@ struct HUDTokenActivitySummaryView: View, Equatable {
         LocalTokenUsageLedgerPresentation.canonicalHUDMetrics(summaryMetrics, now: Date())
     }
 
+    private var summaryHorizontalPadding: CGFloat {
+        max(7, 9 * scaleFactor)
+    }
+
     static func == (lhs: HUDTokenActivitySummaryView, rhs: HUDTokenActivitySummaryView) -> Bool {
         lhs.summaryMetrics == rhs.summaryMetrics
             && lhs.feedback == rhs.feedback
@@ -299,12 +303,12 @@ struct HUDTokenActivitySummaryView: View, Equatable {
             && lhs.reduceMotion == rhs.reduceMotion
     }
 
-    var body: some View {
+    private func summaryLayout(for metrics: [TokenActivityMetric]) -> some View {
         let gap = max(6, 8 * scaleFactor)
         let dividerWidth = max(0.6, 0.8 * scaleFactor)
-        let horizontalPadding = max(7, 9 * scaleFactor)
+        let horizontalPadding = summaryHorizontalPadding
         let availableWidth = max(0, width - (horizontalPadding * 2) - (gap * 2) - dividerWidth)
-        HStack(spacing: gap) {
+        return HStack(spacing: gap) {
             lifetimeHero(
                 metrics.first ?? TokenActivityMetric(
                     label: LocalTokenUsageLedgerPresentation.dailyObservedLabel,
@@ -318,7 +322,24 @@ struct HUDTokenActivitySummaryView: View, Equatable {
                 .padding(.vertical, max(5, 7 * scaleFactor))
             secondaryGrid(Array(metrics.dropFirst().prefix(4)), width: availableWidth * 0.48)
         }
-        .padding(.horizontal, horizontalPadding)
+    }
+
+    private func accessibilitySummary(for metrics: [TokenActivityMetric]) -> String {
+        metrics.map { "\($0.label) \($0.value)" }.joined(separator: "；")
+            + (sourceStatusText.map { "；\($0)" } ?? "")
+            + (isStale ? "；資料較舊" : "")
+    }
+
+    private var summaryHelpText: String {
+        sourceStatusText ?? (isStale
+            ? "本機今日觀測 Token；次要帳號歷史資料較舊"
+            : "本機今日觀測 Token 與帳號歷史摘要")
+    }
+
+    var body: some View {
+        let visibleMetrics = metrics
+        summaryLayout(for: visibleMetrics)
+        .padding(.horizontal, summaryHorizontalPadding)
         .frame(width: width, height: height)
         .background(palette.tokenHeroSurface, in: RoundedRectangle(cornerRadius: max(7, height * 0.18), style: .continuous))
         .overlay {
@@ -328,12 +349,8 @@ struct HUDTokenActivitySummaryView: View, Equatable {
         .opacity(isStale ? 0.88 : 1)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("本機今日 Token 與帳號歷史")
-        .accessibilityValue(
-            metrics.map { "\($0.label) \($0.value)" }.joined(separator: "；")
-                + (sourceStatusText.map { "；\($0)" } ?? "")
-                + (isStale ? "；資料較舊" : "")
-        )
-        .help(sourceStatusText ?? (isStale ? "本機今日觀測 Token；次要帳號歷史資料較舊" : "本機今日觀測 Token 與帳號歷史摘要"))
+        .accessibilityValue(accessibilitySummary(for: visibleMetrics))
+        .help(summaryHelpText)
     }
 
     private func lifetimeHero(_ metric: TokenActivityMetric, columnWidth: CGFloat) -> some View {
