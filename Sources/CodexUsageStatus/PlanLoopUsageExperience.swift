@@ -292,11 +292,11 @@ public struct CodexUsageStatusPlanLoopSectionView: View {
             selectionController: selectionController,
             planLoopProjection: projection,
             isReadOnlyPreview: host.isReadOnlyPreview,
+            planLoopEmbeddedTab: section.usagePopoverTab,
             openCodex: { host.onOpenCodex?() },
             resetHUDPosition: { host.resetFloatingHUDPosition() },
             quit: { host.onQuit?() },
-            onContentHeightChange: nil,
-            planLoopEmbeddedTab: section.usagePopoverTab
+            onContentHeightChange: nil
         )
         .onChange(of: selectionController.selectedTab) { _, tab in
             guard isActive, tab != section.usagePopoverTab else { return }
