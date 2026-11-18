@@ -23,16 +23,20 @@ final class QuotaBridgeV2Tests: XCTestCase {
 
     func testTwoWindowsAndCreditsUseIndependentObservationTimes() throws {
         let base = try fullSnapshot()
-        let patch = try UsageDataCodec.decodePatch(from: ["rateLimits": [
+        var update = try UsageDataCodec.decodeFullSnapshot(from: ["rateLimits": [
             "primary": ["usedPercent": 26, "windowDurationMins": 300, "resetsAt": 1_800_001_000],
-        ]])
-        let update = try XCTUnwrap(patch.applying(to: base, receivedAt: initial.addingTimeInterval(20)))
+            "secondary": ["usedPercent": 90, "windowDurationMins": 10_080, "resetsAt": 1_800_100_000],
+        ]], receivedAt: initial.addingTimeInterval(20))
+        // Existing client preserves prior credits when the full reply omits
+        // them. Their original observation time must remain unchanged.
+        update.rateLimitResetCredits = base.rateLimitResetCredits
+        update.resetCreditsObservedAt = base.resetCreditsObservedAt
         let result = CodexUsageQuotaV2Projection.make(profileID: UUID(), health: health, snapshot: update, ready: true)
         XCTAssertEqual(result.account?.observedAt, health.receivedAt)
         XCTAssertEqual(result.fiveHour?.remainingPercent, 74)
         XCTAssertEqual(result.fiveHour?.observedAt, initial.addingTimeInterval(20))
         XCTAssertEqual(result.sevenDay?.remainingPercent, 10)
-        XCTAssertEqual(result.sevenDay?.observedAt, initial)
+        XCTAssertEqual(result.sevenDay?.observedAt, initial.addingTimeInterval(20))
         XCTAssertEqual(result.resetCredits?.count, 3)
         XCTAssertEqual(result.resetCredits?.observedAt, initial)
     }
@@ -43,8 +47,10 @@ final class QuotaBridgeV2Tests: XCTestCase {
         let update = try XCTUnwrap(patch.applying(to: base, receivedAt: initial.addingTimeInterval(10)))
         let result = CodexUsageQuotaV2Projection.make(profileID: UUID(), health: health, snapshot: update, ready: true)
         XCTAssertNil(result.fiveHour)
-        XCTAssertEqual(result.sevenDay?.observedAt, initial)
-        XCTAssertEqual(result.resetCredits?.observedAt, initial)
+        XCTAssertNil(result.sevenDay)
+        XCTAssertNil(result.resetCredits)
+        XCTAssertEqual(update.secondaryObservedAt, initial)
+        XCTAssertEqual(update.resetCreditsObservedAt, initial)
     }
 
     func testMissingOrMalformedCreditCountIsNotAnObservedZero() throws {
@@ -86,7 +92,12 @@ final class QuotaBridgeV2Tests: XCTestCase {
             receivedAt: initial.addingTimeInterval(2), connectionState: .connected)
         gate.observeHealth(different)
         XCTAssertNil(gate.snapshot)
-        gate.observeSnapshot(first)
+        let lateNotification = try XCTUnwrap(UsageDataCodec.decodePatch(from: ["rateLimits": [
+            "primary": ["usedPercent": 26, "windowDurationMins": 300, "resetsAt": 1_800_001_000],
+        ]]).applying(to: first, receivedAt: initial.addingTimeInterval(3)))
+        gate.observeSnapshot(lateNotification)
+        XCTAssertNil(gate.snapshot)
+        gate.observeSnapshot(first) // Simulates a subsequent complete read on the new connection.
         XCTAssertNotNil(gate.snapshot)
         gate.clear() // e.g. connection loss, account notification or worker replacement
         XCTAssertNil(gate.snapshot)

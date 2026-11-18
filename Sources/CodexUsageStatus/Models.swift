@@ -177,6 +177,9 @@ struct UsageSnapshot: Equatable {
     var primaryObservedAt: Date?
     var secondaryObservedAt: Date?
     var resetCreditsObservedAt: Date?
+    /// Only an account/rateLimits/read response can establish V2 quota
+    /// attribution; unsolicited sparse notifications carry no account ID.
+    var observedFromFullRead: Bool
 
     init(
         limitId: String?,
@@ -193,7 +196,8 @@ struct UsageSnapshot: Equatable {
         credits: CreditsBalance? = nil,
         primaryObservedAt: Date? = nil,
         secondaryObservedAt: Date? = nil,
-        resetCreditsObservedAt: Date? = nil
+        resetCreditsObservedAt: Date? = nil,
+        observedFromFullRead: Bool = false
     ) {
         self.limitId = limitId
         self.limitName = limitName
@@ -210,6 +214,7 @@ struct UsageSnapshot: Equatable {
         self.primaryObservedAt = primaryObservedAt
         self.secondaryObservedAt = secondaryObservedAt
         self.resetCreditsObservedAt = resetCreditsObservedAt
+        self.observedFromFullRead = observedFromFullRead
     }
 
     var primaryRemainingPercent: Int? {
@@ -419,7 +424,8 @@ enum UsageDataCodec {
             credits: decodeCredits(source["credits"]),
             primaryObservedAt: fullyObserved(primary),
             secondaryObservedAt: fullyObserved(secondary),
-            resetCreditsObservedAt: resetCredits != nil && creditsExplicitlyObserved ? receivedAt : nil
+            resetCreditsObservedAt: resetCredits != nil && creditsExplicitlyObserved ? receivedAt : nil,
+            observedFromFullRead: true
         )
     }
 

@@ -79,7 +79,11 @@ struct CodexUsageQuotaIdentityGate {
     }
 
     mutating func observeSnapshot(_ value: UsageSnapshot) {
-        guard identityKey != nil else { return }
+        // Notifications do not carry an independently verifiable account
+        // identity. The existing client invalidates old pending reads on an
+        // account boundary; only its subsequent full response is attributable
+        // to the selected connection. Keep sparse events out of this bridge.
+        guard identityKey != nil, value.observedFromFullRead else { return }
         snapshot = value
     }
 
@@ -97,8 +101,9 @@ enum CodexUsageQuotaV2Projection {
               !identity.isEmpty else { return .notProven }
         let account = CodexUsageAccountQuotaSnapshotV2.Account(displayIdentity: identity, observedAt: health.receivedAt,
                                                               plan: health.identity.planType)
+        let attributableSnapshot = snapshot?.observedFromFullRead == true ? snapshot : nil
         func window(_ duration: Int64) -> CodexUsageAccountQuotaSnapshotV2.Window? {
-            guard let snapshot else { return nil }
+            guard let snapshot = attributableSnapshot else { return nil }
             let candidates = [(snapshot.primary, snapshot.primaryObservedAt), (snapshot.secondary, snapshot.secondaryObservedAt)]
                 .filter { $0.0?.windowDurationMins == duration }
             guard candidates.count == 1, let source = candidates[0].0,
@@ -108,7 +113,7 @@ enum CodexUsageQuotaV2Projection {
                          resetsAt: Date(timeIntervalSince1970: TimeInterval(reset)))
         }
         let credits: CodexUsageAccountQuotaSnapshotV2.ResetCredits?
-        if let snapshot, let value = snapshot.rateLimitResetCredits,
+        if let snapshot = attributableSnapshot, let value = snapshot.rateLimitResetCredits,
            let observedAt = snapshot.resetCreditsObservedAt, value.availableCount >= 0 {
             let earliest = value.availableCredits.compactMap(\.expiresAt).min()
             credits = .init(count: value.availableCount, observedAt: observedAt,
