@@ -5,7 +5,7 @@ import UserNotifications
 import AppKit
 
 @MainActor
-final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSource {
+final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSourceV2 {
     @Published private(set) var snapshot: UsageSnapshot? {
         didSet { refreshStatusItemPresentation() }
     }
@@ -115,6 +115,10 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
     let loginItemManager = LoginItemManager()
 
     private let client = CodexAppServerClient()
+    // These reflect callbacks from the selected default account, including
+    // freshness-only callbacks that do not redraw the donor's existing UI.
+    private var defaultBridgeSnapshot: UsageSnapshot?
+    private var defaultBridgeHealth: AccountHealthSnapshot?
     private var managedWorkers: [UUID: ManagedAccountWorker] = [:]
     private var managedSnapshots: [UUID: UsageSnapshot] = [:]
     private var managedTokenActivities: [UUID: TokenActivitySnapshot] = [:]
@@ -291,6 +295,7 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
             guard let self else { return }
             guard self.defaultClientEnabled else { return }
             guard !self.pendingUnidentifiedProfileBoundary else { return }
+            self.defaultBridgeSnapshot = snapshot
             let rapidDrainEvent = self.observeRapidDrain(snapshot: snapshot, profileID: self.currentProfileID)
             let semanticChange = self.snapshot.map { !$0.hasSameContent(as: snapshot) } ?? true
             // Freshness metadata remains published so stale badges and HUD
@@ -353,6 +358,8 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
             guard self.defaultClientEnabled else { return }
             self.rapidDrainDetector.reset()
             self.pendingUnidentifiedProfileBoundary = true
+            self.defaultBridgeSnapshot = nil
+            self.defaultBridgeHealth = nil
             self.snapshot = nil
             self.lastUpdated = nil
             self.tokenActivity = nil
@@ -2005,6 +2012,18 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
         )
     }
 
+    /// Per-field evidence from the selected source profile. This is not an
+    /// assertion that a separate Codex Desktop process uses the same account.
+    var accountQuotaSnapshotV2: CodexUsageAccountQuotaSnapshotV2 {
+        guard let profile = currentProfile else { return .notProven }
+        let selectedHealth = profile.isManaged ? managedAccountHealth[profile.id] : defaultBridgeHealth
+        let selectedSnapshot = profile.isManaged ? managedSnapshots[profile.id] : defaultBridgeSnapshot
+        return CodexUsageQuotaV2Projection.make(
+            profileID: profile.id, health: selectedHealth, snapshot: selectedSnapshot,
+            ready: accountHealthState == .loaded && connectionState == .connected && !pendingUnidentifiedProfileBoundary
+        )
+    }
+
     /// One shared, value-semantic warning projection used by Overview,
     /// Settings, and the floating HUD. The underlying services remain the
     /// authorities for permission, update, account, and notification state;
@@ -2384,6 +2403,7 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
            let existing = accountHealth,
            existing.hasSameContent(as: health),
            currentProfileID != nil {
+            defaultBridgeHealth = health
             if accountHealthState != .loaded { accountHealthState = .loaded }
             if accountHealthErrorMessage != nil { accountHealthErrorMessage = nil }
             return
@@ -2407,6 +2427,7 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
                 turnNotificationService.notifyAccountSwitch(profileID: selection.profile.id, displayName: selection.profile.displayName, soundEnabled: effectiveNotificationSoundEnabled)
             }
         }
+        defaultBridgeHealth = health
         currentProfileID = selection.profile.id
         accountProfiles = profileStore.accountProfiles()
         invalidateProfileQuotaSummaryCache()
@@ -2460,6 +2481,8 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
 
     private func switchToProfile(_ profile: AccountProfile) {
         rapidDrainDetector.reset()
+        defaultBridgeSnapshot = nil
+        defaultBridgeHealth = nil
         migrateLegacyIfNeeded(to: profile)
         historyStore = HistoryStore(
             fileURL: profileStore.historyURL(for: profile),

@@ -590,6 +590,7 @@ final class CodexAppServerClient {
                 var snapshot = try UsageDataCodec.decodeFullSnapshot(from: result, receivedAt: Date())
                 if snapshot.rateLimitResetCredits == nil {
                     snapshot.rateLimitResetCredits = latestSnapshot?.rateLimitResetCredits
+                    snapshot.resetCreditsObservedAt = latestSnapshot?.resetCreditsObservedAt
                 }
                 latestSnapshot = snapshot
                 reconnectAttempt = 0

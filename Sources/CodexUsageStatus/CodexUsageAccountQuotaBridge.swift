@@ -267,6 +267,11 @@ public final class CodexUsageAccountQuotaBridgeServer {
     }
 
     private func handle(_ data: Data) -> Data {
+        if CodexUsageAccountQuotaBridgeV2Codec.isSnapshotRequest(data) {
+            let snapshot = (source as? any CodexUsageAccountQuotaProjectionSourceV2)?.accountQuotaSnapshotV2 ?? .notProven
+            return (try? CodexUsageAccountQuotaBridgeV2Codec.encodeSnapshotResponse(snapshot))
+                ?? Data("{\"errorCode\":\"BRIDGE_NOT_READY\",\"protocolVersion\":2}".utf8)
+        }
         guard CodexUsageAccountQuotaBridgeCodec.isSnapshotRequest(data) else {
             return CodexUsageAccountQuotaBridgeCodec.encodeFailure("INVALID_REQUEST")
         }

@@ -26,6 +26,12 @@ let package = Package(
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]
+        ),
+        .testTarget(
+            name: "CodexUsageBridgeV2Tests",
+            dependencies: ["CodexUsageStatusCore"],
+            path: "Tests/CodexUsageBridgeV2Tests",
+            swiftSettings: [.swiftLanguageMode(.v5)]
         )
     ]
 )

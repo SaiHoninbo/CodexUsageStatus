@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 enum ConnectionState: String, Codable, Equatable {
     case disconnected
@@ -171,6 +172,11 @@ struct UsageSnapshot: Equatable {
     var rateLimitResetCredits: RateLimitResetCredits?
     var receivedAt: Date
     var credits: CreditsBalance?
+    // Timestamps belong to each fully observed component. Sparse updates
+    // must not make preserved data look newly observed.
+    var primaryObservedAt: Date?
+    var secondaryObservedAt: Date?
+    var resetCreditsObservedAt: Date?
 
     init(
         limitId: String?,
@@ -184,7 +190,10 @@ struct UsageSnapshot: Equatable {
         rateLimitResetCredits: RateLimitResetCredits? = nil,
         receivedAt: Date,
         gptReserveWeekly: RateLimitWindow? = nil,
-        credits: CreditsBalance? = nil
+        credits: CreditsBalance? = nil,
+        primaryObservedAt: Date? = nil,
+        secondaryObservedAt: Date? = nil,
+        resetCreditsObservedAt: Date? = nil
     ) {
         self.limitId = limitId
         self.limitName = limitName
@@ -198,6 +207,9 @@ struct UsageSnapshot: Equatable {
         self.rateLimitResetCredits = rateLimitResetCredits
         self.receivedAt = receivedAt
         self.credits = credits
+        self.primaryObservedAt = primaryObservedAt
+        self.secondaryObservedAt = secondaryObservedAt
+        self.resetCreditsObservedAt = resetCreditsObservedAt
     }
 
     var primaryRemainingPercent: Int? {
@@ -291,8 +303,19 @@ struct RateLimitPatch: Equatable {
             rateLimitResetCredits: base.rateLimitResetCredits,
             receivedAt: receivedAt,
             gptReserveWeekly: reserveWindow,
-            credits: creditBalance
+            credits: creditBalance,
+            primaryObservedAt: Self.updatedWindowObservation(primary, previous: base.primaryObservedAt, now: receivedAt),
+            secondaryObservedAt: Self.updatedWindowObservation(secondary, previous: base.secondaryObservedAt, now: receivedAt),
+            resetCreditsObservedAt: base.resetCreditsObservedAt
         )
+    }
+
+    private static func updatedWindowObservation(_ patch: RateLimitWindowPatch?, previous: Date?, now: Date) -> Date? {
+        guard let patch else { return previous }
+        // A partial update may combine values from different observations.
+        // Keep the UI value, but do not assert a coherent V2 observation.
+        guard patch.usedPercent != nil, patch.windowDurationMins != nil, patch.resetsAt != nil else { return nil }
+        return now
     }
 
     private static func mergeCredits(
@@ -368,19 +391,35 @@ enum UsageDataCodec {
         }
         let source = mergedLimitObject(legacy: legacy, codexBucket: codexBucket) ?? [:]
 
+        let primary = decodeWindow(source["primary"])
+        let secondary = decodeWindow(source["secondary"])
+        let resetCredits = decodeResetCredits(result["rateLimitResetCredits"])
+        let rawCreditCount = (result["rateLimitResetCredits"] as? [String: Any])?["availableCount"] as? NSNumber
+        let creditsExplicitlyObserved = rawCreditCount.map {
+            CFGetTypeID($0) != CFBooleanGetTypeID() && $0.doubleValue.isFinite
+                && $0.doubleValue.rounded(.towardZero) == $0.doubleValue
+                && $0.doubleValue >= 0 && $0.doubleValue <= Double(Int32.max)
+        } ?? false
+        func fullyObserved(_ window: RateLimitWindow?) -> Date? {
+            guard let window, window.windowDurationMins != nil, window.resetsAt != nil else { return nil }
+            return receivedAt
+        }
         return UsageSnapshot(
             limitId: string(source["limitId"]),
             limitName: string(source["limitName"]),
             planType: string(source["planType"]),
-            primary: decodeWindow(source["primary"]),
-            secondary: decodeWindow(source["secondary"]),
+            primary: primary,
+            secondary: secondary,
             individualLimit: decodeSpendControl(source["individualLimit"]),
             rateLimitReachedType: string(source["rateLimitReachedType"]),
             spendControlReached: source["spendControlReached"] as? Bool,
-            rateLimitResetCredits: decodeResetCredits(result["rateLimitResetCredits"]),
+            rateLimitResetCredits: resetCredits,
             receivedAt: receivedAt,
             gptReserveWeekly: decodeGPTReserveWindow(from: result),
-            credits: decodeCredits(source["credits"])
+            credits: decodeCredits(source["credits"]),
+            primaryObservedAt: fullyObserved(primary),
+            secondaryObservedAt: fullyObserved(secondary),
+            resetCreditsObservedAt: resetCredits != nil && creditsExplicitlyObserved ? receivedAt : nil
         )
     }
 
