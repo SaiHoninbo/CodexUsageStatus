@@ -61,6 +61,41 @@ public struct CodexUsageAccountQuotaSnapshotV2: Codable, Equatable, Sendable {
 @MainActor
 public protocol CodexUsageAccountQuotaProjectionSourceV2: CodexUsageAccountQuotaProjectionSource {
     var accountQuotaSnapshotV2: CodexUsageAccountQuotaSnapshotV2 { get }
+    func refreshQuotaAccountIfNeeded()
+}
+
+public extension CodexUsageAccountQuotaProjectionSourceV2 {
+    func refreshQuotaAccountIfNeeded() {}
+}
+
+/// Only while a V2 consumer is connected, request a bounded account read
+/// before its independent observation expires. This does not alter the
+/// donor's persistent refresh preferences or consume reset credits.
+struct CodexUsageQuotaAccountRefreshPolicy {
+    enum ClientSelection: Equatable { case managed, defaultAccount, unavailable }
+    private var profileID: UUID?
+    private var lastAttemptAt: Date?
+
+    static func selectClient(isManaged: Bool, hasManagedWorker: Bool, defaultClientEnabled: Bool) -> ClientSelection {
+        if isManaged { return hasManagedWorker ? .managed : .unavailable }
+        return defaultClientEnabled ? .defaultAccount : .unavailable
+    }
+
+    mutating func shouldRefresh(profileID: UUID?, observedAt: Date?, now: Date, sourceRunning: Bool) -> Bool {
+        guard sourceRunning, let profileID, let observedAt else { return false }
+        if self.profileID != profileID {
+            self.profileID = profileID
+            lastAttemptAt = nil
+        }
+        let age = now.timeIntervalSince(observedAt)
+        guard age < 0 || age >= 90 else { return false }
+        if let lastAttemptAt {
+            let elapsed = now.timeIntervalSince(lastAttemptAt)
+            guard elapsed < 0 || elapsed >= 60 else { return false }
+        }
+        lastAttemptAt = now
+        return true
+    }
 }
 
 /// Keep quota callbacks tied to the account last read on this connection.

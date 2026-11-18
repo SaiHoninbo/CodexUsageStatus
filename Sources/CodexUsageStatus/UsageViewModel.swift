@@ -120,6 +120,7 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
     private var defaultBridgeGate = CodexUsageQuotaIdentityGate()
     private var defaultBridgeHealth: AccountHealthSnapshot?
     private var managedBridgeGates: [UUID: CodexUsageQuotaIdentityGate] = [:]
+    private var bridgeAccountRefreshPolicy = CodexUsageQuotaAccountRefreshPolicy()
     private var managedWorkers: [UUID: ManagedAccountWorker] = [:]
     private var managedSnapshots: [UUID: UsageSnapshot] = [:]
     private var managedTokenActivities: [UUID: TokenActivitySnapshot] = [:]
@@ -2035,6 +2036,31 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
             profileID: profile.id, health: selectedHealth, snapshot: selectedSnapshot,
             ready: accountHealthState == .loaded && connectionState == .connected && !pendingUnidentifiedProfileBoundary
         )
+    }
+
+    func refreshQuotaAccountIfNeeded() {
+        guard let profile = currentProfile else { return }
+        let health = profile.isManaged ? managedAccountHealth[profile.id] : defaultBridgeHealth
+        let selectedClient: CodexAppServerClient
+        switch CodexUsageQuotaAccountRefreshPolicy.selectClient(
+            isManaged: profile.isManaged, hasManagedWorker: managedWorkers[profile.id] != nil,
+            defaultClientEnabled: defaultClientEnabled
+        ) {
+        case .managed:
+            // Never fall back to the default account when a managed worker
+            // has not started or has just stopped.
+            guard let worker = managedWorkers[profile.id] else { return }
+            selectedClient = worker.client
+        case .defaultAccount:
+            selectedClient = client
+        case .unavailable:
+            return
+        }
+        guard bridgeAccountRefreshPolicy.shouldRefresh(
+            profileID: profile.id, observedAt: health?.receivedAt, now: Date(),
+            sourceRunning: !isStopping && connectionState == .connected && selectedClient.isRunning
+        ) else { return }
+        selectedClient.refreshAccount()
     }
 
     /// One shared, value-semantic warning projection used by Overview,

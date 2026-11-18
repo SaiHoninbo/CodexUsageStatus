@@ -114,6 +114,22 @@ final class QuotaBridgeV2Tests: XCTestCase {
             previousIdentityKey: "email|source@example.test", currentIdentityKey: "email|source@example.test"))
     }
 
+    func testV2AccountRefreshIsBoundedAndNeverStartsAnOfflineSource() {
+        var policy = CodexUsageQuotaAccountRefreshPolicy()
+        let profile = UUID()
+        XCTAssertFalse(policy.shouldRefresh(profileID: profile, observedAt: initial, now: initial.addingTimeInterval(89), sourceRunning: true))
+        XCTAssertFalse(policy.shouldRefresh(profileID: profile, observedAt: initial, now: initial.addingTimeInterval(90), sourceRunning: false))
+        XCTAssertTrue(policy.shouldRefresh(profileID: profile, observedAt: initial, now: initial.addingTimeInterval(90), sourceRunning: true))
+        XCTAssertFalse(policy.shouldRefresh(profileID: profile, observedAt: initial, now: initial.addingTimeInterval(149), sourceRunning: true))
+        XCTAssertTrue(policy.shouldRefresh(profileID: profile, observedAt: initial, now: initial.addingTimeInterval(150), sourceRunning: true))
+        XCTAssertTrue(policy.shouldRefresh(profileID: UUID(), observedAt: initial, now: initial.addingTimeInterval(151), sourceRunning: true))
+        XCTAssertFalse(policy.shouldRefresh(profileID: nil, observedAt: initial, now: initial.addingTimeInterval(200), sourceRunning: true))
+        XCTAssertEqual(CodexUsageQuotaAccountRefreshPolicy.selectClient(isManaged: true, hasManagedWorker: false, defaultClientEnabled: true), .unavailable)
+        XCTAssertEqual(CodexUsageQuotaAccountRefreshPolicy.selectClient(isManaged: true, hasManagedWorker: true, defaultClientEnabled: false), .managed)
+        XCTAssertEqual(CodexUsageQuotaAccountRefreshPolicy.selectClient(isManaged: false, hasManagedWorker: true, defaultClientEnabled: false), .unavailable)
+        XCTAssertEqual(CodexUsageQuotaAccountRefreshPolicy.selectClient(isManaged: false, hasManagedWorker: false, defaultClientEnabled: true), .defaultAccount)
+    }
+
     func testV2RejectsUnknownCredentialFieldsAndUnsafeValues() throws {
         let snapshot = CodexUsageQuotaV2Projection.make(profileID: UUID(), health: health, snapshot: try fullSnapshot(), ready: true)
         let encoded = try CodexUsageAccountQuotaBridgeV2Codec.encodeSnapshotResponse(snapshot)
