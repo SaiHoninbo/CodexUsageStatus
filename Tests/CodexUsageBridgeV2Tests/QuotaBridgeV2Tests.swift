@@ -69,6 +69,31 @@ final class QuotaBridgeV2Tests: XCTestCase {
         XCTAssertNil(ambiguous.sevenDay)
     }
 
+    func testAccountBoundaryNeverReusesThePreviousAccountQuota() throws {
+        var gate = CodexUsageQuotaIdentityGate()
+        let first = try fullSnapshot()
+        gate.observeSnapshot(first)
+        XCTAssertNil(gate.snapshot) // A quota arriving before account identity is not attributable.
+        gate.observeHealth(health)
+        gate.observeSnapshot(first)
+        XCTAssertEqual(gate.snapshot?.primary?.usedPercent, 25)
+        gate.observeHealth(health) // A normal refresh of the same identity preserves data.
+        XCTAssertNotNil(gate.snapshot)
+
+        let different = AccountHealthSnapshot(
+            identity: .init(accountType: "chatgpt", authMode: nil, planType: "Plus",
+                            email: "other@example.test", requiresOpenAIAuth: true),
+            receivedAt: initial.addingTimeInterval(2), connectionState: .connected)
+        gate.observeHealth(different)
+        XCTAssertNil(gate.snapshot)
+        gate.observeSnapshot(first)
+        XCTAssertNotNil(gate.snapshot)
+        gate.clear() // e.g. connection loss, account notification or worker replacement
+        XCTAssertNil(gate.snapshot)
+        gate.observeSnapshot(first)
+        XCTAssertNil(gate.snapshot)
+    }
+
     func testV2RejectsUnknownCredentialFieldsAndUnsafeValues() throws {
         let snapshot = CodexUsageQuotaV2Projection.make(profileID: UUID(), health: health, snapshot: try fullSnapshot(), ready: true)
         let encoded = try CodexUsageAccountQuotaBridgeV2Codec.encodeSnapshotResponse(snapshot)

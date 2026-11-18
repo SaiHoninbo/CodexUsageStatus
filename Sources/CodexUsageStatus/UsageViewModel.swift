@@ -117,8 +117,9 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
     private let client = CodexAppServerClient()
     // These reflect callbacks from the selected default account, including
     // freshness-only callbacks that do not redraw the donor's existing UI.
-    private var defaultBridgeSnapshot: UsageSnapshot?
+    private var defaultBridgeGate = CodexUsageQuotaIdentityGate()
     private var defaultBridgeHealth: AccountHealthSnapshot?
+    private var managedBridgeGates: [UUID: CodexUsageQuotaIdentityGate] = [:]
     private var managedWorkers: [UUID: ManagedAccountWorker] = [:]
     private var managedSnapshots: [UUID: UsageSnapshot] = [:]
     private var managedTokenActivities: [UUID: TokenActivitySnapshot] = [:]
@@ -274,6 +275,10 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
         client.onStateChange = { [weak self] state, message in
             guard let self else { return }
             guard self.defaultClientEnabled else { return }
+            if state == .offline || state == .error || state == .stopped {
+                self.defaultBridgeGate.clear()
+                self.defaultBridgeHealth = nil
+            }
             if self.connectionState != state { self.connectionState = state }
             if state == .offline, self.accountHealthState != .offline { self.accountHealthState = .offline }
             if state == .offline || state == .error || state == .stopped {
@@ -295,7 +300,7 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
             guard let self else { return }
             guard self.defaultClientEnabled else { return }
             guard !self.pendingUnidentifiedProfileBoundary else { return }
-            self.defaultBridgeSnapshot = snapshot
+            self.defaultBridgeGate.observeSnapshot(snapshot)
             let rapidDrainEvent = self.observeRapidDrain(snapshot: snapshot, profileID: self.currentProfileID)
             let semanticChange = self.snapshot.map { !$0.hasSameContent(as: snapshot) } ?? true
             // Freshness metadata remains published so stale badges and HUD
@@ -358,7 +363,7 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
             guard self.defaultClientEnabled else { return }
             self.rapidDrainDetector.reset()
             self.pendingUnidentifiedProfileBoundary = true
-            self.defaultBridgeSnapshot = nil
+            self.defaultBridgeGate.clear()
             self.defaultBridgeHealth = nil
             self.snapshot = nil
             self.lastUpdated = nil
@@ -814,6 +819,7 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
         managedWorkers[id]?.stop()
         managedWorkers[id] = nil
         managedSnapshots[id] = nil
+        managedBridgeGates[id] = nil
         managedTokenActivities[id] = nil
         managedTokenActivityLastFetchedAt[id] = nil
         managedAccountHealth[id] = nil
@@ -1093,6 +1099,7 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
 
     private func ensureManagedWorker(for profile: AccountProfile) {
         guard managedWorkers[profile.id] == nil else { return }
+        managedBridgeGates[profile.id] = nil
         let worker = ManagedAccountWorker(
             profile: profile,
             codexHomeURL: profileStore.codexHomeURL(for: profile),
@@ -1114,6 +1121,9 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
         worker.onStateChange = { [weak self] _, state, message in
             guard let self else { return }
             guard self.workerGenerations[id] == generation else { return }
+            if state == .offline || state == .error || state == .stopped {
+                self.managedBridgeGates[id] = nil
+            }
             if self.workerStates[id] != state { self.workerStates[id] = state }
             if let message, !message.isEmpty {
                 if self.workerErrors[id] != message { self.workerErrors[id] = message }
@@ -1143,6 +1153,7 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
         worker.onSnapshot = { [weak self] _, snapshot in
             guard let self else { return }
             guard self.workerGenerations[id] == generation else { return }
+            self.managedBridgeGates[id, default: CodexUsageQuotaIdentityGate()].observeSnapshot(snapshot)
             let rapidDrainEvent: ObservedRapidDrainEvent?
             if self.currentProfileID == id {
                 rapidDrainEvent = self.observeRapidDrain(snapshot: snapshot, profileID: id)
@@ -1203,6 +1214,7 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
         worker.onAccountHealth = { [weak self] _, health in
             guard let self else { return }
             guard self.workerGenerations[id] == generation else { return }
+            self.managedBridgeGates[id, default: CodexUsageQuotaIdentityGate()].observeHealth(health)
             let semanticChange = self.managedAccountHealth[id].map { !$0.hasSameContent(as: health) } ?? true
             self.managedAccountHealth[id] = health
             guard semanticChange else {
@@ -1224,6 +1236,7 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
         worker.onAccountBoundary = { [weak self] _ in
             guard let self else { return }
             guard self.workerGenerations[id] == generation else { return }
+            self.managedBridgeGates[id] = nil
             // A managed CODEX_HOME can be re-authenticated in place.  Drop
             // every profile-scoped cache at that boundary so switching away
             // and back cannot resurrect the previous identity's payload.
@@ -2017,7 +2030,7 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
     var accountQuotaSnapshotV2: CodexUsageAccountQuotaSnapshotV2 {
         guard let profile = currentProfile else { return .notProven }
         let selectedHealth = profile.isManaged ? managedAccountHealth[profile.id] : defaultBridgeHealth
-        let selectedSnapshot = profile.isManaged ? managedSnapshots[profile.id] : defaultBridgeSnapshot
+        let selectedSnapshot = profile.isManaged ? managedBridgeGates[profile.id]?.snapshot : defaultBridgeGate.snapshot
         return CodexUsageQuotaV2Projection.make(
             profileID: profile.id, health: selectedHealth, snapshot: selectedSnapshot,
             ready: accountHealthState == .loaded && connectionState == .connected && !pendingUnidentifiedProfileBoundary
@@ -2403,6 +2416,7 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
            let existing = accountHealth,
            existing.hasSameContent(as: health),
            currentProfileID != nil {
+            defaultBridgeGate.observeHealth(health)
             defaultBridgeHealth = health
             if accountHealthState != .loaded { accountHealthState = .loaded }
             if accountHealthErrorMessage != nil { accountHealthErrorMessage = nil }
@@ -2427,6 +2441,7 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
                 turnNotificationService.notifyAccountSwitch(profileID: selection.profile.id, displayName: selection.profile.displayName, soundEnabled: effectiveNotificationSoundEnabled)
             }
         }
+        defaultBridgeGate.observeHealth(health)
         defaultBridgeHealth = health
         currentProfileID = selection.profile.id
         accountProfiles = profileStore.accountProfiles()
@@ -2481,7 +2496,7 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
 
     private func switchToProfile(_ profile: AccountProfile) {
         rapidDrainDetector.reset()
-        defaultBridgeSnapshot = nil
+        defaultBridgeGate.clear()
         defaultBridgeHealth = nil
         migrateLegacyIfNeeded(to: profile)
         historyStore = HistoryStore(

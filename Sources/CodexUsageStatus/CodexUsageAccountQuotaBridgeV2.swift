@@ -63,6 +63,32 @@ public protocol CodexUsageAccountQuotaProjectionSourceV2: CodexUsageAccountQuota
     var accountQuotaSnapshotV2: CodexUsageAccountQuotaSnapshotV2 { get }
 }
 
+/// Keep quota callbacks tied to the account last read on this connection.
+/// A quota received before identity, after a disconnect, or across an account
+/// change is not exposed until a subsequent quota callback arrives.
+struct CodexUsageQuotaIdentityGate {
+    private(set) var identityKey: String?
+    private(set) var snapshot: UsageSnapshot?
+
+    mutating func observeHealth(_ health: AccountHealthSnapshot) {
+        let email = health.identity.email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        guard !email.isEmpty else { clear(); return }
+        let key = [email, health.identity.accountType ?? "", health.identity.authMode ?? ""].joined(separator: "|")
+        if identityKey != key { snapshot = nil }
+        identityKey = key
+    }
+
+    mutating func observeSnapshot(_ value: UsageSnapshot) {
+        guard identityKey != nil else { return }
+        snapshot = value
+    }
+
+    mutating func clear() {
+        identityKey = nil
+        snapshot = nil
+    }
+}
+
 enum CodexUsageQuotaV2Projection {
     static func make(profileID: UUID?, health: AccountHealthSnapshot?, snapshot: UsageSnapshot?, ready: Bool)
         -> CodexUsageAccountQuotaSnapshotV2 {
@@ -156,12 +182,16 @@ public enum CodexUsageAccountQuotaBridgeV2Codec {
         let hasData = snapshot.account != nil || snapshot.fiveHour != nil || snapshot.sevenDay != nil || snapshot.resetCredits != nil
         if hasData && (snapshot.availability != .available || snapshot.account == nil || snapshot.sourceProfileID == nil) { return false }
         if let account = snapshot.account,
-           account.displayIdentity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || account.displayIdentity.utf8.count > 320 { return false }
+           account.displayIdentity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || account.displayIdentity.utf8.count > 320 || !account.observedAt.timeIntervalSince1970.isFinite { return false }
         if let plan = snapshot.account?.plan, plan.utf8.count > 128 { return false }
         for window in [snapshot.fiveHour, snapshot.sevenDay].compactMap({ $0 }) {
-            if !(0...100).contains(window.remainingPercent) { return false }
+            if !(0...100).contains(window.remainingPercent) || !window.observedAt.timeIntervalSince1970.isFinite
+                || !window.resetsAt.timeIntervalSince1970.isFinite { return false }
         }
-        if let credits = snapshot.resetCredits, credits.count < 0 { return false }
+        if let credits = snapshot.resetCredits,
+           credits.count < 0 || !credits.observedAt.timeIntervalSince1970.isFinite
+            || !(credits.earliestExpiry?.timeIntervalSince1970.isFinite ?? true) { return false }
         return true
     }
 }
