@@ -105,6 +105,15 @@ final class QuotaBridgeV2Tests: XCTestCase {
         XCTAssertNil(gate.snapshot)
     }
 
+    func testFirstIdentityAndAccountSwitchDiscardUnattributedCachedCredits() {
+        XCTAssertTrue(AccountRefreshDependencyPolicy.shouldClearUnattributedSnapshot(
+            previousIdentityKey: nil, currentIdentityKey: "email|source@example.test"))
+        XCTAssertTrue(AccountRefreshDependencyPolicy.shouldClearUnattributedSnapshot(
+            previousIdentityKey: "email|old@example.test", currentIdentityKey: "email|new@example.test"))
+        XCTAssertFalse(AccountRefreshDependencyPolicy.shouldClearUnattributedSnapshot(
+            previousIdentityKey: "email|source@example.test", currentIdentityKey: "email|source@example.test"))
+    }
+
     func testV2RejectsUnknownCredentialFieldsAndUnsafeValues() throws {
         let snapshot = CodexUsageQuotaV2Projection.make(profileID: UUID(), health: health, snapshot: try fullSnapshot(), ready: true)
         let encoded = try CodexUsageAccountQuotaBridgeV2Codec.encodeSnapshotResponse(snapshot)

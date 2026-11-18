@@ -47,6 +47,10 @@ enum AccountRefreshDependencyPolicy {
             || previousIdentityKey != currentIdentityKey
             || !hasCurrentSnapshot
     }
+
+    static func shouldClearUnattributedSnapshot(previousIdentityKey: String?, currentIdentityKey: String) -> Bool {
+        previousIdentityKey == nil || previousIdentityKey != currentIdentityKey
+    }
 }
 
 enum AppServerReplacementAdmissionPolicy {
@@ -631,7 +635,9 @@ final class CodexAppServerClient {
                 // responses; a steady-state account poll must not cancel a
                 // legitimate quota or Token Activity request in flight.
                 if shouldRefreshDependentData { invalidatePendingDataReads() }
-                if let previousKey = latestAccountIdentityKey, previousKey != identityKey {
+                if AccountRefreshDependencyPolicy.shouldClearUnattributedSnapshot(
+                    previousIdentityKey: latestAccountIdentityKey, currentIdentityKey: identityKey
+                ) {
                     latestSnapshot = nil
                 }
                 latestAccountIdentityKey = identityKey
