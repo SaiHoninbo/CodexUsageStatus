@@ -1091,6 +1091,7 @@ final class CodexLocalUsageObserver {
         let path: String
         let fileSize: UInt64
         let modificationTime: Date?
+        let creationDate: Date?
         let fileResourceIdentifier: String?
         let threadID: String?
     }
@@ -1125,6 +1126,7 @@ final class CodexLocalUsageObserver {
     private var rolloutSeedPending = false
     private var rolloutSeedMode: RolloutSeedMode?
     private var rolloutSeedBlocksScan = false
+    private var replayFilesCreatedAfter: Date?
     private var activeTurnRecoveryPending = false
     private(set) var sourceAvailability: CodexLocalUsageSourceAvailability = .checking
     private var sourceAvailabilityHandler: ((CodexLocalUsageSourceAvailability) -> Void)?
@@ -1211,9 +1213,15 @@ final class CodexLocalUsageObserver {
         return roots.contains { CodexLocalTurnActivityAuthority.normalizedRoot($0.codexHomeURL) == normalized }
     }
 
-    func start() {
+    func start(replayFilesCreatedAfter: Date? = nil) {
         stop()
         hasStarted = true
+        // Only a persisted ledger checkpoint can justify replaying files that
+        // appeared while the observer was stopped. Bound startup work to the
+        // last two days; a fresh install still seeds existing history at EOF.
+        self.replayFilesCreatedAfter = replayFilesCreatedAfter.map {
+            max($0, Date().addingTimeInterval(-2 * 24 * 60 * 60))
+        }
         updateSourceAvailability(roots.isEmpty ? .unavailable : .checking)
         lifecycleGeneration &+= 1
         observationEpoch &+= 1
@@ -1356,8 +1364,12 @@ final class CodexLocalUsageObserver {
             var didAddCursor = false
             for seed in seeds where !pathsBefore.contains(seed.path) {
                 guard self.cursors[seed.path] == nil else { continue }
+                let shouldReplay = mode == .startup
+                    && self.replayFilesCreatedAfter.map { cutoff in
+                        seed.creationDate.map { $0 > cutoff && $0 <= Date() } ?? false
+                    } == true
                 self.cursors[seed.path] = CodexLocalUsageCursor(
-                    byteOffset: seed.fileSize,
+                    byteOffset: shouldReplay ? 0 : seed.fileSize,
                     threadID: mode == .addedRoot ? seed.threadID : nil,
                     fileSize: seed.fileSize,
                     modificationTime: seed.modificationTime,
@@ -2483,6 +2495,7 @@ final class CodexLocalUsageObserver {
                         path: path,
                         fileSize: UInt64(size),
                         modificationTime: values.contentModificationDate,
+                        creationDate: values.creationDate,
                         fileResourceIdentifier: Self.portableFileIdentity(
                             fileURL: fileURL,
                             resourceIdentifier: values.fileResourceIdentifier.map { String(describing: $0) },

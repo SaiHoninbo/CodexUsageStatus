@@ -53,6 +53,7 @@ swiftc -parse-as-library \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDColorPalette.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/HUDThemePalette.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/RetiredFeatureCleanup.swift" \
+  "$ROOT_DIR/Sources/CodexUsageStatus/TerminationPreparationResult.swift" \
   "$ROOT_DIR/Sources/CodexUsageStatus/PersistenceWriteCoordinator.swift" \
   "$ROOT_DIR/Tests/CodexUsageStatusTests/TestRunner.swift" \
   -o "$BUILD_DIR/CodexUsageStatusTests"

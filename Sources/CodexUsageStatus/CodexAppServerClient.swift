@@ -781,16 +781,16 @@ final class CodexAppServerClient {
     private func checkCredentialChange() -> Bool {
         let signature = credentialSignature()
         guard observedCredentialSignature != signature else { return false }
-        observedCredentialSignature = signature
-        guard !isStopping else { return false }
+        guard !isStopping, processReplacementTask == nil else { return false }
 
         // Avoid a restart storm if the CLI refreshes its auth metadata more
-        // than once in a short interval. The next poll will still observe the
-        // latest signature and retry the boundary if necessary.
+        // than once in a short interval. Leave the new signature pending so
+        // the next poll retries the account boundary after the cooldown.
         if let lastCredentialRestartAt,
            Date().timeIntervalSince(lastCredentialRestartAt) < 30 {
             return false
         }
+        observedCredentialSignature = signature
         lastCredentialRestartAt = Date()
         restartAfterCredentialChange()
         return true

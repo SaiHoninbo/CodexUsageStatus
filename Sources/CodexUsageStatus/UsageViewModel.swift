@@ -177,7 +177,8 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
     private var localStoresLoaded = false
     private var startupTask: Task<Void, Never>?
     private var defaultClientStopTask: Task<Void, Never>?
-    private var shutdownPersistenceTask: Task<Bool, Never>?
+    private var shutdownPersistenceTask: Task<PersistenceFlushResult, Never>?
+    private var shutdownPersistenceGeneration: UInt64 = 0
     private var estimationHistoryScanTask: Task<Void, Never>?
     private var completedDurationSamples: [CodexExecutionDurationSample] = []
 
@@ -507,7 +508,7 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
             client.start()
         }
         refreshLocalUsageObserverRoots()
-        localUsageObserver?.start()
+        localUsageObserver?.start(replayFilesCreatedAfter: localTokenUsageLedgerStore.snapshot.lastObservedAt)
         startManagedWorkers()
     }
 
@@ -538,12 +539,12 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
         defaultClientStopTask?.cancel()
         defaultClientStopTask = nil
         guard shutdownPersistenceTask == nil else { return }
+        shutdownPersistenceGeneration &+= 1
         let deadline = DispatchTime.now().uptimeNanoseconds &+ TerminationFlushPolicy.timeoutNanoseconds
         shutdownPersistenceTask = Task { [historyStore, tokenActivityStore] in
-            let historyFlushed = await historyStore.flushPendingWrites(untilUptimeNanoseconds: deadline)
-            let tokenActivityFlushed = await tokenActivityStore.flushPendingWrites(untilUptimeNanoseconds: deadline)
-            let coordinatorFlushed = await PersistenceWriteCoordinator.shared.flush(untilUptimeNanoseconds: deadline)
-            return historyFlushed && tokenActivityFlushed && coordinatorFlushed
+            _ = await historyStore.flushPendingWritesResult(untilUptimeNanoseconds: deadline)
+            _ = await tokenActivityStore.flushPendingWritesResult(untilUptimeNanoseconds: deadline)
+            return await PersistenceWriteCoordinator.shared.flushResult(untilUptimeNanoseconds: deadline)
         }
     }
 
@@ -552,29 +553,56 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
     /// primitive shared prevents the helper's direct SIGTERM from bypassing
     /// observer shutdown and pending history/token persistence.
     @discardableResult
-    private func prepareForBoundedShutdownHandoff() async -> Bool {
+    private func prepareForBoundedShutdownHandoff() async -> PersistenceFlushResult {
         if !boundedShutdownHandoffCompleted {
             if !isStopping { stop() }
             // `stop()` schedules the stores against one shared deadline. Await
             // that exact task; otherwise an empty coordinator could report
             // ready before the stores enqueue their final writes.
-            boundedShutdownHandoffCompleted = await shutdownPersistenceTask?.value ?? false
+            guard let shutdownPersistenceTask else { return .timedOut }
+            let generation = shutdownPersistenceGeneration
+            let result = await shutdownPersistenceTask.value
+            guard generation == shutdownPersistenceGeneration, isStopping else { return result }
+            boundedShutdownHandoffCompleted = result == .saved
+            return result
         }
-        return boundedShutdownHandoffCompleted
+        return .saved
     }
 
     /// Bounded termination hook used by AppDelegate's terminate-later reply.
     /// All disk work happens off the main actor and is capped by the shared
     /// coordinator timeout so shutdown cannot hang indefinitely.
-    func prepareForTermination() async {
-        _ = await prepareForBoundedShutdownHandoff()
+    func prepareForTermination() async -> CodexUsageTerminationPreparationResult {
+        switch await prepareForBoundedShutdownHandoff() {
+        case .saved: return .saved
+        case .writeFailed: return .persistenceFailure
+        case .timedOut: return .timedOut
+        }
+    }
+
+    func resumeAfterCancelledTermination() async {
+        if let shutdownPersistenceTask {
+            _ = await shutdownPersistenceTask.value
+        }
+        shutdownPersistenceGeneration &+= 1
+        boundedShutdownHandoffCompleted = false
+        shutdownPersistenceTask = nil
+        if isStopping {
+            localStoresLoaded = false
+            start()
+        }
     }
 
     /// Called after an update archive has been validated but before the helper
     /// is launched. A false result is fail-closed: no helper, SIGTERM, backup,
     /// or bundle replacement may occur when persistence did not drain.
     func prepareForUpdateReplacement() async -> Bool {
-        await prepareForBoundedShutdownHandoff()
+        let result = await prepareForBoundedShutdownHandoff()
+        guard result == .saved else {
+            await resumeAfterCancelledTermination()
+            return false
+        }
+        return true
     }
 
     func refresh() {
@@ -1461,8 +1489,9 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
                 now: record.observedAt
             )
         )
-        hudTokenActivityFeedback = localUsageSourceAvailability == .available ? feedback : nil
-        if localUsageSourceAvailability == .available,
+        let recentObservation = record.observedAt >= Date().addingTimeInterval(-300)
+        hudTokenActivityFeedback = localUsageSourceAvailability == .available && recentObservation ? feedback : nil
+        if localUsageSourceAvailability == .available, recentObservation,
            tokenActivitySoundGate.consume(feedback: feedback, enabled: effectiveTokenReelSoundEnabled) {
             tokenReelAudioPlayer.play(
                 reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -1726,6 +1755,9 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
             updateTrackedChatExecution(event)
             return
         }
+        // Startup recovery can replay older rollout records into the machine
+        // ledger. Keep those records out of all live execution projections.
+        guard event.observedAt >= Date().addingTimeInterval(-300) else { return }
         // Capture completed duration metadata before the lifecycle projection
         // removes its terminal row. Failed/interrupted Turns are excluded from
         // the completed-duration distribution.
@@ -1992,13 +2024,12 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
             .compactMap { $0 }
             .max()
         let availability: CodexUsageAccountQuotaAvailability
-        switch accountHealthState {
-        case .loaded:
-            availability = observedAt == nil ? .notProven : .available
-        case .offline, .unsupported, .error:
+        if isStopping || connectionState == .offline || connectionState == .error || connectionState == .stopped {
             availability = observedAt == nil ? .notProven : .unavailable
-        case .idle, .loading:
+        } else if connectionState != .connected || accountHealthState != .loaded {
             availability = observedAt == nil ? .notProven : .checking
+        } else {
+            availability = observedAt == nil ? .notProven : .available
         }
 
         let windows = [snapshot?.primary, snapshot?.secondary].compactMap { $0 }
@@ -2034,7 +2065,8 @@ final class UsageViewModel: ObservableObject, CodexUsageAccountQuotaProjectionSo
         let selectedSnapshot = profile.isManaged ? managedBridgeGates[profile.id]?.snapshot : defaultBridgeGate.snapshot
         return CodexUsageQuotaV2Projection.make(
             profileID: profile.id, health: selectedHealth, snapshot: selectedSnapshot,
-            ready: accountHealthState == .loaded && connectionState == .connected && !pendingUnidentifiedProfileBoundary
+            ready: !isStopping && accountHealthState == .loaded && connectionState == .connected
+                && !pendingUnidentifiedProfileBoundary
         )
     }
 

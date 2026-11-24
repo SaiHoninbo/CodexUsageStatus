@@ -132,18 +132,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard !terminationReplyPending else { return .terminateNow }
+        guard !terminationReplyPending else { return .terminateCancel }
         guard let app = NSApp else { return .terminateNow }
         terminationReplyPending = true
         let replySelector = #selector(NSApplication.reply(toApplicationShouldTerminate:))
-        let gate = TerminationReplyGate {
+        let gate = TerminationReplyGate { [weak self] result in
             // This callback intentionally runs on the watchdog queue. The
             // main queue may be inside AppKit's nested termination handshake.
-            app.perform(replySelector, with: NSNumber(value: true))
+            app.perform(replySelector, with: NSNumber(value: result.shouldTerminate))
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.terminationReplyWatchdog?.cancel()
+                self.terminationReplyWatchdog = nil
+                self.terminationReplyGate = nil
+                if !result.shouldTerminate {
+                    await self.model?.resumeAfterCancelledTermination()
+                    self.terminationReplyPending = false
+                }
+            }
         }
         terminationReplyGate = gate
         let watchdog = DispatchWorkItem {
-            _ = gate.replyOnce()
+            _ = gate.replyOnce(result: .timedOut)
         }
         terminationReplyWatchdog = watchdog
         DispatchQueue.global(qos: .userInitiated).asyncAfter(
@@ -152,20 +162,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.model?.prepareForTermination()
-            self.replyToTerminationRequest()
+            let result = await self.model?.prepareForTermination() ?? .saved
+            self.replyToTerminationRequest(result: result)
         }
         return .terminateLater
     }
 
     /// Replies exactly once and never lets an auxiliary shutdown task keep
     /// AppKit (and therefore the updater helper) waiting indefinitely.
-    private func replyToTerminationRequest() {
+    private func replyToTerminationRequest(result: CodexUsageTerminationPreparationResult) {
         guard terminationReplyPending, let gate = terminationReplyGate else { return }
-        guard gate.replyOnce() else { return }
-        terminationReplyWatchdog?.cancel()
-        terminationReplyWatchdog = nil
-        terminationReplyGate = nil
+        _ = gate.replyOnce(result: result)
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {

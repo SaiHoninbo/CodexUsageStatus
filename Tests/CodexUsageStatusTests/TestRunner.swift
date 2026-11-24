@@ -63,6 +63,23 @@ private final class LockedCounter: @unchecked Sendable {
     }
 }
 
+private final class LockedTerminationResultRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [CodexUsageTerminationPreparationResult] = []
+
+    var results: [CodexUsageTerminationPreparationResult] {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+
+    func append(_ result: CodexUsageTerminationPreparationResult) {
+        lock.lock()
+        stored.append(result)
+        lock.unlock()
+    }
+}
+
 private final class OneShotMutation: @unchecked Sendable {
     private let lock = NSLock()
     private var didFire = false
@@ -340,7 +357,8 @@ struct CodexUsageStatusTests {
         let selectedTests = tests.filter { name, _ in filters.isEmpty || filters.contains(where: name.localizedCaseInsensitiveContains) }
         let asyncTestNames = ["active execution observer epochs", "observer restart during active turns",
                               "observer restart with durable active turn evidence",
-                              "login lifecycle shutdown", "persistence write coordinator", "observer cursor persistence is async"]
+                              "login lifecycle shutdown", "persistence write coordinator", "observer cursor persistence is async",
+                              "observer recovers files created while stopped"]
         if !filters.isEmpty && selectedTests.isEmpty
             && !asyncTestNames.contains(where: { name in filters.contains(where: name.localizedCaseInsensitiveContains) }) {
             fputs("No core tests matched filters: \(filters.joined(separator: ", \n"))\n", stderr)
@@ -415,6 +433,16 @@ struct CodexUsageStatusTests {
         } catch {
             failures += 1
             print("FAIL observer cursor persistence is async: \(error)")
+        }
+        }
+        if filters.isEmpty || filters.contains(where: { "observer recovers files created while stopped".localizedCaseInsensitiveContains($0) }) {
+        asyncTestCount += 1
+        do {
+            try await testObserverRecoversFilesCreatedWhileStopped()
+            print("PASS observer recovers files created while stopped")
+        } catch {
+            failures += 1
+            print("FAIL observer recovers files created while stopped: \(error)")
         }
         }
         print("\(selectedTests.count + asyncTestCount - failures)/\(selectedTests.count + asyncTestCount) tests passed")
@@ -8207,18 +8235,20 @@ struct CodexUsageStatusTests {
     }
 
     private static func testTerminationReplyGate() throws {
-        let counter = LockedCounter()
-        let gate = TerminationReplyGate { counter.increment() }
-        try expect(gate.replyOnce(), "termination reply gate sends the first reply")
-        try expect(!gate.replyOnce(), "termination reply gate suppresses duplicate replies")
-        try expect(counter.value == 1, "termination reply gate invokes its callback exactly once")
+        let recorder = LockedTerminationResultRecorder()
+        let gate = TerminationReplyGate { recorder.append($0) }
+        try expect(gate.replyOnce(result: .persistenceFailure), "termination reply gate sends the failed-save result")
+        try expect(!gate.replyOnce(result: .saved), "termination reply gate suppresses duplicate replies")
+        try expect(recorder.results == [.persistenceFailure], "termination reply gate preserves the winning result")
+        try expect(!CodexUsageTerminationPreparationResult.persistenceFailure.shouldTerminate,
+                   "failed persistence cancels termination")
 
-        let concurrentCounter = LockedCounter()
-        let concurrentGate = TerminationReplyGate { concurrentCounter.increment() }
-        DispatchQueue.concurrentPerform(iterations: 64) { _ in
-            _ = concurrentGate.replyOnce()
+        let concurrentRecorder = LockedTerminationResultRecorder()
+        let concurrentGate = TerminationReplyGate { concurrentRecorder.append($0) }
+        DispatchQueue.concurrentPerform(iterations: 64) { index in
+            _ = concurrentGate.replyOnce(result: index.isMultiple(of: 2) ? .persistenceFailure : .timedOut)
         }
-        try expect(concurrentCounter.value == 1, "termination reply gate remains exactly-once under concurrent races")
+        try expect(concurrentRecorder.results.count == 1, "termination reply gate remains exactly-once under concurrent races")
     }
 
     private static func testPersistenceWriteCoordinator() async throws {
@@ -8278,6 +8308,39 @@ struct CodexUsageStatusTests {
         await MainActor.run { observer.stop() }
     }
 
+
+    private static func testObserverRecoversFilesCreatedWhileStopped() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-observer-recovery-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = root.appendingPathComponent("sessions.local", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let rollout = sessions.appendingPathComponent("rollout-recovery.jsonl")
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let timestamp = formatter.string(from: Date())
+        let content = [
+            #"{"type":"session_meta","payload":{"id":"thread-recovery"}}"#,
+            "{\"timestamp\":\"\(timestamp)\",\"type\":\"token_usage_record\",\"payload\":{\"thread_id\":\"thread-recovery\",\"turn_id\":\"turn-recovery\",\"turn_token_usage\":{\"total_tokens\":25},\"thread_token_usage\":{\"total_tokens\":25}}}"
+        ].joined(separator: "\n") + "\n"
+        try Data(content.utf8).write(to: rollout)
+
+        let observed = LockedCounter()
+        let observer = await MainActor.run {
+            let observer = CodexLocalUsageObserver(
+                cursorURL: root.appendingPathComponent("state/cursors.json"),
+                handler: { _, _ in observed.increment() }
+            )
+            observer.setRoots([CodexLocalUsageObservationRoot(profileID: nil, codexHomeURL: root)])
+            observer.start(replayFilesCreatedAfter: Date().addingTimeInterval(-60))
+            return observer
+        }
+        for _ in 0..<30 where observed.value == 0 {
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        await MainActor.run { observer.stop() }
+        try expect(observed.value == 1, "a rollout created after the ledger checkpoint is replayed once")
+    }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         guard condition() else { throw HarnessError.assertion(message) }
